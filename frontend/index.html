@@ -1,0 +1,1303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LLM Coder — App Factory</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/styles/github-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/highlight.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.0/marked.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:       #0d1117;
+    --surface:  #161b22;
+    --border:   #30363d;
+    --accent:   #238636;
+    --accent2:  #1f6feb;
+    --text:     #e6edf3;
+    --muted:    #7d8590;
+    --user-bg:  #1c2128;
+    --ai-bg:    #161b22;
+    --danger:   #da3633;
+    --warn:     #d29922;
+  }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ── Header ── */
+  header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 20px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  header h1 { font-size: 16px; font-weight: 600; }
+  header h1 span { color: var(--accent); }
+  .header-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+  #status-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--danger); transition: background .3s;
+  }
+  #status-dot.ok { background: var(--accent); }
+  #status-text { font-size: 12px; color: var(--muted); }
+
+  /* ── Layout ── */
+  .app { display: flex; flex: 1; overflow: hidden; }
+
+  /* ── Sidebar ── */
+  .sidebar {
+    width: 240px;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+  }
+  .sidebar-section { padding: 12px; border-bottom: 1px solid var(--border); }
+  .sidebar-section label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; display: block; margin-bottom: 6px; }
+  select, input, textarea {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 6px 8px;
+    font-size: 13px;
+    outline: none;
+  }
+  select:focus, input:focus, textarea:focus { border-color: var(--accent2); }
+
+  .model-badge {
+    display: inline-block;
+    background: #0d1117;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 2px 6px;
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 4px;
+  }
+
+  .conv-list { flex: 1; overflow-y: auto; padding: 8px; }
+  .conv-item {
+    padding: 8px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-bottom: 2px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .conv-item:hover { background: rgba(255,255,255,.05); }
+  .conv-item.active { background: rgba(35,134,54,.15); border: 1px solid rgba(35,134,54,.3); }
+  .conv-item .del-btn {
+    margin-left: auto; background: none; border: none; color: var(--muted);
+    cursor: pointer; font-size: 14px; padding: 0 2px; flex-shrink: 0;
+    display: none;
+  }
+  .conv-item:hover .del-btn { display: block; }
+  .conv-item .del-btn:hover { color: var(--danger); }
+
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 7px 14px; border-radius: 6px; border: none;
+    cursor: pointer; font-size: 13px; font-weight: 500;
+    transition: opacity .15s, background .15s;
+  }
+  .btn:hover { opacity: .85; }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-secondary { background: var(--border); color: var(--text); }
+  .btn-accent { background: var(--accent2); color: #fff; }
+  .btn-sm { padding: 4px 10px; font-size: 12px; }
+  .btn-full { width: 100%; justify-content: center; }
+
+  /* ── Tabs ── */
+  .tabs {
+    display: flex;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    flex-shrink: 0;
+  }
+  .tab {
+    padding: 10px 20px;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--muted);
+    border-bottom: 2px solid transparent;
+    transition: color .15s, border-color .15s;
+    white-space: nowrap;
+  }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--text); border-bottom-color: var(--accent2); }
+
+  /* ── Main Content ── */
+  .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  .tab-panel { display: none; flex: 1; flex-direction: column; overflow: hidden; }
+  .tab-panel.active { display: flex; }
+
+  /* ── Chat Panel ── */
+  .chat-messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .message {
+    display: flex;
+    gap: 12px;
+    max-width: 900px;
+    width: 100%;
+    animation: fadeIn .2s ease;
+  }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+  .message.user { margin-left: auto; flex-direction: row-reverse; }
+
+  .avatar {
+    width: 32px; height: 32px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px; flex-shrink: 0;
+    border: 1px solid var(--border);
+  }
+  .avatar.user-av { background: var(--accent2); }
+  .avatar.ai-av { background: var(--surface); }
+
+  .bubble {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 12px 16px;
+    max-width: calc(100% - 50px);
+    line-height: 1.6;
+    font-size: 14px;
+  }
+  .message.user .bubble {
+    background: rgba(31,111,235,.15);
+    border-color: rgba(31,111,235,.3);
+  }
+
+  /* Markdown rendering */
+  .bubble h1, .bubble h2, .bubble h3 { margin: 12px 0 6px; font-size: 15px; }
+  .bubble h1 { font-size: 18px; }
+  .bubble p { margin-bottom: 8px; }
+  .bubble ul, .bubble ol { margin: 6px 0 8px 20px; }
+  .bubble li { margin-bottom: 2px; }
+  .bubble code:not(pre code) {
+    background: rgba(255,255,255,.1);
+    padding: 1px 5px; border-radius: 4px;
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+    font-size: 13px;
+  }
+  .bubble pre {
+    margin: 8px 0; border-radius: 8px; overflow: hidden;
+    border: 1px solid var(--border);
+    position: relative;
+  }
+  .bubble pre code { font-size: 13px; padding: 14px !important; }
+  .copy-btn {
+    position: absolute; top: 6px; right: 8px;
+    background: rgba(255,255,255,.1); border: 1px solid rgba(255,255,255,.15);
+    color: #fff; border-radius: 4px; padding: 2px 8px;
+    font-size: 11px; cursor: pointer;
+    opacity: 0; transition: opacity .2s;
+  }
+  .bubble pre:hover .copy-btn { opacity: 1; }
+  .copy-btn:hover { background: rgba(255,255,255,.2); }
+
+  /* Chat input */
+  .chat-input-area {
+    padding: 16px 20px;
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+    flex-shrink: 0;
+  }
+  .input-row { display: flex; gap: 10px; align-items: flex-end; }
+  #chat-input {
+    flex: 1;
+    resize: none;
+    min-height: 44px;
+    max-height: 160px;
+    line-height: 1.5;
+    padding: 10px 14px;
+    border-radius: 8px;
+    font-size: 14px;
+    font-family: inherit;
+  }
+  #send-btn { height: 44px; padding: 0 18px; flex-shrink: 0; }
+  #send-btn:disabled { opacity: .5; cursor: not-allowed; }
+
+  .chat-meta {
+    display: flex; gap: 10px; align-items: center;
+    margin-bottom: 10px; flex-wrap: wrap;
+  }
+  .chat-meta span { font-size: 12px; color: var(--muted); }
+
+  /* System prompt toggle */
+  .system-toggle { font-size: 12px; color: var(--accent2); cursor: pointer; }
+  .system-toggle:hover { text-decoration: underline; }
+  #system-prompt-box { margin-bottom: 10px; display: none; }
+  #system-prompt { height: 80px; font-family: monospace; font-size: 12px; resize: vertical; }
+
+  /* ── Analyze Panel ── */
+  .analyze-layout {
+    display: flex;
+    gap: 0;
+    flex: 1;
+    overflow: hidden;
+  }
+  .analyze-form {
+    width: 340px;
+    flex-shrink: 0;
+    padding: 20px;
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .analyze-form h2 { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+  .analyze-form .field { display: flex; flex-direction: column; gap: 4px; }
+  .analyze-form label { font-size: 12px; color: var(--muted); }
+  .analyze-form textarea { height: 80px; resize: vertical; font-family: inherit; }
+  .analyze-output {
+    flex: 1;
+    padding: 20px;
+    overflow-y: auto;
+    font-size: 14px;
+    line-height: 1.6;
+  }
+  .analyze-output h1, .analyze-output h2, .analyze-output h3 { margin: 14px 0 6px; }
+  .analyze-output h2 { font-size: 16px; color: var(--accent2); }
+  .analyze-output h3 { font-size: 14px; }
+  .analyze-output p { margin-bottom: 8px; }
+  .analyze-output ul, .analyze-output ol { margin: 4px 0 8px 20px; }
+  .analyze-output code:not(pre code) {
+    background: rgba(255,255,255,.1); padding: 1px 5px; border-radius: 4px;
+    font-family: monospace; font-size: 12px;
+  }
+  .analyze-output pre {
+    background: #0d1117; border: 1px solid var(--border);
+    border-radius: 8px; overflow: hidden; margin: 8px 0; position: relative;
+  }
+  .analyze-output pre code { font-size: 12px; }
+  .analyze-placeholder {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    height: 100%; color: var(--muted); gap: 12px; text-align: center;
+  }
+  .analyze-placeholder svg { opacity: .3; }
+
+  /* ── Generate Panel ── */
+  .generate-layout {
+    flex: 1; display: flex; gap: 0; overflow: hidden;
+  }
+  .generate-form {
+    width: 300px; flex-shrink: 0; padding: 20px;
+    border-right: 1px solid var(--border);
+    overflow-y: auto; display: flex; flex-direction: column; gap: 14px;
+  }
+  .generate-form h2 { font-size: 15px; font-weight: 600; }
+  .generate-form .field { display: flex; flex-direction: column; gap: 4px; }
+  .generate-form label { font-size: 12px; color: var(--muted); }
+  .features-input { display: flex; gap: 6px; }
+  .features-input input { flex: 1; }
+  .feature-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+  .feature-tag {
+    background: rgba(31,111,235,.2); border: 1px solid rgba(31,111,235,.4);
+    color: var(--text); border-radius: 4px; padding: 2px 8px; font-size: 12px;
+    display: flex; align-items: center; gap: 4px;
+  }
+  .feature-tag button { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 12px; padding: 0; }
+  .generate-output { flex: 1; padding: 20px; overflow-y: auto; }
+  .generate-output pre { background: #0d1117; border: 1px solid var(--border); border-radius: 8px; overflow-x: auto; }
+
+  /* ── Models Panel ── */
+  .models-panel { padding: 24px; overflow-y: auto; max-width: 860px; }
+  .models-panel h2 { font-size: 18px; font-weight: 600; margin-bottom: 6px; }
+  .models-panel p { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+  .model-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 14px 16px; margin-bottom: 10px;
+    display: flex; align-items: center; gap: 12px;
+  }
+  .model-card .model-info { flex: 1; }
+  .model-card .model-name { font-size: 14px; font-weight: 500; }
+  .model-card .model-desc { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .model-card .model-size { font-size: 12px; color: var(--warn); margin-top: 2px; }
+  .model-status {
+    font-size: 11px; padding: 2px 8px; border-radius: 10px;
+    background: rgba(35,134,54,.2); color: #3fb950; border: 1px solid rgba(35,134,54,.3);
+  }
+  .model-status.not-installed {
+    background: rgba(255,255,255,.05); color: var(--muted); border-color: var(--border);
+  }
+  .pull-progress {
+    margin-top: 8px; font-size: 12px; color: var(--muted);
+  }
+  progress { width: 100%; height: 4px; border-radius: 2px; margin-top: 4px; }
+
+  /* ── Catalog toolbar ── */
+  .catalog-toolbar { display: flex; flex-direction: column; gap: 10px; margin-bottom: 16px; }
+  .catalog-filters { display: flex; flex-wrap: wrap; gap: 6px; }
+  .filter-btn {
+    padding: 4px 14px; border-radius: 20px; font-size: 12px;
+    border: 1px solid var(--border); background: transparent;
+    color: var(--muted); cursor: pointer; transition: all .15s;
+  }
+  .filter-btn:hover { border-color: var(--accent2); color: var(--text); }
+  .filter-btn.active { background: var(--accent2); border-color: var(--accent2); color: #fff; }
+
+  /* ── Scrollbars ── */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+  /* ── Spinner ── */
+  .spinner {
+    width: 16px; height: 16px;
+    border: 2px solid rgba(255,255,255,.2);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: spin .6s linear infinite;
+    display: inline-block;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .thinking {
+    display: flex; gap: 4px; padding: 6px 0;
+  }
+  .thinking span {
+    width: 6px; height: 6px; background: var(--muted); border-radius: 50%;
+    animation: bounce .8s infinite;
+  }
+  .thinking span:nth-child(2) { animation-delay: .15s; }
+  .thinking span:nth-child(3) { animation-delay: .3s; }
+  @keyframes bounce { 0%, 80%, 100% { transform: translateY(0); } 40% { transform: translateY(-6px); } }
+
+  .empty-state {
+    flex: 1; display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 16px; color: var(--muted); text-align: center; padding: 40px;
+  }
+  .empty-state h3 { font-size: 18px; color: var(--text); }
+  .empty-state p { font-size: 14px; max-width: 400px; }
+  .quick-prompts { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 8px; }
+  .quick-prompt {
+    padding: 8px 16px; border-radius: 20px;
+    border: 1px solid var(--border); background: var(--surface);
+    cursor: pointer; font-size: 13px; color: var(--text);
+    transition: border-color .15s;
+  }
+  .quick-prompt:hover { border-color: var(--accent2); }
+</style>
+</head>
+<body>
+
+<header>
+  <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+    <rect width="24" height="24" rx="6" fill="#238636"/>
+    <path d="M7 8h10M7 12h6M7 16h8" stroke="white" stroke-width="1.8" stroke-linecap="round"/>
+  </svg>
+  <h1>LLM <span>Coder</span> — App Factory</h1>
+  <div class="header-right">
+    <div id="status-dot"></div>
+    <span id="status-text">Connecting...</span>
+  </div>
+</header>
+
+<div class="app">
+  <!-- Sidebar -->
+  <div class="sidebar">
+    <div class="sidebar-section">
+      <label>Model</label>
+      <select id="model-select">
+        <option value="">Loading models...</option>
+      </select>
+    </div>
+
+    <div class="sidebar-section">
+      <label>Conversations</label>
+      <button class="btn btn-secondary btn-full btn-sm" onclick="newConversation()" style="margin-bottom:8px">
+        + New Chat
+      </button>
+    </div>
+
+    <div class="conv-list" id="conv-list"></div>
+
+    <div class="sidebar-section" style="margin-top:auto">
+      <label>Save Location</label>
+      <input type="text" id="save-dir-input" placeholder="~/Downloads/LLM-CODER" style="font-size:11px;margin-bottom:6px">
+      <button class="btn btn-secondary btn-full btn-sm" onclick="saveDirConfig()">Save Path</button>
+      <div id="save-dir-status" style="font-size:11px;color:var(--muted);margin-top:4px"></div>
+    </div>
+  </div>
+
+  <!-- Main -->
+  <div class="main">
+    <!-- Tabs -->
+    <div class="tabs">
+      <div class="tab active" onclick="switchTab('chat')">💬 Chat</div>
+      <div class="tab" onclick="switchTab('analyze')">🔍 App Analyzer</div>
+      <div class="tab" onclick="switchTab('generate')">⚡ Generate Project</div>
+      <div class="tab" onclick="switchTab('models')">📦 Models</div>
+    </div>
+
+    <!-- Chat Tab -->
+    <div class="tab-panel active" id="tab-chat">
+      <div class="chat-messages" id="chat-messages">
+        <div class="empty-state" id="empty-state">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z"/>
+          </svg>
+          <h3>LLM Coder</h3>
+          <p>Your local AI coding assistant. Ask anything about building mobile apps, or use the App Analyzer to plan your next project.</p>
+          <div class="quick-prompts">
+            <div class="quick-prompt" onclick="sendQuick('Build a React Native todo app with local storage')">📱 Todo App</div>
+            <div class="quick-prompt" onclick="sendQuick('Create a React Native fitness tracker with charts')">💪 Fitness App</div>
+            <div class="quick-prompt" onclick="sendQuick('Build a React Native expense tracker with categories')">💰 Expense Tracker</div>
+            <div class="quick-prompt" onclick="sendQuick('Create a React Native social recipe sharing app')">🍳 Recipe App</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="chat-input-area">
+        <div class="chat-meta">
+          <span id="token-count">Ready</span>
+          <span class="system-toggle" onclick="toggleSystemPrompt()">⚙ System prompt</span>
+        </div>
+        <div id="system-prompt-box">
+          <textarea id="system-prompt" placeholder="System instructions for the AI..."></textarea>
+        </div>
+        <div class="input-row">
+          <textarea id="chat-input" placeholder="Ask the AI to build something... (Shift+Enter for new line)" rows="1"></textarea>
+          <button class="btn btn-primary" id="send-btn" onclick="sendMessage()">Send</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Analyze Tab -->
+    <div class="tab-panel" id="tab-analyze">
+      <div class="analyze-layout">
+        <div class="analyze-form">
+          <h2>🔍 App Analyzer</h2>
+          <p style="font-size:12px;color:var(--muted)">Research a popular app, paste in its details and user complaints, and get a full development plan to build a better version.</p>
+
+          <div class="field">
+            <label>App Name</label>
+            <input type="text" id="an-name" placeholder="e.g. MyFitnessPal">
+          </div>
+          <div class="field">
+            <label>Category</label>
+            <select id="an-category">
+              <option>Health & Fitness</option>
+              <option>Productivity</option>
+              <option>Finance</option>
+              <option>Food & Drink</option>
+              <option>Social Networking</option>
+              <option>Photo & Video</option>
+              <option>Education</option>
+              <option>Entertainment</option>
+              <option>Travel</option>
+              <option>Shopping</option>
+              <option>Business</option>
+              <option>Utilities</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>App Description</label>
+            <textarea id="an-desc" placeholder="What does the app do? Paste the store description..."></textarea>
+          </div>
+          <div class="field">
+            <label>User Complaints / Review Highlights</label>
+            <textarea id="an-reviews" placeholder="Paste negative reviews or common complaints from the App Store / Play Store..."></textarea>
+          </div>
+          <div class="field">
+            <label>Your Pricing Target</label>
+            <input type="text" id="an-price" placeholder="e.g. Free with £2.99 premium" value="Free with premium upgrade">
+          </div>
+
+          <button class="btn btn-accent btn-full" onclick="analyzeApp()" id="analyze-btn">
+            Analyze & Plan
+          </button>
+        </div>
+
+        <div class="analyze-output" id="analyze-output">
+          <div class="analyze-placeholder">
+            <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2">
+              <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+              <path d="M11 8v6M8 11h6"/>
+            </svg>
+            <p>Fill in the form and click <strong>Analyze & Plan</strong> to get a full development plan, code architecture, and App Store listing copy.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Generate Tab -->
+    <div class="tab-panel" id="tab-generate">
+      <div class="generate-layout">
+        <div class="generate-form">
+          <h2>⚡ Generate Project</h2>
+          <div class="field">
+            <label>App Name</label>
+            <input type="text" id="gen-name" placeholder="My Awesome App">
+          </div>
+          <div class="field">
+            <label>Platform</label>
+            <select id="gen-platform">
+              <option value="react-native">React Native (Expo)</option>
+              <option value="flutter">Flutter</option>
+              <option value="react-native-cli">React Native CLI</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Features</label>
+            <div class="features-input">
+              <input type="text" id="gen-feature-input" placeholder="Add feature..." onkeydown="if(event.key==='Enter')addFeature()">
+              <button class="btn btn-secondary btn-sm" onclick="addFeature()">+</button>
+            </div>
+            <div class="feature-tags" id="feature-tags"></div>
+          </div>
+
+          <button class="btn btn-accent btn-full" onclick="generateProject()" id="gen-btn">
+            Generate Code
+          </button>
+
+          <div style="margin-top:8px;display:flex;flex-direction:column;gap:6px">
+            <button class="btn btn-secondary btn-full btn-sm" onclick="copyGenerateOutput()">Copy All Output</button>
+            <button class="btn btn-primary btn-full btn-sm" id="save-project-btn" onclick="saveProjectToDisk()" disabled>💾 Save to Disk</button>
+          </div>
+          <div id="save-project-status" style="font-size:12px;margin-top:6px"></div>
+        </div>
+
+        <div class="generate-output" id="generate-output" style="padding:20px;overflow-y:auto;font-size:13px;line-height:1.6">
+          <div class="analyze-placeholder">
+            <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2">
+              <polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>
+            </svg>
+            <p>Configure your app and click <strong>Generate Code</strong> to get a complete, ready-to-run project.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Models Tab -->
+    <div class="tab-panel" id="tab-models">
+      <div class="models-panel">
+        <h2>Model Library</h2>
+        <p>Browse, download, and manage local models. Your RX 9070 has ~16GB VRAM.</p>
+
+        <div class="catalog-toolbar">
+          <input type="text" id="catalog-search" placeholder="Search models..." oninput="renderModelsTab()">
+          <div class="catalog-filters">
+            <button class="filter-btn active" onclick="setCatalogFilter('all', this)">All</button>
+            <button class="filter-btn" onclick="setCatalogFilter('coding', this)">Coding</button>
+            <button class="filter-btn" onclick="setCatalogFilter('general', this)">General</button>
+            <button class="filter-btn" onclick="setCatalogFilter('vision', this)">Vision</button>
+            <button class="filter-btn" onclick="setCatalogFilter('small', this)">&lt; 4 GB</button>
+            <button class="filter-btn" onclick="setCatalogFilter('installed', this)">Installed</button>
+          </div>
+        </div>
+
+        <div id="catalog-list">
+          <p style="font-size:13px;color:var(--muted)">Loading catalog...</p>
+        </div>
+
+        <div style="margin-top:20px;padding-top:20px;border-top:1px solid var(--border)">
+          <h3 style="font-size:14px;margin-bottom:12px">Pull Custom Model</h3>
+          <div style="display:flex;gap:8px">
+            <input type="text" id="custom-model-input" placeholder="e.g. mistral:7b">
+            <button class="btn btn-secondary" onclick="pullCustomModel()">Pull</button>
+          </div>
+          <div id="custom-pull-status" style="font-size:12px;color:var(--muted);margin-top:8px"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────────────
+
+const API = 'http://localhost:8080';
+let conversations = [];
+let currentConvId = null;
+let installedModels = [];
+let isStreaming = false;
+let features = [];
+let catalog = [];
+let catalogFilter = 'all';
+
+const DEFAULT_SYSTEM = `You are an expert full-stack mobile app developer. You write clean, production-ready code.
+When asked to build an app, you:
+1. Provide complete, working code — not placeholders
+2. Use React Native (Expo) for cross-platform apps unless told otherwise
+3. Structure projects properly with separate components, screens, and services
+4. Include package.json with all dependencies
+5. Write real API integrations, not mocked data`;
+
+// ── Init ───────────────────────────────────────────────────────────────────────
+
+document.addEventListener('DOMContentLoaded', async () => {
+  document.getElementById('system-prompt').value = DEFAULT_SYSTEM;
+  checkStatus();
+  await loadConversations();
+  loadSaveDirConfig();
+  loadCatalog();
+  setInterval(checkStatus, 15000);
+  document.getElementById('model-select').addEventListener('change', e => {
+    localStorage.setItem('selectedModel', e.target.value);
+  });
+
+  const input = document.getElementById('chat-input');
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+  });
+  input.addEventListener('input', () => {
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, 160) + 'px';
+  });
+});
+
+// ── Status & Models ────────────────────────────────────────────────────────────
+
+async function checkStatus() {
+  try {
+    const r = await fetch(`${API}/api/health`);
+    const d = await r.json();
+    const dot = document.getElementById('status-dot');
+    const txt = document.getElementById('status-text');
+    if (d.ollama) {
+      dot.className = 'ok'; txt.textContent = 'Ollama connected';
+      await loadModels();
+    } else {
+      dot.className = ''; txt.textContent = 'Ollama not running';
+    }
+  } catch {
+    document.getElementById('status-dot').className = '';
+    document.getElementById('status-text').textContent = 'Backend offline';
+  }
+}
+
+async function loadModels() {
+  try {
+    const r = await fetch(`${API}/api/models`);
+    const d = await r.json();
+    installedModels = d.models || [];
+    const sel = document.getElementById('model-select');
+    const prev = sel.value;
+    sel.innerHTML = installedModels.length
+      ? installedModels.map(m => `<option value="${m}">${m}</option>`).join('')
+      : '<option value="">No models installed</option>';
+    const saved = localStorage.getItem('selectedModel');
+    if (saved && installedModels.includes(saved)) sel.value = saved;
+    else if (prev && installedModels.includes(prev)) sel.value = prev;
+    renderModelsTab();
+  } catch {}
+}
+
+// ── Conversations ──────────────────────────────────────────────────────────────
+
+async function loadConversations() {
+  try {
+    const r = await fetch(`${API}/api/conversations`);
+    conversations = await r.json();
+  } catch {
+    conversations = JSON.parse(localStorage.getItem('llm_conversations') || '[]');
+  }
+  renderConvList();
+  if (conversations.length) loadConversation(conversations[0].id);
+}
+
+function saveConvs() {
+  localStorage.setItem('llm_conversations', JSON.stringify(conversations));
+  fetch(`${API}/api/conversations`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(conversations)
+  }).catch(() => {});
+}
+
+function newConversation() {
+  const id = Date.now().toString();
+  conversations.unshift({ id, title: 'New Chat', messages: [], created: Date.now() });
+  currentConvId = id;
+  saveConvs();
+  renderConvList();
+  renderMessages();
+  document.getElementById('empty-state').style.display = 'flex';
+}
+
+function loadConversation(id) {
+  currentConvId = id;
+  renderConvList();
+  renderMessages();
+  const conv = conversations.find(c => c.id === id);
+  const empty = document.getElementById('empty-state');
+  empty.style.display = conv && conv.messages.length ? 'none' : 'flex';
+}
+
+function deleteConversation(id, e) {
+  e.stopPropagation();
+  conversations = conversations.filter(c => c.id !== id);
+  if (currentConvId === id) { currentConvId = null; renderMessages(); }
+  saveConvs();
+  renderConvList();
+}
+
+function renderConvList() {
+  const list = document.getElementById('conv-list');
+  if (!conversations.length) {
+    list.innerHTML = '<div style="padding:12px;font-size:12px;color:var(--muted);text-align:center">No conversations yet</div>';
+    return;
+  }
+  list.innerHTML = conversations.map(c => `
+    <div class="conv-item ${c.id === currentConvId ? 'active' : ''}" onclick="loadConversation('${c.id}')">
+      <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">💬 ${escHtml(c.title)}</span>
+      <button class="del-btn" onclick="deleteConversation('${c.id}', event)">×</button>
+    </div>
+  `).join('');
+}
+
+function currentConv() { return conversations.find(c => c.id === currentConvId); }
+
+// ── Chat ───────────────────────────────────────────────────────────────────────
+
+function renderMessages() {
+  const container = document.getElementById('chat-messages');
+  const conv = currentConv();
+  if (!conv || !conv.messages.length) {
+    container.innerHTML = '';
+    const empty = document.createElement('div');
+    empty.className = 'empty-state'; empty.id = 'empty-state';
+    empty.innerHTML = `
+      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <path d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z"/>
+      </svg>
+      <h3>LLM Coder</h3>
+      <p>Your local AI coding assistant. Ask anything about building mobile apps.</p>
+      <div class="quick-prompts">
+        <div class="quick-prompt" onclick="sendQuick('Build a React Native todo app with local storage')">📱 Todo App</div>
+        <div class="quick-prompt" onclick="sendQuick('Create a React Native fitness tracker with charts')">💪 Fitness App</div>
+        <div class="quick-prompt" onclick="sendQuick('Build a React Native expense tracker with categories')">💰 Expense Tracker</div>
+        <div class="quick-prompt" onclick="sendQuick('Create a React Native social recipe sharing app')">🍳 Recipe App</div>
+      </div>
+    `;
+    container.appendChild(empty);
+    return;
+  }
+  container.innerHTML = conv.messages.map(renderMsg).join('');
+  addCopyButtons();
+  hljs.highlightAll();
+  container.scrollTop = container.scrollHeight;
+}
+
+function renderMsg(msg) {
+  const isUser = msg.role === 'user';
+  const content = isUser ? escHtml(msg.content).replace(/\n/g, '<br>') : marked.parse(msg.content);
+  return `
+    <div class="message ${isUser ? 'user' : ''}">
+      <div class="avatar ${isUser ? 'user-av' : 'ai-av'}">${isUser ? '👤' : '🤖'}</div>
+      <div class="bubble">${content}</div>
+    </div>
+  `;
+}
+
+function addCopyButtons() {
+  document.querySelectorAll('.bubble pre').forEach(pre => {
+    if (pre.querySelector('.copy-btn')) return;
+    const btn = document.createElement('button');
+    btn.className = 'copy-btn'; btn.textContent = 'Copy';
+    btn.onclick = () => {
+      navigator.clipboard.writeText(pre.querySelector('code')?.textContent || '');
+      btn.textContent = 'Copied!';
+      setTimeout(() => btn.textContent = 'Copy', 2000);
+    };
+    pre.style.position = 'relative';
+    pre.appendChild(btn);
+  });
+}
+
+function sendQuick(text) {
+  if (!currentConvId) newConversation();
+  document.getElementById('chat-input').value = text;
+  sendMessage();
+}
+
+async function sendMessage() {
+  const input = document.getElementById('chat-input');
+  const text = input.value.trim();
+  if (!text || isStreaming) return;
+
+  const model = document.getElementById('model-select').value;
+  if (!model) { alert('Please select a model first'); return; }
+
+  if (!currentConvId) newConversation();
+
+  const conv = currentConv();
+  conv.messages.push({ role: 'user', content: text });
+  if (conv.title === 'New Chat') conv.title = text.slice(0, 40);
+  saveConvs();
+
+  input.value = '';
+  input.style.height = 'auto';
+  document.getElementById('empty-state')?.remove();
+
+  renderMessages();
+
+  // Add AI bubble
+  const container = document.getElementById('chat-messages');
+  const thinkDiv = document.createElement('div');
+  thinkDiv.className = 'message';
+  thinkDiv.id = 'thinking-msg';
+  thinkDiv.innerHTML = `
+    <div class="avatar ai-av">🤖</div>
+    <div class="bubble"><div class="thinking"><span></span><span></span><span></span></div></div>
+  `;
+  container.appendChild(thinkDiv);
+  container.scrollTop = container.scrollHeight;
+
+  const sendBtn = document.getElementById('send-btn');
+  sendBtn.disabled = true; isStreaming = true;
+
+  let fullText = '';
+
+  try {
+    const system = document.getElementById('system-prompt').value;
+    const res = await fetch(`${API}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, messages: conv.messages, system })
+    });
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+
+    thinkDiv.querySelector('.bubble').innerHTML = '';
+    const bubbleEl = thinkDiv.querySelector('.bubble');
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const lines = decoder.decode(value).split('\n').filter(Boolean);
+      for (const line of lines) {
+        try {
+          const data = JSON.parse(line);
+          if (data.message?.content) {
+            fullText += data.message.content;
+            bubbleEl.innerHTML = marked.parse(fullText);
+            addCopyButtons();
+            hljs.highlightAll();
+            container.scrollTop = container.scrollHeight;
+          }
+        } catch {}
+      }
+    }
+  } catch (err) {
+    document.getElementById('thinking-msg').querySelector('.bubble').textContent =
+      'Error: ' + err.message;
+  }
+
+  conv.messages.push({ role: 'assistant', content: fullText });
+  saveConvs();
+  renderConvList();
+
+  thinkDiv.id = '';
+  isStreaming = false;
+  sendBtn.disabled = false;
+}
+
+// ── App Analyzer ───────────────────────────────────────────────────────────────
+
+async function analyzeApp() {
+  const model = document.getElementById('model-select').value;
+  if (!model) { alert('Select a model first'); return; }
+
+  const name = document.getElementById('an-name').value.trim();
+  if (!name) { alert('Enter an app name'); return; }
+
+  const output = document.getElementById('analyze-output');
+  output.innerHTML = '<div style="padding:20px;color:var(--muted)"><div class="thinking"><span></span><span></span><span></span></div> Analyzing...</div>';
+
+  const btn = document.getElementById('analyze-btn');
+  btn.disabled = true; btn.textContent = 'Analyzing...';
+
+  let text = '';
+
+  try {
+    const res = await fetch(`${API}/api/analyze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        app_name: name,
+        category: document.getElementById('an-category').value,
+        description: document.getElementById('an-desc').value,
+        reviews: document.getElementById('an-reviews').value,
+        price_target: document.getElementById('an-price').value,
+      })
+    });
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    output.innerHTML = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const lines = decoder.decode(value).split('\n').filter(Boolean);
+      for (const line of lines) {
+        try {
+          const data = JSON.parse(line);
+          if (data.message?.content) {
+            text += data.message.content;
+            output.innerHTML = marked.parse(text);
+            output.querySelectorAll('pre code').forEach(el => hljs.highlightElement(el));
+            output.scrollTop = output.scrollHeight;
+          }
+        } catch {}
+      }
+    }
+  } catch (err) {
+    output.innerHTML = `<p style="color:var(--danger)">Error: ${err.message}</p>`;
+  }
+
+  btn.disabled = false; btn.textContent = 'Analyze & Plan';
+}
+
+// ── Project Generator ──────────────────────────────────────────────────────────
+
+function addFeature() {
+  const input = document.getElementById('gen-feature-input');
+  const val = input.value.trim();
+  if (!val || features.includes(val)) { input.value = ''; return; }
+  features.push(val);
+  input.value = '';
+  renderFeatureTags();
+}
+
+function removeFeature(f) {
+  features = features.filter(x => x !== f);
+  renderFeatureTags();
+}
+
+function renderFeatureTags() {
+  document.getElementById('feature-tags').innerHTML = features.map(f => `
+    <span class="feature-tag">${escHtml(f)}
+      <button onclick="removeFeature('${escHtml(f)}')">×</button>
+    </span>
+  `).join('');
+}
+
+async function generateProject() {
+  const model = document.getElementById('model-select').value;
+  if (!model) { alert('Select a model first'); return; }
+  const name = document.getElementById('gen-name').value.trim();
+  if (!name) { alert('Enter an app name'); return; }
+
+  const output = document.getElementById('generate-output');
+  output.innerHTML = '<div style="padding:20px;color:var(--muted)"><div class="thinking"><span></span><span></span><span></span></div> Generating project...</div>';
+
+  lastGeneratedAppName = name;
+  lastGeneratedContent = '';
+  document.getElementById('save-project-btn').disabled = true;
+  document.getElementById('save-project-status').textContent = '';
+
+  const btn = document.getElementById('gen-btn');
+  btn.disabled = true; btn.textContent = 'Generating...';
+
+  let text = '';
+
+  try {
+    const res = await fetch(`${API}/api/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        app_name: name,
+        platform: document.getElementById('gen-platform').value,
+        features,
+      })
+    });
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    output.innerHTML = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const lines = decoder.decode(value).split('\n').filter(Boolean);
+      for (const line of lines) {
+        try {
+          const data = JSON.parse(line);
+          if (data.message?.content) {
+            text += data.message.content;
+            output.innerHTML = '<pre><code>' + escHtml(text) + '</code></pre>';
+          }
+        } catch {}
+      }
+    }
+    lastGeneratedContent = text;
+    output.innerHTML = marked.parse(text);
+    output.querySelectorAll('pre code').forEach(el => hljs.highlightElement(el));
+    document.getElementById('save-project-btn').disabled = false;
+  } catch (err) {
+    output.innerHTML = `<p style="color:var(--danger)">Error: ${err.message}</p>`;
+  }
+
+  btn.disabled = false; btn.textContent = 'Generate Code';
+}
+
+function copyGenerateOutput() {
+  const output = document.getElementById('generate-output');
+  navigator.clipboard.writeText(output.innerText);
+}
+
+// ── Models Tab ─────────────────────────────────────────────────────────────────
+
+async function loadCatalog() {
+  try {
+    const r = await fetch(`${API}/api/models/catalog`);
+    const d = await r.json();
+    catalog = d.catalog || [];
+    renderModelsTab();
+  } catch { catalog = []; }
+}
+
+function setCatalogFilter(filter, btn) {
+  catalogFilter = filter;
+  document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  renderModelsTab();
+}
+
+function renderModelsTab() {
+  const search = (document.getElementById('catalog-search')?.value || '').toLowerCase();
+  const isInstalled = name => installedModels.some(im => im === name || im.startsWith(name.split(':')[0] + ':'));
+
+  let items = catalog.filter(m => {
+    if (catalogFilter === 'small')     return m.size_gb < 4;
+    if (catalogFilter === 'installed') return isInstalled(m.name);
+    if (catalogFilter !== 'all')       return m.category === catalogFilter;
+    return true;
+  }).filter(m => !search || m.name.toLowerCase().includes(search) || m.desc.toLowerCase().includes(search));
+
+  // Prepend any installed models not in the catalog (custom pulls)
+  if (catalogFilter === 'installed' || catalogFilter === 'all') {
+    const catalogNames = new Set(catalog.map(m => m.name));
+    const extra = installedModels
+      .filter(n => !catalogNames.has(n) && (!search || n.toLowerCase().includes(search)))
+      .map(n => ({ name: n, desc: 'Custom / unlisted model', size_gb: null, category: 'general' }));
+    if (catalogFilter === 'installed') items = [...extra, ...items];
+    else items = [...items, ...extra];
+  }
+
+  const el = document.getElementById('catalog-list');
+  if (!el) return;
+
+  if (!items.length) {
+    el.innerHTML = '<p style="font-size:13px;color:var(--muted)">No models match your search.</p>';
+    return;
+  }
+
+  el.innerHTML = items.map(m => {
+    const installed = isInstalled(m.name);
+    const id = m.name.replace(/[:.]/g, '_');
+    const sizeLabel = m.size_gb == null ? '' : m.size_gb >= 20 ? `${m.size_gb} GB — needs CPU offload` : `${m.size_gb} GB`;
+    return `
+      <div class="model-card" id="card-${id}">
+        <div class="model-info">
+          <div class="model-name">${m.name}</div>
+          <div class="model-desc">${m.desc}</div>
+          ${sizeLabel ? `<div class="model-size">${sizeLabel}</div>` : ''}
+          <div class="pull-progress" id="progress-${id}"></div>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">
+          <span class="model-status ${installed ? '' : 'not-installed'}">${installed ? 'Installed' : 'Not installed'}</span>
+          ${installed
+            ? `<button class="btn btn-accent btn-sm" onclick="useModel('${m.name}')">Use</button>
+               <button class="btn btn-secondary btn-sm" onclick="deleteModel('${m.name}')">Remove</button>`
+            : `<button class="btn btn-accent btn-sm" onclick="pullModel('${m.name}', document.getElementById('progress-${id}'))">Pull</button>`
+          }
+        </div>
+      </div>`;
+  }).join('');
+}
+
+async function pullModel(modelName, progressEl) {
+  const id = modelName.replace(/[:.]/g, '_');
+  progressEl.innerHTML = `<progress max="100" value="0" id="pb-${id}"></progress><div id="pstatus-${id}">Starting download...</div>`;
+  try {
+    const res = await fetch(`${API}/api/models/pull`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: modelName })
+    });
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      for (const line of decoder.decode(value).split('\n').filter(Boolean)) {
+        try {
+          const d = JSON.parse(line);
+          const st = document.getElementById(`pstatus-${id}`);
+          const pb = document.getElementById(`pb-${id}`);
+          if (st) st.textContent = d.status || '';
+          if (pb && d.total && d.completed) pb.value = Math.round((d.completed / d.total) * 100);
+        } catch {}
+      }
+    }
+    progressEl.innerHTML = '<span style="color:var(--accent)">✓ Download complete</span>';
+    await loadModels();
+  } catch (err) {
+    progressEl.innerHTML = `<span style="color:var(--danger)">Error: ${err.message}</span>`;
+  }
+}
+
+function useModel(name) {
+  const sel = document.getElementById('model-select');
+  if (installedModels.includes(name)) {
+    sel.value = name;
+    localStorage.setItem('selectedModel', name);
+    switchTab('chat');
+  }
+}
+
+async function deleteModel(name) {
+  if (!confirm(`Remove model "${name}"?`)) return;
+  await fetch(`${API}/api/models/${encodeURIComponent(name)}`, { method: 'DELETE' });
+  await loadModels();
+}
+
+async function pullCustomModel() {
+  const input = document.getElementById('custom-model-input');
+  const name = input.value.trim();
+  if (!name) return;
+  const progressEl = document.getElementById('custom-pull-status');
+  await pullModel(name, progressEl);
+  input.value = '';
+}
+
+// ── UI Helpers ─────────────────────────────────────────────────────────────────
+
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach((t, i) => {
+    const names = ['chat', 'analyze', 'generate', 'models'];
+    t.classList.toggle('active', names[i] === name);
+  });
+  document.querySelectorAll('.tab-panel').forEach(p => {
+    p.classList.toggle('active', p.id === 'tab-' + name);
+  });
+}
+
+function toggleSystemPrompt() {
+  const box = document.getElementById('system-prompt-box');
+  box.style.display = box.style.display === 'block' ? 'none' : 'block';
+}
+
+function escHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+marked.setOptions({ breaks: true });
+
+// ── Save Location Config ───────────────────────────────────────────────────────
+
+let saveDir = '';
+let lastGeneratedAppName = '';
+let lastGeneratedContent = '';
+
+async function loadSaveDirConfig() {
+  try {
+    const r = await fetch(`${API}/api/config`);
+    const cfg = await r.json();
+    saveDir = cfg.save_dir || '';
+    document.getElementById('save-dir-input').value = saveDir;
+  } catch {}
+}
+
+async function saveDirConfig() {
+  const val = document.getElementById('save-dir-input').value.trim();
+  const status = document.getElementById('save-dir-status');
+  if (!val) { status.textContent = 'Enter a path first'; return; }
+  try {
+    await fetch(`${API}/api/config`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ save_dir: val })
+    });
+    saveDir = val;
+    status.style.color = 'var(--accent)';
+    status.textContent = '✓ Saved';
+    setTimeout(() => status.textContent = '', 2000);
+  } catch (err) {
+    status.style.color = 'var(--danger)';
+    status.textContent = 'Error: ' + err.message;
+  }
+}
+
+// ── Save Project to Disk ───────────────────────────────────────────────────────
+
+async function saveProjectToDisk() {
+  const btn = document.getElementById('save-project-btn');
+  const status = document.getElementById('save-project-status');
+  if (!lastGeneratedContent) { status.textContent = 'Generate a project first'; return; }
+
+  btn.disabled = true;
+  btn.textContent = 'Saving...';
+  status.style.color = 'var(--muted)';
+  status.textContent = '';
+
+  try {
+    const r = await fetch(`${API}/api/save-project`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        app_name: lastGeneratedAppName,
+        content: lastGeneratedContent,
+        save_dir: document.getElementById('save-dir-input').value.trim() || saveDir
+      })
+    });
+
+    if (!r.ok) {
+      const err = await r.json();
+      throw new Error(err.detail || 'Save failed');
+    }
+
+    const result = await r.json();
+    status.style.color = 'var(--accent)';
+    status.innerHTML = `✓ Saved ${result.file_count} files to:<br><code style="font-size:10px;word-break:break-all">${result.project_dir}</code>`;
+  } catch (err) {
+    status.style.color = 'var(--danger)';
+    status.textContent = 'Error: ' + err.message;
+  }
+
+  btn.disabled = false;
+  btn.textContent = '💾 Save to Disk';
+}
+</script>
+</body>
+</html>
