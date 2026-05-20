@@ -1,6 +1,10 @@
+import asyncio
 import json
 import os
 import re
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 
 import httpx
@@ -68,8 +72,118 @@ class SaveProjectRequest(BaseModel):
     content: str
     save_dir: str = ""
 
+class ExecuteRequest(BaseModel):
+    language: str = "javascript"
+    code: str
+
+
+# ── Sandboxed Code Runner ──────────────────────────────────────────────────────
+
+BLOCKED_PATTERNS = [
+    "os.system(", "subprocess.", "shutil.rmtree(", "shutil.move(",
+    "eval(", "exec(", "__import__(",
+]
+
+SANDBOX_JS_WRAPPER = """\
+const { vm: vmModule } = require('vm');
+const vm = new vmModule.Script(code);
+"""
+
+@app.get("/api/runtimes")
+async def check_runtimes():
+    available = []
+    for cmds, label in [
+        (["node", "--version"], "node"),
+        (["python3", "--version"], "python3"),
+        (["python", "--version"], "python"),
+    ]:
+        try:
+            r = subprocess.run(cmds, capture_output=True, text=True, timeout=5)
+            if r.returncode == 0:
+                available.append({"name": label, "version": r.stdout.strip()})
+        except FileNotFoundError:
+            pass
+    return {"runtimes": available}
+
+@app.post("/api/execute")
+async def execute_code(req: ExecuteRequest):
+    code = req.code.strip()
+    if not code:
+        raise HTTPException(422, "No code provided")
+
+    if req.language == "python":
+        for pat in BLOCKED_PATTERNS:
+            if pat in code:
+                raise HTTPException(422, f"Blocked dangerous pattern: '{pat}'")
+
+    cmd = {"javascript": "node", "python": "python3"}.get(req.language, "node")
+    suffix = {"javascript": ".js", "python": ".py"}.get(req.language, ".js")
+
+    if shutil.which(cmd) is None:
+        raise HTTPException(400, f"Runtime '{cmd}' not found on this system")
+
+    async def stream():
+        tmp = tempfile.mkdtemp(prefix="llm-coder-")
+        try:
+            filepath = os.path.join(tmp, f"code{suffix}")
+            with open(filepath, "w") as f:
+                f.write(code)
+
+            proc = await asyncio.create_subprocess_exec(
+                cmd, filepath,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=tmp,
+                env={"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")},
+            )
+
+            async def pipe_lines(stream, label):
+                while True:
+                    line = await stream.readline()
+                    if not line:
+                        break
+                    yield json.dumps({"type": label, "text": line.decode(errors="replace")}) + "\n"
+
+            async for line in pipe_lines(proc.stdout, "stdout"):
+                yield line
+            async for line in pipe_lines(proc.stderr, "stderr"):
+                yield line
+
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=30)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                yield json.dumps({"type": "error", "text": "Execution timed out (30s)\n"}) + "\n"
+                return
+
+            yield json.dumps({"type": "exit", "code": proc.returncode}) + "\n"
+
+        except FileNotFoundError:
+            yield json.dumps({"type": "error", "text": f"Runtime '{cmd}' not found\n"}) + "\n"
+        except Exception as e:
+            yield json.dumps({"type": "error", "text": f"{e}\n"}) + "\n"
+        finally:
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    return StreamingResponse(stream(), media_type="application/x-ndjson")
+
 
 # ── Health ─────────────────────────────────────────────────────────────────────
+
+@app.get("/api/system/ram")
+async def system_ram():
+    info = {}
+    with open("/proc/meminfo") as f:
+        for line in f:
+            parts = line.split(":")
+            if len(parts) == 2:
+                info[parts[0].strip()] = int(parts[1].strip().split()[0])
+    return {
+        "available_gb": round(info.get("MemAvailable", 0) / 1024 / 1024, 1),
+        "total_gb": round(info.get("MemTotal", 0) / 1024 / 1024, 1),
+    }
 
 @app.get("/api/health")
 async def health():
@@ -162,13 +276,18 @@ async def chat(req: ChatRequest):
                [{"role": m.role, "content": m.content} for m in req.messages]
 
     async def stream():
-        async with httpx.AsyncClient(timeout=300) as client:
-            async with client.stream(
-                "POST", f"{OLLAMA}/api/chat",
-                json={"model": req.model, "messages": messages, "stream": True}
-            ) as r:
-                async for chunk in r.aiter_bytes():
-                    yield chunk
+        try:
+            async with httpx.AsyncClient(timeout=300) as client:
+                async with client.stream(
+                    "POST", f"{OLLAMA}/api/chat",
+                    json={"model": req.model, "messages": messages, "stream": True}
+                ) as r:
+                    async for chunk in r.aiter_bytes():
+                        yield chunk
+        except httpx.ReadTimeout:
+            yield json.dumps({"error": "Ollama timed out — the model may be overloaded"}).encode()
+        except Exception as e:
+            yield json.dumps({"error": f"Ollama error: {str(e)}"}).encode()
 
     return StreamingResponse(stream(), media_type="application/x-ndjson")
 
@@ -214,20 +333,23 @@ Include real, working code — not pseudocode.
 - 5 keyword suggestions"""
 
     async def stream():
-        async with httpx.AsyncClient(timeout=300) as client:
-            async with client.stream(
-                "POST", f"{OLLAMA}/api/chat",
-                json={
-                    "model": req.model,
-                    "messages": [
-                        {"role": "system", "content": "You are an expert mobile app developer and ASO specialist. Always provide complete, working code."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    "stream": True
-                }
-            ) as r:
-                async for chunk in r.aiter_bytes():
-                    yield chunk
+        try:
+            async with httpx.AsyncClient(timeout=300) as client:
+                async with client.stream(
+                    "POST", f"{OLLAMA}/api/chat",
+                    json={
+                        "model": req.model,
+                        "messages": [
+                            {"role": "system", "content": "You are an expert mobile app developer and ASO specialist. Always provide complete, working code."},
+                            {"role": "user", "content": prompt}
+                        ],
+                        "stream": True
+                    }
+                ) as r:
+                    async for chunk in r.aiter_bytes():
+                        yield chunk
+        except Exception as e:
+            yield json.dumps({"error": f"Ollama error: {str(e)}"}).encode()
 
     return StreamingResponse(stream(), media_type="application/x-ndjson")
 
@@ -258,20 +380,23 @@ Include:
 Write production-quality code, not demos."""
 
     async def stream():
-        async with httpx.AsyncClient(timeout=600) as client:
-            async with client.stream(
-                "POST", f"{OLLAMA}/api/chat",
-                json={
-                    "model": req.model,
-                    "messages": [
-                        {"role": "system", "content": DEFAULT_SYSTEM},
-                        {"role": "user", "content": prompt}
-                    ],
-                    "stream": True
-                }
-            ) as r:
-                async for chunk in r.aiter_bytes():
-                    yield chunk
+        try:
+            async with httpx.AsyncClient(timeout=600) as client:
+                async with client.stream(
+                    "POST", f"{OLLAMA}/api/chat",
+                    json={
+                        "model": req.model,
+                        "messages": [
+                            {"role": "system", "content": DEFAULT_SYSTEM},
+                            {"role": "user", "content": prompt}
+                        ],
+                        "stream": True
+                    }
+                ) as r:
+                    async for chunk in r.aiter_bytes():
+                        yield chunk
+        except Exception as e:
+            yield json.dumps({"error": f"Ollama error: {str(e)}"}).encode()
 
     return StreamingResponse(stream(), media_type="application/x-ndjson")
 
@@ -281,14 +406,20 @@ Write production-quality code, not demos."""
 @app.get("/api/conversations")
 async def get_conversations():
     if CONVERSATIONS_FILE.exists():
-        return json.loads(CONVERSATIONS_FILE.read_text())
+        try:
+            return json.loads(CONVERSATIONS_FILE.read_text())
+        except json.JSONDecodeError:
+            return []
     return []
 
 @app.post("/api/conversations")
 async def save_conversations(request: Request):
-    data = await request.json()
-    CONVERSATIONS_FILE.write_text(json.dumps(data, indent=2))
-    return {"ok": True}
+    try:
+        data = await request.json()
+        CONVERSATIONS_FILE.write_text(json.dumps(data, indent=2))
+        return {"ok": True}
+    except (OSError, IOError) as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save conversations: {e}")
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -299,7 +430,10 @@ def load_config() -> dict:
     return {"save_dir": DEFAULT_SAVE_DIR}
 
 def write_config(cfg: dict):
-    CONFIG_FILE.write_text(json.dumps(cfg, indent=2))
+    try:
+        CONFIG_FILE.write_text(json.dumps(cfg, indent=2))
+    except (OSError, IOError) as e:
+        raise HTTPException(status_code=500, detail=f"Failed to write config: {e}")
 
 @app.get("/api/config")
 async def get_config():
@@ -307,7 +441,11 @@ async def get_config():
 
 @app.post("/api/config")
 async def set_config(cfg: dict):
-    write_config(cfg)
+    if not isinstance(cfg, dict):
+        raise HTTPException(status_code=422, detail="Expected a JSON object")
+    existing = load_config()
+    existing.update(cfg)
+    write_config(existing)
     return {"ok": True}
 
 
@@ -316,11 +454,10 @@ async def set_config(cfg: dict):
 @app.post("/api/save-project")
 async def save_project(req: SaveProjectRequest):
     cfg = load_config()
-    base = Path(req.save_dir or cfg.get("save_dir", DEFAULT_SAVE_DIR))
+    base = Path(req.save_dir or cfg.get("save_dir", DEFAULT_SAVE_DIR)).expanduser().resolve()
 
-    # Sanitise app name for use as a directory
     folder_name = re.sub(r'[^\w\s-]', '', req.app_name).strip().replace(' ', '-')
-    project_dir = base / folder_name
+    project_dir = (base / folder_name).resolve()
 
     # Parse === FILE: path === ... === END FILE === blocks
     file_pattern = re.compile(
