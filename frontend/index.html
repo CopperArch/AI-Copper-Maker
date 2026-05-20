@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>LLM Coder — App Factory</title>
+<title>LLM Coder — Designed By Browns Entertainment</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/styles/github-dark.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/highlight.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.0/marked.min.js"></script>
@@ -44,8 +44,9 @@
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
   }
-  header h1 { font-size: 16px; font-weight: 600; }
+  header h1 { font-size: 16px; font-weight: 600; line-height: 1.2; }
   header h1 span { color: var(--accent); }
+  header h1 .byline { display: block; font-size: 10px; font-weight: 400; color: var(--muted); letter-spacing: .3px; }
   .header-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
   #status-dot {
     width: 8px; height: 8px; border-radius: 50%;
@@ -330,6 +331,29 @@
   .generate-output { flex: 1; padding: 20px; overflow-y: auto; }
   .generate-output pre { background: #0d1117; border: 1px solid var(--border); border-radius: 8px; overflow-x: auto; }
 
+  /* ── Code Runner ── */
+  .runner-layout { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  .runner-panel { flex: 1; display: flex; flex-direction: column; overflow: hidden; padding: 16px 20px; gap: 10px; }
+  .runner-toolbar { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+  .runner-toolbar h2 { font-size: 15px; font-weight: 600; }
+  .runner-toolbar select { width: auto; min-width: 180px; }
+  #runner-code {
+    flex: 1; min-height: 120px; resize: vertical; font-family: "JetBrains Mono", "Fira Code", monospace;
+    font-size: 13px; line-height: 1.5; padding: 12px; background: #0d1117;
+    border: 1px solid var(--border); border-radius: 8px; color: var(--text); tab-size: 2;
+  }
+  #runner-code:focus { border-color: var(--accent2); outline: none; }
+  .runner-actions { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+  .runner-output {
+    flex: 1; overflow-y: auto; background: #0d1117; border: 1px solid var(--border);
+    border-radius: 8px; padding: 12px 16px; font-family: "JetBrains Mono", "Fira Code", monospace;
+    font-size: 13px; line-height: 1.5; white-space: pre-wrap; min-height: 100px;
+  }
+  .runner-output .stdout { color: var(--text); }
+  .runner-output .stderr { color: var(--danger); }
+  .runner-output .exit { color: var(--muted); font-size: 11px; margin-top: 8px; border-top: 1px solid var(--border); padding-top: 8px; }
+  .runner-placeholder { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--muted); font-size: 13px; text-align: center; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+
   /* ── Models Panel ── */
   .models-panel { padding: 24px; overflow-y: auto; max-width: 860px; }
   .models-panel h2 { font-size: 18px; font-weight: 600; margin-bottom: 6px; }
@@ -417,7 +441,7 @@
     <rect width="24" height="24" rx="6" fill="#238636"/>
     <path d="M7 8h10M7 12h6M7 16h8" stroke="white" stroke-width="1.8" stroke-linecap="round"/>
   </svg>
-  <h1>LLM <span>Coder</span> — App Factory</h1>
+  <h1>LLM <span>Coder</span> — App Factory<span class="byline">Designed By Browns Entertainment</span></h1>
   <div class="header-right">
     <div id="status-dot"></div>
     <span id="status-text">Connecting...</span>
@@ -432,6 +456,10 @@
       <select id="model-select">
         <option value="">Loading models...</option>
       </select>
+      <div id="model-warning" style="display:none;margin-top:6px;padding:6px 8px;background:rgba(210,153,34,.1);border:1px solid rgba(210,153,34,.3);border-radius:6px;font-size:11px;color:var(--warn)">
+        <div id="model-warning-text"></div>
+        <button id="model-switch-btn" class="btn btn-secondary btn-sm btn-full" style="display:none;margin-top:6px" onclick="switchToSuggestedModel()"></button>
+      </div>
     </div>
 
     <div class="sidebar-section">
@@ -458,6 +486,7 @@
       <div class="tab active" onclick="switchTab('chat')">💬 Chat</div>
       <div class="tab" onclick="switchTab('analyze')">🔍 App Analyzer</div>
       <div class="tab" onclick="switchTab('generate')">⚡ Generate Project</div>
+      <div class="tab" onclick="switchTab('runner')">▶ Run Code</div>
       <div class="tab" onclick="switchTab('models')">📦 Models</div>
     </div>
 
@@ -490,6 +519,7 @@
         <div class="input-row">
           <textarea id="chat-input" placeholder="Ask the AI to build something... (Shift+Enter for new line)" rows="1"></textarea>
           <button class="btn btn-primary" id="send-btn" onclick="sendMessage()">Send</button>
+          <button class="btn btn-secondary" id="stop-btn" onclick="stopStreaming()" style="display:none">■ Stop</button>
         </div>
       </div>
     </div>
@@ -600,6 +630,31 @@
       </div>
     </div>
 
+    <!-- Run Code Tab -->
+    <div class="tab-panel" id="tab-runner">
+      <div class="runner-layout">
+        <div class="runner-panel">
+          <div class="runner-toolbar">
+            <h2>▶ Code Runner</h2>
+            <select id="runner-lang">
+              <option value="javascript">JavaScript (Node.js)</option>
+              <option value="python">Python 3</option>
+            </select>
+          </div>
+          <textarea id="runner-code" placeholder="Paste or write code here..."></textarea>
+          <div class="runner-actions">
+            <button class="btn btn-accent" id="run-btn" onclick="runCode()">▶ Run</button>
+            <div id="runner-status" style="font-size:12px;color:var(--muted)"></div>
+          </div>
+          <div class="runner-output" id="runner-output">
+            <div class="runner-placeholder">
+              <p>Write or paste code above, select a language, and click <strong>Run</strong> to execute it.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- Models Tab -->
     <div class="tab-panel" id="tab-models">
       <div class="models-panel">
@@ -638,14 +693,19 @@
 <script>
 // ── State ──────────────────────────────────────────────────────────────────────
 
-const API = 'http://localhost:8080';
+const API = 'http://localhost:8081';
 let conversations = [];
 let currentConvId = null;
 let installedModels = [];
 let isStreaming = false;
+let abortController = null;
 let features = [];
 let catalog = [];
 let catalogFilter = 'all';
+let suggestedModel = null;
+let ramInfo = null;
+let ramInfoTime = 0;
+const MAX_HISTORY_MESSAGES = 40; // 20 user/assistant pairs max sent to Ollama
 
 const DEFAULT_SYSTEM = `You are an expert full-stack mobile app developer. You write clean, production-ready code.
 When asked to build an app, you:
@@ -666,6 +726,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   setInterval(checkStatus, 15000);
   document.getElementById('model-select').addEventListener('change', e => {
     localStorage.setItem('selectedModel', e.target.value);
+    checkModelFit(e.target.value);
   });
 
   const input = document.getElementById('chat-input');
@@ -675,6 +736,25 @@ document.addEventListener('DOMContentLoaded', async () => {
   input.addEventListener('input', () => {
     input.style.height = 'auto';
     input.style.height = Math.min(input.scrollHeight, 160) + 'px';
+  });
+
+  // Event delegation for feature tags removal
+  document.getElementById('feature-tags').addEventListener('click', e => {
+    if (e.target.classList.contains('remove-feature-btn')) {
+      const idx = parseInt(e.target.dataset.idx, 10);
+      if (!isNaN(idx)) removeFeature(features[idx]);
+    }
+  });
+
+  // Event delegation for conversation list
+  document.getElementById('conv-list').addEventListener('click', e => {
+    const item = e.target.closest('.conv-item');
+    if (!item) return;
+    if (e.target.classList.contains('del-btn')) {
+      deleteConversation(e.target.dataset.cid);
+    } else {
+      loadConversation(item.dataset.cid);
+    }
   });
 });
 
@@ -712,6 +792,7 @@ async function loadModels() {
     if (saved && installedModels.includes(saved)) sel.value = saved;
     else if (prev && installedModels.includes(prev)) sel.value = prev;
     renderModelsTab();
+    checkModelFit(sel.value);
   } catch {}
 }
 
@@ -756,8 +837,7 @@ function loadConversation(id) {
   empty.style.display = conv && conv.messages.length ? 'none' : 'flex';
 }
 
-function deleteConversation(id, e) {
-  e.stopPropagation();
+function deleteConversation(id) {
   conversations = conversations.filter(c => c.id !== id);
   if (currentConvId === id) { currentConvId = null; renderMessages(); }
   saveConvs();
@@ -771,9 +851,9 @@ function renderConvList() {
     return;
   }
   list.innerHTML = conversations.map(c => `
-    <div class="conv-item ${c.id === currentConvId ? 'active' : ''}" onclick="loadConversation('${c.id}')">
+    <div class="conv-item ${c.id === currentConvId ? 'active' : ''}" data-cid="${c.id}">
       <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">💬 ${escHtml(c.title)}</span>
-      <button class="del-btn" onclick="deleteConversation('${c.id}', event)">×</button>
+      <button class="del-btn" data-cid="${c.id}">×</button>
     </div>
   `).join('');
 }
@@ -807,7 +887,7 @@ function renderMessages() {
   }
   container.innerHTML = conv.messages.map(renderMsg).join('');
   addCopyButtons();
-  hljs.highlightAll();
+  container.querySelectorAll('pre code').forEach(el => hljs.highlightElement(el));
   container.scrollTop = container.scrollHeight;
 }
 
@@ -843,6 +923,10 @@ function sendQuick(text) {
   sendMessage();
 }
 
+function stopStreaming() {
+  if (abortController) { abortController.abort(); abortController = null; }
+}
+
 async function sendMessage() {
   const input = document.getElementById('chat-input');
   const text = input.value.trim();
@@ -852,6 +936,7 @@ async function sendMessage() {
   if (!model) { alert('Please select a model first'); return; }
 
   if (!currentConvId) newConversation();
+  document.getElementById('token-count').textContent = 'Streaming...';
 
   const conv = currentConv();
   conv.messages.push({ role: 'user', content: text });
@@ -864,7 +949,6 @@ async function sendMessage() {
 
   renderMessages();
 
-  // Add AI bubble
   const container = document.getElementById('chat-messages');
   const thinkDiv = document.createElement('div');
   thinkDiv.className = 'message';
@@ -877,53 +961,93 @@ async function sendMessage() {
   container.scrollTop = container.scrollHeight;
 
   const sendBtn = document.getElementById('send-btn');
-  sendBtn.disabled = true; isStreaming = true;
+  const stopBtn = document.getElementById('stop-btn');
+  sendBtn.style.display = 'none';
+  stopBtn.style.display = '';
+  isStreaming = true;
 
   let fullText = '';
+  let tokenCount = 0;
+  // Throttle DOM updates — at most one innerHTML rebuild every 80ms to avoid
+  // hammering the GPU with browser compositing while Ollama is running inference.
+  let renderPending = false;
+  const bubbleEl = thinkDiv.querySelector('.bubble');
+
+  function flushRender() {
+    renderPending = false;
+    bubbleEl.innerHTML = marked.parse(fullText);
+    addCopyButtons();
+    container.scrollTop = container.scrollHeight;
+  }
+
+  function scheduleRender() {
+    if (!renderPending) {
+      renderPending = true;
+      setTimeout(flushRender, 80);
+    }
+  }
+
+  abortController = new AbortController();
 
   try {
     const system = document.getElementById('system-prompt').value;
+    let cleanMessages = conv.messages.filter((m, i, arr) => {
+      if (m.role === 'user' && i < arr.length - 1 && arr[i + 1].role === 'user') return false;
+      return true;
+    });
+    // Truncate to last MAX_HISTORY_MESSAGES to prevent OOM on long conversations
+    if (cleanMessages.length > MAX_HISTORY_MESSAGES) {
+      cleanMessages = cleanMessages.slice(-MAX_HISTORY_MESSAGES);
+    }
+
     const res = await fetch(`${API}/api/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, messages: conv.messages, system })
+      body: JSON.stringify({ model, messages: cleanMessages, system }),
+      signal: abortController.signal
     });
 
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
-
-    thinkDiv.querySelector('.bubble').innerHTML = '';
-    const bubbleEl = thinkDiv.querySelector('.bubble');
+    bubbleEl.innerHTML = '';
 
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      const lines = decoder.decode(value).split('\n').filter(Boolean);
-      for (const line of lines) {
+      for (const line of decoder.decode(value).split('\n').filter(Boolean)) {
         try {
           const data = JSON.parse(line);
           if (data.message?.content) {
             fullText += data.message.content;
-            bubbleEl.innerHTML = marked.parse(fullText);
-            addCopyButtons();
-            hljs.highlightAll();
-            container.scrollTop = container.scrollHeight;
+            tokenCount++;
+            document.getElementById('token-count').textContent = `${tokenCount} tokens`;
+            scheduleRender();
           }
         } catch {}
       }
     }
   } catch (err) {
-    document.getElementById('thinking-msg').querySelector('.bubble').textContent =
-      'Error: ' + err.message;
+    if (err.name !== 'AbortError') {
+      thinkDiv.querySelector('.bubble').textContent = 'Error: ' + err.message;
+    }
   }
 
-  conv.messages.push({ role: 'assistant', content: fullText });
-  saveConvs();
-  renderConvList();
+  // Final render with syntax highlighting (done once, not on every chunk)
+  if (fullText) {
+    bubbleEl.innerHTML = marked.parse(fullText);
+    addCopyButtons();
+    bubbleEl.querySelectorAll('pre code').forEach(el => hljs.highlightElement(el));
+    container.scrollTop = container.scrollHeight;
+    conv.messages.push({ role: 'assistant', content: fullText });
+    saveConvs();
+    renderConvList();
+  }
 
   thinkDiv.id = '';
   isStreaming = false;
-  sendBtn.disabled = false;
+  abortController = null;
+  sendBtn.style.display = '';
+  stopBtn.style.display = 'none';
 }
 
 // ── App Analyzer ───────────────────────────────────────────────────────────────
@@ -961,6 +1085,13 @@ async function analyzeApp() {
     const decoder = new TextDecoder();
     output.innerHTML = '';
 
+    let renderPendingA = false;
+    function flushRenderA() {
+      renderPendingA = false;
+      output.innerHTML = marked.parse(text);
+      output.scrollTop = output.scrollHeight;
+    }
+
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -968,15 +1099,19 @@ async function analyzeApp() {
       for (const line of lines) {
         try {
           const data = JSON.parse(line);
+          if (data.error) throw new Error(data.error);
           if (data.message?.content) {
             text += data.message.content;
-            output.innerHTML = marked.parse(text);
-            output.querySelectorAll('pre code').forEach(el => hljs.highlightElement(el));
-            output.scrollTop = output.scrollHeight;
+            if (!renderPendingA) { renderPendingA = true; setTimeout(flushRenderA, 80); }
           }
-        } catch {}
+        } catch (e) {
+          if (e.message?.startsWith('Ollama')) throw e;
+        }
       }
     }
+    // Final render with highlighting
+    output.innerHTML = marked.parse(text);
+    output.querySelectorAll('pre code').forEach(el => hljs.highlightElement(el));
   } catch (err) {
     output.innerHTML = `<p style="color:var(--danger)">Error: ${err.message}</p>`;
   }
@@ -1001,9 +1136,9 @@ function removeFeature(f) {
 }
 
 function renderFeatureTags() {
-  document.getElementById('feature-tags').innerHTML = features.map(f => `
+  document.getElementById('feature-tags').innerHTML = features.map((f, i) => `
     <span class="feature-tag">${escHtml(f)}
-      <button onclick="removeFeature('${escHtml(f)}')">×</button>
+      <button data-idx="${i}" class="remove-feature-btn">×</button>
     </span>
   `).join('');
 }
@@ -1043,6 +1178,12 @@ async function generateProject() {
     const decoder = new TextDecoder();
     output.innerHTML = '';
 
+    let renderPendingG = false;
+    function flushRenderG() {
+      renderPendingG = false;
+      output.innerHTML = '<pre><code>' + escHtml(text) + '</code></pre>';
+    }
+
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -1050,11 +1191,14 @@ async function generateProject() {
       for (const line of lines) {
         try {
           const data = JSON.parse(line);
+          if (data.error) throw new Error(data.error);
           if (data.message?.content) {
             text += data.message.content;
-            output.innerHTML = '<pre><code>' + escHtml(text) + '</code></pre>';
+            if (!renderPendingG) { renderPendingG = true; setTimeout(flushRenderG, 80); }
           }
-        } catch {}
+        } catch (e) {
+          if (e.message?.startsWith('Ollama')) throw e;
+        }
       }
     }
     lastGeneratedContent = text;
@@ -1081,6 +1225,7 @@ async function loadCatalog() {
     const d = await r.json();
     catalog = d.catalog || [];
     renderModelsTab();
+    checkModelFit(document.getElementById('model-select').value);
   } catch { catalog = []; }
 }
 
@@ -1177,9 +1322,10 @@ async function pullModel(modelName, progressEl) {
 
 function useModel(name) {
   const sel = document.getElementById('model-select');
-  if (installedModels.includes(name)) {
-    sel.value = name;
-    localStorage.setItem('selectedModel', name);
+  const match = installedModels.find(im => im === name || im.startsWith(name.split(':')[0] + ':'));
+  if (match) {
+    sel.value = match;
+    localStorage.setItem('selectedModel', match);
     switchTab('chat');
   }
 }
@@ -1199,16 +1345,137 @@ async function pullCustomModel() {
   input.value = '';
 }
 
+// ── RAM / Model fit check ──────────────────────────────────────────────────────
+
+async function getRAMInfo() {
+  if (ramInfo && Date.now() - ramInfoTime < 60000) return ramInfo;
+  try {
+    const r = await fetch(`${API}/api/system/ram`);
+    ramInfo = await r.json();
+    ramInfoTime = Date.now();
+  } catch { ramInfo = { available_gb: 0, total_gb: 0 }; }
+  return ramInfo;
+}
+
+async function checkModelFit(modelName) {
+  const warning = document.getElementById('model-warning');
+  const text = document.getElementById('model-warning-text');
+  const switchBtn = document.getElementById('model-switch-btn');
+  if (!modelName || !catalog.length) { warning.style.display = 'none'; return; }
+
+  // Exact match first; fall back to same model family (handles :latest tags)
+  const entry = catalog.find(m => m.name === modelName) ||
+    catalog.find(m => m.name.split(':')[0] === modelName.split(':')[0]);
+  if (!entry || entry.size_gb == null) { warning.style.display = 'none'; return; }
+
+  const ram = await getRAMInfo();
+  if (!ram.available_gb) { warning.style.display = 'none'; return; }
+
+  // Warn if model needs more than 80% of available RAM
+  if (entry.size_gb <= ram.available_gb * 0.8) { warning.style.display = 'none'; return; }
+
+  // Find best installed alternative: same category first, then any; largest that fits
+  const fits = m => m.size_gb != null && m.size_gb <= ram.available_gb * 0.7 &&
+    installedModels.some(im => im === m.name || im.startsWith(m.name.split(':')[0] + ':'));
+  const alts = catalog.filter(m => m.name !== entry.name && fits(m)).sort((a, b) => {
+    if (a.category === entry.category && b.category !== entry.category) return -1;
+    if (b.category === entry.category && a.category !== entry.category) return 1;
+    return b.size_gb - a.size_gb;
+  });
+
+  suggestedModel = alts[0] || null;
+  text.textContent = `⚠ ${entry.name} needs ~${entry.size_gb} GB (${ram.available_gb} GB free)`;
+  if (suggestedModel) {
+    switchBtn.textContent = `Switch to ${suggestedModel.name} (${suggestedModel.size_gb} GB)`;
+    switchBtn.style.display = '';
+  } else {
+    switchBtn.style.display = 'none';
+  }
+  warning.style.display = '';
+}
+
+function switchToSuggestedModel() {
+  if (!suggestedModel) return;
+  const sel = document.getElementById('model-select');
+  const match = installedModels.find(im =>
+    im === suggestedModel.name || im.startsWith(suggestedModel.name.split(':')[0] + ':')
+  );
+  if (match) {
+    sel.value = match;
+    localStorage.setItem('selectedModel', match);
+    checkModelFit(match);
+  }
+}
+
 // ── UI Helpers ─────────────────────────────────────────────────────────────────
 
 function switchTab(name) {
   document.querySelectorAll('.tab').forEach((t, i) => {
-    const names = ['chat', 'analyze', 'generate', 'models'];
+    const names = ['chat', 'analyze', 'generate', 'runner', 'models'];
     t.classList.toggle('active', names[i] === name);
   });
   document.querySelectorAll('.tab-panel').forEach(p => {
     p.classList.toggle('active', p.id === 'tab-' + name);
   });
+}
+
+// ── Code Runner ─────────────────────────────────────────────────────────────────
+
+async function runCode() {
+  const code = document.getElementById('runner-code').value.trim();
+  if (!code) return;
+
+  const lang = document.getElementById('runner-lang').value;
+  const output = document.getElementById('runner-output');
+  const status = document.getElementById('runner-status');
+  const btn = document.getElementById('run-btn');
+
+  btn.disabled = true;
+  btn.textContent = 'Running...';
+  output.innerHTML = '';
+  status.textContent = '';
+
+  try {
+    const res = await fetch(`${API}/api/execute`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ language: lang, code })
+    });
+
+    if (!res.ok) {
+      const err = await res.json();
+      output.innerHTML = `<span class="stderr">Error: ${err.detail || 'Request failed'}</span>`;
+      return;
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      for (const line of decoder.decode(value).split('\n').filter(Boolean)) {
+        try {
+          const data = JSON.parse(line);
+          if (data.type === 'stdout') {
+            output.innerHTML += `<span class="stdout">${escHtml(data.text)}</span>`;
+          } else if (data.type === 'stderr') {
+            output.innerHTML += `<span class="stderr">${escHtml(data.text)}</span>`;
+          } else if (data.type === 'exit') {
+            output.innerHTML += `<div class="exit">⏹ Process exited with code ${data.code}</div>`;
+          } else if (data.type === 'error') {
+            output.innerHTML += `<span class="stderr">${escHtml(data.text)}</span>`;
+          }
+        } catch {}
+      }
+      output.scrollTop = output.scrollHeight;
+    }
+  } catch (err) {
+    output.innerHTML = `<span class="stderr">Connection error: ${err.message}</span>`;
+  }
+
+  btn.disabled = false;
+  btn.textContent = '▶ Run';
 }
 
 function toggleSystemPrompt() {
