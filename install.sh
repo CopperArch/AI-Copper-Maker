@@ -21,6 +21,45 @@ cat <<'EOF'
 EOF
 echo -e "${NC}"
 
+# ── 0. Docker check ────────────────────────────────────────────────────────────
+echo ""
+info "Checking for container runtime..."
+DOCKER_CMD=""
+if command -v docker &>/dev/null; then
+    DOCKER_CMD="docker"
+elif command -v podman &>/dev/null; then
+    DOCKER_CMD="podman"
+fi
+
+if [ -n "$DOCKER_CMD" ]; then
+    echo -e "${CYAN}Installation method:${NC}"
+    echo "  1) Native (direct on this machine)"
+    echo "  2) Docker/Podman container"
+    echo ""
+    read -rp "Choose method [1]: " install_method
+    install_method="${install_method:-1}"
+
+    if [ "$install_method" = "2" ]; then
+        echo ""
+        info "Building Docker image with $DOCKER_CMD..."
+        cd "$SCRIPT_DIR"
+        $DOCKER_CMD compose up -d --build 2>/dev/null || \
+        $DOCKER_CMD-compose up -d --build 2>/dev/null || {
+            warn "docker-compose not found, building manually..."
+            $DOCKER_CMD build -t llm-coder .
+            $DOCKER_CMD run -d --name llm-coder-ollama -v ollama-models:/root/.ollama --network host ollama/ollama
+            $DOCKER_CMD run -d --name llm-coder-app -p 8081:8081 -e OLLAMA_HOST=http://localhost:11434 -v projects:/root/Downloads/LLM-CODER llm-coder
+        }
+        echo ""
+        echo -e "${GREEN}╔══════════════════════════════════════════════════════╗${NC}"
+        echo -e "${GREEN}║  LLM Coder — Uncensored Edition v0.1.1             ║${NC}"
+        echo -e "${GREEN}║  Running in Docker!                                 ║${NC}"
+        echo -e "${GREEN}║  Open http://localhost:8081                         ║${NC}"
+        echo -e "${GREEN}╚══════════════════════════════════════════════════════╝${NC}"
+        exit 0
+    fi
+fi
+
 # ── 1. Ollama ──────────────────────────────────────────────────────────────────
 info "Checking Ollama..."
 if ! command -v ollama &>/dev/null; then
