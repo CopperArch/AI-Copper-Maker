@@ -4,3 +4,6 @@ httpx
 python-multipart
 aiofiles
 pydantic
+caldav
+icalendar
+apscheduler
