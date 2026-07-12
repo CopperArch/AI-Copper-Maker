@@ -2,6 +2,27 @@ version: "3.8"
 
 services:
   ollama:
+    # CPU-only by default so this boots on any machine without extra setup.
+    # For GPU acceleration, pick ONE of the blocks below for your hardware
+    # and uncomment it (leave the other commented out):
+    #
+    # Nvidia (requires the NVIDIA Container Toolkit on the host):
+    #   deploy:
+    #     resources:
+    #       reservations:
+    #         devices:
+    #           - driver: nvidia
+    #             count: all
+    #             capabilities: [gpu]
+    #
+    # AMD/ROCm (requires /dev/kfd + /dev/dri on the host):
+    #   image: ollama/ollama:rocm
+    #   devices:
+    #     - /dev/kfd
+    #     - /dev/dri
+    #   group_add:
+    #     - video
+    #     - render
     image: ollama/ollama:latest
     container_name: llm-coder-ollama
     restart: unless-stopped
@@ -13,21 +34,6 @@ services:
       - OLLAMA_KEEP_ALIVE=0
       - OLLAMA_NUM_PARALLEL=1
       - OLLAMA_MAX_LOADED_MODELS=1
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-    # For AMD GPUs (ROCm), uncomment the lines below and comment the nvidia block above:
-    # image: ollama/ollama:rocm
-    # devices:
-    #   - /dev/kfd
-    #   - /dev/dri
-    # group_add:
-    #   - video
-    #   - render
 
   llm-coder:
     build: .
