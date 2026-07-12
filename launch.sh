@@ -75,10 +75,10 @@ fi
 
 echo ""
 echo "╔══════════════════════════════════════════════════════╗"
-echo "║  LLM Coder — Uncensored Edition                     ║"
+echo "║  LLM Coder — Uncensored Edition v0.2                ║"
 echo "║  Running at http://localhost:8081                    ║"
-echo "║  Features: Chat, Agent, Code Run, Web Search,       ║"
-echo "║  File Browser, Image Gen, App Analyzer, Project Gen ║"
+echo "║  Chat · Agent · Email · Calendar · Skills · Routines ║"
+echo "║  Search (web + semantic) · Files · Code Run · Backup ║"
 echo "║  Press Ctrl+C to stop                                ║"
 echo "╚══════════════════════════════════════════════════════╝"
 
