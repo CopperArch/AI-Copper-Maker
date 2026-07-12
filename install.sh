@@ -17,7 +17,7 @@ cat <<'EOF'
   ██║     ██║     ██║╚██╔╝██║    ██║     ██║   ██║██║  ██║██╔══╝  ██╔══██╗
   ███████╗███████╗██║ ╚═╝ ██║    ╚██████╗╚██████╔╝██████╔╝███████╗██║  ██║
   ╚══════╝╚══════╝╚═╝     ╚═╝     ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝
-  Local AI Coding Assistant — App Factory Edition
+  LLM Coder — Uncensored Edition v0.1.1
 EOF
 echo -e "${NC}"
 
@@ -62,12 +62,12 @@ success "Ollama daemon running"
 
 # ── 3. Pull coding models ──────────────────────────────────────────────────────
 echo ""
-echo -e "${CYAN}Available coding models (RX 9070 has ~16GB VRAM):${NC}"
-echo "  1) qwen2.5-coder:14b   — Best coding model, fits comfortably (~9GB)"
-echo "  2) deepseek-coder-v2:16b — Excellent reasoning + code (~10GB)"
-echo "  3) devstral:24b        — Mistral coding specialist (~14GB, tight fit)"
-echo "  4) qwen2.5-coder:7b    — Fast, lightweight (~5GB)"
-echo "  5) All recommended (1 + 2 + 4)"
+echo -e "${CYAN}Available models (RX 9070 has ~16GB VRAM):${NC}"
+echo "  1) qwen2.5-coder:14b                        — Best coding model (~9GB)"
+echo "  2) deepseek-coder-v2:16b                     — Excellent reasoning + code (~10GB)"
+echo "  3) qwen2.5-coder:32b-abliterated             — Uncensored coding (unlisted, ~19GB)"
+echo "  4) qwen2.5-coder:7b                          — Fast coding (~5GB)"
+echo "  5) All recommended coding (1 + 2 + 4)"
 echo "  6) Skip model download"
 echo ""
 read -rp "Choose models to pull [5]: " model_choice
@@ -82,7 +82,7 @@ pull_model() {
 case "$model_choice" in
     1) pull_model "qwen2.5-coder:14b" ;;
     2) pull_model "deepseek-coder-v2:16b" ;;
-    3) pull_model "devstral:24b" ;;
+    3) pull_model "qwen2.5-coder:32b-abliterated" ;;
     4) pull_model "qwen2.5-coder:7b" ;;
     5) pull_model "qwen2.5-coder:14b"; pull_model "deepseek-coder-v2:16b"; pull_model "qwen2.5-coder:7b" ;;
     6) warn "Skipping model download" ;;
@@ -105,7 +105,8 @@ success "Python dependencies installed"
 
 # ── 5. Done ────────────────────────────────────────────────────────────────────
 echo ""
-echo -e "${GREEN}╔══════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║  Installation complete!                      ║${NC}"
-echo -e "${GREEN}║  Run: ./launch.sh                            ║${NC}"
-echo -e "${GREEN}╚══════════════════════════════════════════════╝${NC}"
+echo -e "${GREEN}╔══════════════════════════════════════════════════════╗${NC}"
+echo -e "${GREEN}║  LLM Coder — Uncensored Edition v0.1.1             ║${NC}"
+echo -e "${GREEN}║  Installation complete!                             ║${NC}"
+echo -e "${GREEN}║  Run: ./launch.sh                                   ║${NC}"
+echo -e "${GREEN}╚══════════════════════════════════════════════════════╝${NC}"
