@@ -43,10 +43,13 @@ if command -v xdg-open &>/dev/null; then
 fi
 
 echo ""
-echo "╔══════════════════════════════════════════════╗"
-echo "║  LLM Coder running at http://localhost:8081  ║"
-echo "║  Press Ctrl+C to stop                        ║"
-echo "╚══════════════════════════════════════════════╝"
+echo "╔══════════════════════════════════════════════════════╗"
+echo "║  LLM Coder — Uncensored Edition                     ║"
+echo "║  Running at http://localhost:8081                    ║"
+echo "║  Features: Chat, Agent, Code Run, Web Search,       ║"
+echo "║  File Browser, Image Gen, App Analyzer, Project Gen ║"
+echo "║  Press Ctrl+C to stop                                ║"
+echo "╚══════════════════════════════════════════════════════╝"
 
 trap "kill $BACKEND_PID 2>/dev/null; echo 'Stopped.'" EXIT INT TERM
 wait $BACKEND_PID

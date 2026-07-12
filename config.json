@@ -1,3 +1,5 @@
 {
-  "save_dir": "/home/deebee/Downloads/LLM-CODER"
+  "save_dir": "/home/deebee/Downloads/LLM-CODER",
+  "uncensored": true,
+  "default_model": "qwen2.5-coder-32b-uncensored"
 }
