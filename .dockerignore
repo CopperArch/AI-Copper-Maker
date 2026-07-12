@@ -1,0 +1,10 @@
+.git/
+.gitignore
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.env
+*.md
+install.sh
+launch.sh
