@@ -61,13 +61,14 @@
   header h1 { font-size: 16px; font-weight: 600; line-height: 1.2; }
   header h1 span { color: var(--accent); }
   header h1 .byline { display: block; font-size: 10px; font-weight: 400; color: var(--muted); letter-spacing: .3px; }
-  .header-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
-  #status-dot {
+  .header-right { margin-left: auto; display: flex; align-items: center; gap: 18px; }
+  .status-group { display: flex; align-items: center; gap: 8px; }
+  .status-dot {
     width: 8px; height: 8px; border-radius: 50%;
-    background: var(--danger); transition: background .3s;
+    background: var(--muted); transition: background .3s;
   }
-  #status-dot.ok { background: var(--accent); }
-  #status-text { font-size: 12px; color: var(--muted); }
+  .status-dot.ok { background: var(--accent); }
+  .status-text { font-size: 12px; color: var(--muted); }
 
   /* ── Layout ── */
   .app { display: flex; flex: 1; overflow: hidden; }
@@ -94,6 +95,16 @@
     outline: none;
   }
   select:focus, input:focus, textarea:focus { border-color: var(--accent2); }
+
+  /* ── Password show/hide toggle (used on every password field in the app) ── */
+  .pw-wrap { position: relative; flex: 1; min-width: 160px; }
+  .pw-wrap input { width: 100%; padding-right: 30px; box-sizing: border-box; }
+  .pw-toggle-btn {
+    position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+    background: none; border: none; cursor: pointer; color: var(--muted);
+    font-size: 14px; padding: 2px 4px; line-height: 1;
+  }
+  .pw-toggle-btn:hover { color: var(--text); }
 
   .model-badge {
     display: inline-block;
@@ -122,13 +133,33 @@
   }
   .conv-item:hover { background: rgba(255,255,255,.05); }
   .conv-item.active { background: rgba(35,134,54,.15); border: 1px solid rgba(35,134,54,.3); }
-  .conv-item .del-btn {
-    margin-left: auto; background: none; border: none; color: var(--muted);
-    cursor: pointer; font-size: 14px; padding: 0 2px; flex-shrink: 0;
-    display: none;
+  .conv-streaming-dot {
+    display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    background: var(--accent2); flex-shrink: 0; animation: conv-pulse 1.2s ease-in-out infinite;
   }
-  .conv-item:hover .del-btn { display: block; }
-  .conv-item .del-btn:hover { color: var(--danger); }
+  @keyframes conv-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+  .conv-menu-btn {
+    margin-left: auto; background: none; border: none; color: var(--muted);
+    cursor: pointer; font-size: 16px; line-height: 1; padding: 2px 6px; flex-shrink: 0;
+    border-radius: 4px;
+  }
+  .conv-menu-btn:hover { color: var(--fg, #fff); background: rgba(255,255,255,.08); }
+  /* Only conv-item's own button is hover-reveal — standalone uses (e.g. the
+     token-usage menu button) stay visible via the base rule above. */
+  .conv-item .conv-menu-btn { display: none; }
+  .conv-item:hover .conv-menu-btn { display: block; }
+  .conv-menu {
+    position: fixed; z-index: 9999; min-width: 130px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0,0,0,.35); padding: 4px; font-size: 13px;
+  }
+  .conv-menu button {
+    display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+    background: none; border: none; color: inherit; padding: 7px 10px;
+    border-radius: 6px; cursor: pointer; font-size: 13px;
+  }
+  .conv-menu button:hover { background: rgba(255,255,255,.08); }
+  .conv-menu button.danger:hover { background: rgba(248,81,73,.15); color: var(--danger); }
 
   .btn {
     display: inline-flex; align-items: center; gap: 6px;
@@ -144,12 +175,35 @@
   .btn-full { width: 100%; justify-content: center; }
 
   /* ── Tabs ── */
-  .tabs {
+  .tabs-row {
     display: flex;
+    align-items: stretch;
     border-bottom: 1px solid var(--border);
     background: var(--surface);
     flex-shrink: 0;
   }
+  .tabs-arrow {
+    flex-shrink: 0;
+    width: 28px;
+    border: none;
+    background: var(--surface);
+    color: var(--text);
+    cursor: pointer;
+    font-size: 18px;
+    font-weight: bold;
+    transition: opacity .15s;
+  }
+  .tabs-arrow:hover:not(:disabled) { background: rgba(255,255,255,.08); }
+  .tabs-arrow:disabled { cursor: default; }
+  .tabs {
+    display: flex;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none; /* Firefox */
+    flex: 1;
+    min-width: 0;
+  }
+  .tabs::-webkit-scrollbar { display: none; }
   .tab {
     padding: 10px 20px;
     cursor: pointer;
@@ -443,6 +497,11 @@
   .model-status.not-installed {
     background: rgba(255,255,255,.05); color: var(--muted); border-color: var(--border);
   }
+  .model-badge {
+    font-size: 10px; font-weight: 400; padding: 1px 6px; border-radius: 8px;
+    background: rgba(255,255,255,.08); color: var(--muted); border: 1px solid var(--border);
+    vertical-align: middle; margin-left: 4px;
+  }
   .pull-progress {
     margin-top: 8px; font-size: 12px; color: var(--muted);
   }
@@ -539,14 +598,20 @@
 <body>
 
 <header>
-  <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" onclick="showAboutModal()" style="cursor:pointer" title="About LLM Coder">
     <rect width="24" height="24" rx="6" fill="#238636"/>
     <path d="M7 8h10M7 12h6M7 16h8" stroke="white" stroke-width="1.8" stroke-linecap="round"/>
   </svg>
   <h1>LLM <span>Coder</span> — Home Ai Helper<span class="byline">Designed By Browns Entertainment</span></h1>
   <div class="header-right">
-    <div id="status-dot"></div>
-    <span id="status-text">Connecting...</span>
+    <div class="status-group">
+      <div id="status-dot" class="status-dot"></div>
+      <span id="status-text" class="status-text">Connecting...</span>
+    </div>
+    <div class="status-group">
+      <div id="lmstudio-status-dot" class="status-dot"></div>
+      <span id="lmstudio-status-text" class="status-text">LM Studio</span>
+    </div>
   </div>
 </header>
 
@@ -579,6 +644,10 @@
       <div class="token-usage-bar" id="token-usage-bar" style="display:none">
         <div class="token-usage-fill" id="token-usage-fill"></div>
       </div>
+      <div style="display:flex;align-items:center;gap:4px;margin-top:2px">
+        <div class="token-usage-weekly" id="token-usage-weekly" style="font-size:11px;color:var(--muted);flex:1"></div>
+        <button class="conv-menu-btn" id="token-usage-menu-btn" title="Reset interval">⋮</button>
+      </div>
     </div>
 
     <div class="sidebar-section">
@@ -599,21 +668,27 @@
 
   <!-- Main -->
   <div class="main">
+    <div id="update-banner" style="display:none;padding:8px 16px;background:rgba(35,134,54,.15);border-bottom:1px solid rgba(35,134,54,.3);font-size:13px;align-items:center;gap:10px"></div>
     <!-- Tabs -->
-    <div class="tabs">
-      <div class="tab active" onclick="switchTab('chat')">💬 Chat</div>
-      <div class="tab" onclick="switchTab('analyze')">🔍 App Analyzer</div>
-      <div class="tab" onclick="switchTab('generate')">⚡ Generate Project</div>
-      <div class="tab" onclick="switchTab('runner')">▶ Run Code</div>
-      <div class="tab" onclick="switchTab('agent')">🤖 Agent</div>
-      <div class="tab" onclick="switchTab('files')">📁 Files</div>
-      <div class="tab" onclick="switchTab('search')">🌐 Search</div>
-      <div class="tab" onclick="switchTab('imagegen')">🎨 Image Gen</div>
-      <div class="tab" onclick="switchTab('models')">📦 Models</div>
-      <div class="tab" onclick="switchTab('email')">📧 Email</div>
-      <div class="tab" onclick="switchTab('calendar')">📅 Calendar</div>
-      <div class="tab" onclick="switchTab('skills')">🧠 Skills</div>
-      <div class="tab" onclick="switchTab('routines')">⏰ Routines</div>
+    <div class="tabs-row">
+      <button class="tabs-arrow" onclick="scrollTabs(-1)" title="Scroll left">‹</button>
+      <div class="tabs" id="tabs-scroller">
+        <div class="tab active" onclick="switchTab('chat')">💬 Chat</div>
+        <div class="tab" onclick="switchTab('analyze')">🔍 App Analyzer</div>
+        <div class="tab" onclick="switchTab('generate')">⚡ Generate Project</div>
+        <div class="tab" onclick="switchTab('runner')">▶ Run Code</div>
+        <div class="tab" onclick="switchTab('agent')">🤖 Agent</div>
+        <div class="tab" onclick="switchTab('files')">📁 Files</div>
+        <div class="tab" onclick="switchTab('search')">🌐 Search</div>
+        <div class="tab" onclick="switchTab('imagegen')">🎨 Image Gen</div>
+        <div class="tab" onclick="switchTab('models')">📦 Models</div>
+        <div class="tab" onclick="switchTab('email')">📧 Email</div>
+        <div class="tab" onclick="switchTab('calendar')">📅 Calendar</div>
+        <div class="tab" onclick="switchTab('skills')">🧠 Skills</div>
+        <div class="tab" onclick="switchTab('lessons')">📚 Lessons</div>
+        <div class="tab" onclick="switchTab('routines')">⏰ Routines</div>
+      </div>
+      <button class="tabs-arrow" onclick="scrollTabs(1)" title="Scroll right">›</button>
     </div>
 
     <!-- Chat Tab -->
@@ -637,6 +712,8 @@
       <div class="chat-input-area">
         <div class="chat-meta">
           <span id="token-count">Ready</span>
+          <span class="token-usage-weekly" id="token-usage-weekly-inline" style="font-size:11px;color:var(--muted)"></span>
+          <button class="conv-menu-btn" id="token-usage-menu-btn-inline" title="Reset interval" style="font-size:13px;padding:0 4px">⋮</button>
           <span class="system-toggle" onclick="toggleSystemPrompt()">⚙ System prompt</span>
           <span style="font-size:11px;color:var(--muted);margin-left:auto">📎 Drop files or folders anywhere on chat</span>
         </div>
@@ -922,6 +999,7 @@
             <button class="filter-btn" onclick="setCatalogFilter('coding', this)">Coding</button>
             <button class="filter-btn" onclick="setCatalogFilter('general', this)">General</button>
             <button class="filter-btn" onclick="setCatalogFilter('vision', this)">Vision</button>
+            <button class="filter-btn" onclick="setCatalogFilter('uncensored', this)">Uncensored</button>
             <button class="filter-btn" onclick="setCatalogFilter('small', this)">&lt; 4 GB</button>
             <button class="filter-btn" onclick="setCatalogFilter('installed', this)">Installed</button>
           </div>
@@ -929,6 +1007,34 @@
 
         <div id="catalog-list">
           <p style="font-size:13px;color:var(--muted)">Loading catalog...</p>
+        </div>
+
+        <div style="margin-top:20px;padding-top:20px;border-top:1px solid var(--border)">
+          <h3 style="font-size:14px;margin-bottom:12px">Cloud AI Providers</h3>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:8px">
+            Add your own API key to use Claude, ChatGPT, or Gemini alongside your local models.
+            Keys are stored locally in <code>api_keys.json</code> (never committed to git, never sent
+            anywhere except that provider's own API) and never redisplayed once saved.
+          </p>
+          <div id="cloud-providers-list"></div>
+        </div>
+
+        <div style="margin-top:20px;padding-top:20px;border-top:1px solid var(--border)">
+          <h3 style="font-size:14px;margin-bottom:12px">Search Online (Ollama + LM Studio)</h3>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:8px">
+            Live search across both providers — not just the curated list above. Useful for
+            anything newer than this list, including uncensored/abliterated variants.
+          </p>
+          <div style="display:flex;gap:8px">
+            <input type="text" id="online-search-input" placeholder="e.g. abliterated coding" onkeydown="if(event.key==='Enter') searchOnlineModels()">
+            <select id="online-search-provider">
+              <option value="all">All providers</option>
+              <option value="ollama">Ollama only</option>
+              <option value="lmstudio">LM Studio only</option>
+            </select>
+            <button class="btn btn-secondary" onclick="searchOnlineModels()">Search</button>
+          </div>
+          <div id="online-search-results" style="margin-top:12px"></div>
         </div>
 
         <div style="margin-top:20px;padding-top:20px;border-top:1px solid var(--border)">
@@ -955,11 +1061,36 @@
           </div>
 
           <div id="email-setup" style="display:none;padding:12px;border:1px solid var(--border);border-radius:8px;flex-direction:column;gap:8px;flex-shrink:0">
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding-bottom:8px;border-bottom:1px solid var(--border)">
+              <button class="btn btn-accent btn-sm" onclick="startGoogleSignIn()">🔵 Sign in with Google</button>
+              <span style="font-size:11px;color:var(--muted)">Covers both Gmail and Google Calendar in one step — you'll confirm what to import before anything's added.</span>
+              <button class="btn btn-secondary btn-sm" style="margin-left:auto" onclick="toggleGoogleOAuthSetup()">⚙ Google setup</button>
+            </div>
+            <div id="google-oauth-setup" style="display:none;gap:8px;flex-wrap:wrap;padding-bottom:8px;border-bottom:1px solid var(--border)">
+              <div style="font-size:11px;color:var(--muted);flex-basis:100%">
+                One-time setup, done once by you in Google's own developer console (needs your Google login — I can't do this part):
+                create a project at <a href="https://console.cloud.google.com" target="_blank" rel="noopener" style="color:var(--accent2)">console.cloud.google.com</a>,
+                enable the Gmail API and Google Calendar API, configure the OAuth consent screen (External, add yourself as a test user),
+                then create an OAuth Client ID (type "Web application") with authorized redirect URI
+                <code id="google-redirect-uri-hint" style="font-size:10px;background:rgba(255,255,255,.05);padding:1px 4px;border-radius:3px"></code>
+                — paste the resulting Client ID and Secret below.
+              </div>
+              <input type="text" id="google-client-id" placeholder="Client ID" style="width:auto;flex:1;min-width:220px">
+              <div class="pw-wrap">
+                <input type="password" id="google-client-secret" placeholder="Client Secret">
+                <button type="button" class="pw-toggle-btn" tabindex="-1" onclick="togglePwVisibility('google-client-secret', this)">👁</button>
+              </div>
+              <button class="btn btn-accent btn-sm" onclick="saveGoogleOAuthConfig()">Save</button>
+              <span id="google-oauth-setup-status" style="font-size:12px;color:var(--muted);flex-basis:100%"></span>
+            </div>
             <div style="display:flex;gap:8px;flex-wrap:wrap">
               <select id="email-provider-select" style="width:auto;min-width:180px" onchange="onEmailProviderChange()"></select>
               <input type="text" id="email-label" placeholder="Label (e.g. Personal Gmail)" style="width:auto;flex:1;min-width:160px">
-              <input type="text" id="email-address" placeholder="you@example.com" style="width:auto;flex:1;min-width:160px">
-              <input type="password" id="email-app-password" placeholder="App password" style="width:auto;flex:1;min-width:160px">
+              <input type="text" id="email-address" placeholder="you@example.com" style="width:auto;flex:1;min-width:160px" onblur="autoDetectEmailSettings()">
+              <div class="pw-wrap">
+                <input type="password" id="email-app-password" placeholder="App password">
+                <button type="button" class="pw-toggle-btn" tabindex="-1" onclick="togglePwVisibility('email-app-password', this)">👁</button>
+              </div>
             </div>
             <div id="email-custom-hosts" style="display:none;gap:8px;flex-wrap:wrap">
               <input type="text" id="email-imap-host" placeholder="IMAP host" style="width:auto;flex:1;min-width:160px">
@@ -1007,17 +1138,29 @@
           </div>
 
           <div style="display:flex;gap:8px;align-items:center;flex-shrink:0;font-size:12px;color:var(--muted);flex-wrap:wrap">
-            <span>Universal subscribe feed (works with Google Calendar, Outlook, Apple Calendar, etc. — add it as "subscribe by URL"):</span>
+            <span>Subscribe-by-URL feed (add this as a "from URL" calendar in Outlook, Apple Calendar, Thunderbird, etc. on a device on this same network):</span>
             <code id="calendar-feed-url" style="font-size:11px;background:rgba(255,255,255,.05);padding:2px 6px;border-radius:4px"></code>
             <button class="btn btn-secondary btn-sm" onclick="copyFeedUrl()">Copy</button>
           </div>
+          <div style="font-size:11px;color:var(--muted);flex-shrink:0">
+            ⚠ Google Calendar can't use this URL as-is — it's a private LAN address and Google's servers fetch subscribed
+            calendars from the public internet, not your local network. Only relevant if you've already exposed this
+            server publicly (e.g. a reverse proxy/port-forward, like the Nextcloud setup) — point Google at that address instead.
+          </div>
 
           <div id="calendar-setup" style="display:none;padding:12px;border:1px solid var(--border);border-radius:8px;flex-direction:column;gap:8px;flex-shrink:0">
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding-bottom:8px;border-bottom:1px solid var(--border)">
+              <button class="btn btn-accent btn-sm" onclick="startGoogleSignIn()">🔵 Sign in with Google</button>
+              <span style="font-size:11px;color:var(--muted)">Real Google Calendar read/write (not just the one-way ICS feed below) — set up once in the Email tab's ⚙ Google setup.</span>
+            </div>
             <div style="display:flex;gap:8px;flex-wrap:wrap">
               <select id="calendar-provider-select" style="width:auto;min-width:180px" onchange="onCalendarProviderChange()"></select>
               <input type="text" id="calendar-label" placeholder="Label (e.g. iCloud Calendar)" style="width:auto;flex:1;min-width:160px">
               <input type="text" id="calendar-username" placeholder="Username / email" style="width:auto;flex:1;min-width:160px">
-              <input type="password" id="calendar-app-password" placeholder="App password" style="width:auto;flex:1;min-width:160px">
+              <div class="pw-wrap">
+                <input type="password" id="calendar-app-password" placeholder="App password">
+                <button type="button" class="pw-toggle-btn" tabindex="-1" onclick="togglePwVisibility('calendar-app-password', this)">👁</button>
+              </div>
             </div>
             <div id="calendar-custom-url" style="display:none;gap:8px">
               <input type="text" id="calendar-caldav-url" placeholder="CalDAV base URL" style="width:auto;flex:1">
@@ -1070,6 +1213,30 @@
 
           <div id="skills-list" class="runner-output" style="flex:1;overflow-y:auto">
             <div class="runner-placeholder">No skills yet.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Lessons Tab -->
+    <div class="tab-panel" id="tab-lessons">
+      <div class="runner-layout">
+        <div class="runner-panel">
+          <div class="runner-toolbar">
+            <h2>📚 Lessons</h2>
+            <span style="font-size:12px;color:var(--muted)">Always-loaded lessons learned from real incidents — unlike Skills, these apply to every task, not just matching ones. Stored in core_lessons.json.</span>
+          </div>
+
+          <div style="border:1px solid var(--border);border-radius:8px;padding:12px;display:flex;flex-direction:column;gap:8px;flex-shrink:0">
+            <h3 style="font-size:13px">Add a lesson</h3>
+            <input type="text" id="lesson-title" placeholder="Title (short, e.g. 'Verify a repo before building from it')">
+            <textarea id="lesson-text" placeholder="The lesson itself — what to actually do differently..." style="min-height:60px;font-family:inherit"></textarea>
+            <textarea id="lesson-why" placeholder="Why (optional) — what incident or reasoning prompted this..." style="min-height:40px;font-family:inherit"></textarea>
+            <button class="btn btn-secondary btn-sm" style="width:fit-content" onclick="addLesson()">+ Save Lesson</button>
+          </div>
+
+          <div id="lessons-list" class="runner-output" style="flex:1;overflow-y:auto">
+            <div class="runner-placeholder">No lessons yet.</div>
           </div>
         </div>
       </div>
@@ -1159,8 +1326,11 @@ const API = 'http://localhost:8081';
 let conversations = [];
 let currentConvId = null;
 let installedModels = [];
-let isStreaming = false;
-let abortController = null;
+let installedModelsLmstudio = [];
+// Keyed by conversation id, not a single global bool/controller — this is
+// what lets the user switch to (or start) a different chat while another is
+// still streaming. Each entry: { abortController, fullText, tokenCount }.
+let activeStreams = new Map();
 let features = [];
 let catalog = [];
 let catalogFilter = 'all';
@@ -1210,7 +1380,22 @@ document.addEventListener('DOMContentLoaded', async () => {
   await loadConversations();
   loadSaveDirConfig();
   loadCatalog();
+  renderWeeklyTokenUsage();
+  document.getElementById('token-usage-menu-btn').addEventListener('click', e => {
+    e.stopPropagation();
+    toggleTokenUsageMenu(e.currentTarget);
+  });
+  document.getElementById('token-usage-menu-btn-inline').addEventListener('click', e => {
+    e.stopPropagation();
+    toggleTokenUsageMenu(e.currentTarget);
+  });
   setInterval(checkStatus, 15000);
+  // Keeps the "resets in Nd" countdown fresh and flips the reset over even if
+  // the tab is just left open with no new messages sent.
+  setInterval(renderWeeklyTokenUsage, 60000);
+  checkForUpdate();
+  handleGoogleOAuthRedirect();
+  setInterval(checkForUpdate, 30 * 60 * 1000);
   document.getElementById('model-select').addEventListener('change', e => {
     localStorage.setItem('selectedModel', e.target.value);
     checkModelFit(e.target.value);
@@ -1242,8 +1427,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('conv-list').addEventListener('click', e => {
     const item = e.target.closest('.conv-item');
     if (!item) return;
-    if (e.target.classList.contains('del-btn')) {
-      deleteConversation(e.target.dataset.cid);
+    if (e.target.classList.contains('conv-menu-btn')) {
+      e.stopPropagation();
+      toggleConvMenu(e.target.dataset.cid, e.target);
     } else {
       loadConversation(item.dataset.cid);
     }
@@ -1252,37 +1438,128 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 // ── Status & Models ────────────────────────────────────────────────────────────
 
+async function checkForUpdate() {
+  const banner = document.getElementById('update-banner');
+  try {
+    const r = await fetch(`${API}/api/update/check`);
+    const d = await r.json();
+    if (!d.update_available) { banner.style.display = 'none'; return; }
+    banner.style.display = 'flex';
+    banner.innerHTML = `
+      <span>🔔 Update available — ${d.commits_behind} commit${d.commits_behind === 1 ? '' : 's'} behind
+        (latest: "${escHtml(d.latest_commit_message || '')}")</span>
+      <button class="btn btn-accent btn-sm" onclick="applyUpdate()">Update now</button>
+      <span style="margin-left:auto;cursor:pointer;color:var(--muted)" onclick="document.getElementById('update-banner').style.display='none'">✕</span>
+    `;
+  } catch { banner.style.display = 'none'; }
+}
+
+async function applyUpdate() {
+  const banner = document.getElementById('update-banner');
+  banner.innerHTML = '<span>Updating…</span>';
+  try {
+    const r = await fetch(`${API}/api/update/apply`, { method: 'POST' });
+    const d = await r.json();
+    if (d.ok) {
+      banner.innerHTML = '<span>✓ Updated — restart the backend (stop and re-run launch.sh) to load the new version.</span>';
+    } else {
+      banner.innerHTML = `<span style="color:var(--danger)">Update failed: ${escHtml(d.error || 'unknown error')}</span>`;
+    }
+  } catch (err) {
+    banner.innerHTML = `<span style="color:var(--danger)">Update failed: ${escHtml(err.message)}</span>`;
+  }
+}
+
 async function checkStatus() {
+  const lmDot = document.getElementById('lmstudio-status-dot');
+  const lmTxt = document.getElementById('lmstudio-status-text');
   try {
     const r = await fetch(`${API}/api/health`);
     const d = await r.json();
     const dot = document.getElementById('status-dot');
     const txt = document.getElementById('status-text');
     if (d.ollama) {
-      dot.className = 'ok'; txt.textContent = 'Ollama connected';
+      dot.className = 'status-dot ok'; txt.textContent = 'Ollama connected';
       await loadModels();
     } else {
-      dot.className = ''; txt.textContent = 'Ollama not running';
+      dot.className = 'status-dot'; txt.textContent = 'Ollama disconnected';
     }
+    lmDot.className = d.lmstudio ? 'status-dot ok' : 'status-dot';
+    lmTxt.textContent = d.lmstudio ? 'LM Studio connected' : 'LM Studio disconnected';
   } catch {
-    document.getElementById('status-dot').className = '';
+    document.getElementById('status-dot').className = 'status-dot';
     document.getElementById('status-text').textContent = 'Backend offline';
+    lmDot.className = 'status-dot';
+    lmTxt.textContent = 'LM Studio disconnected';
   }
+}
+
+function togglePwVisibility(inputId, btnEl) {
+  const input = document.getElementById(inputId);
+  if (!input) return;
+  const showing = input.type === 'text';
+  input.type = showing ? 'password' : 'text';
+  btnEl.textContent = showing ? '👁' : '🙈';
+}
+
+function showAboutModal() {
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;z-index:9999';
+  overlay.innerHTML = `
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:24px;max-width:420px;width:90%;box-shadow:0 8px 30px rgba(0,0,0,.4)">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none">
+          <rect width="24" height="24" rx="6" fill="#238636"/>
+          <path d="M7 8h10M7 12h6M7 16h8" stroke="white" stroke-width="1.8" stroke-linecap="round"/>
+        </svg>
+        <div style="font-weight:600;font-size:16px">LLM Coder — Home Ai Helper</div>
+      </div>
+      <p style="font-size:13px;line-height:1.6;color:var(--text);margin-bottom:14px">
+        A local-first AI assistant that runs entirely on your own hardware via Ollama (with optional LM Studio
+        and cloud-provider models). It chats, writes and runs code, manages files, emails, and calendars,
+        and can install software for you — always asking first and explaining why.
+      </p>
+      <div style="font-size:12px;color:var(--muted);border-top:1px solid var(--border);padding-top:12px">
+        Designed By Browns Entertainment<br>
+        <a href="https://www.example.com" target="_blank" rel="noopener" style="color:var(--accent2)">www.example.com</a>
+      </div>
+      <div style="display:flex;justify-content:flex-end;margin-top:16px">
+        <button id="about-close-btn" class="btn" style="padding:6px 14px">Close</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  const close = () => overlay.remove();
+  overlay.querySelector('#about-close-btn').onclick = close;
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  document.addEventListener('keydown', function onEsc(e) {
+    if (e.key === 'Escape') { close(); document.removeEventListener('keydown', onEsc); }
+  });
 }
 
 async function loadModels() {
   try {
-    const r = await fetch(`${API}/api/models`);
+    const [r, rLmstudio, rCloud] = await Promise.all([
+      fetch(`${API}/api/models`),
+      fetch(`${API}/api/models/lmstudio`).catch(() => null),
+      fetch(`${API}/api/models/cloud`).catch(() => null),
+    ]);
     const d = await r.json();
     installedModels = d.models || [];
+    if (rLmstudio) { try { installedModelsLmstudio = (await rLmstudio.json()).models || []; } catch {} }
+    let cloudModels = [];
+    if (rCloud) { try { cloudModels = (await rCloud.json()).models || []; } catch {} }
+    const allModels = [...installedModels, ...cloudModels];
     const sel = document.getElementById('model-select');
     const prev = sel.value;
-    sel.innerHTML = installedModels.length
-      ? installedModels.map(m => `<option value="${m}">${m}</option>`).join('')
+    sel.innerHTML = allModels.length
+      ? [
+          installedModels.length ? `<optgroup label="Local">${installedModels.map(m => `<option value="${m}">${m}</option>`).join('')}</optgroup>` : '',
+          cloudModels.length ? `<optgroup label="Cloud">${cloudModels.map(m => `<option value="${m}">${m}</option>`).join('')}</optgroup>` : '',
+        ].join('')
       : '<option value="">No models installed</option>';
     const saved = localStorage.getItem('selectedModel');
-    if (saved && installedModels.includes(saved)) sel.value = saved;
-    else if (prev && installedModels.includes(prev)) sel.value = prev;
+    if (saved && allModels.includes(saved)) sel.value = saved;
+    else if (prev && allModels.includes(prev)) sel.value = prev;
     renderModelsTab();
     checkModelFit(sel.value);
   } catch {}
@@ -1318,6 +1595,116 @@ function updateTokenUsageDisplay(totalTokens, modelName) {
     textEl.textContent = `${totalTokens.toLocaleString()} tokens`;
     barEl.style.display = 'none';
   }
+  addToWeeklyTokenUsage(totalTokens);
+}
+
+// ── Configurable-period token usage total ───────────────────────────────────
+// Separate from the context-usage meter above (which shows one conversation's
+// current context size) — this is a running sum across every turn, in every
+// conversation, for a period the user picks via the ⋮ menu (12h/24h/7d/1
+// month/1 year), reset back to 0 once that period elapses (an odometer, not
+// a rolling/sliding sum). Changing the interval restarts the current period
+// immediately rather than trying to re-anchor the existing total to a new
+// window length.
+
+const TOKEN_USAGE_INTERVALS = {
+  '12h': 'every 12 hours',
+  '24h': 'every 24 hours',
+  '7d':  'every 7 days',
+  '1m':  'every month',
+  '1y':  'every year',
+};
+
+function getTokenUsageInterval() {
+  return localStorage.getItem('tokenUsageResetInterval') || '7d';
+}
+
+function getResetDueDate(startMs, interval) {
+  const d = new Date(startMs);
+  if (interval === '12h') return new Date(startMs + 12 * 60 * 60 * 1000);
+  if (interval === '24h') return new Date(startMs + 24 * 60 * 60 * 1000);
+  if (interval === '1m') { d.setMonth(d.getMonth() + 1); return d; }
+  if (interval === '1y') { d.setFullYear(d.getFullYear() + 1); return d; }
+  return new Date(startMs + 7 * 24 * 60 * 60 * 1000); // '7d' and fallback
+}
+
+function setTokenUsageInterval(interval) {
+  localStorage.setItem('tokenUsageResetInterval', interval);
+  // Restart the current period now rather than re-anchoring the old total to
+  // a differently-sized window — simplest to reason about, and this is an
+  // approximate personal-use stat, not something needing perfect continuity.
+  localStorage.setItem('weeklyTokenUsageStart', String(Date.now()));
+  localStorage.setItem('weeklyTokenUsageTotal', '0');
+  renderWeeklyTokenUsage();
+}
+
+function checkWeeklyTokenReset() {
+  const startStr = localStorage.getItem('weeklyTokenUsageStart');
+  const now = Date.now();
+  if (!startStr) {
+    localStorage.setItem('weeklyTokenUsageStart', String(now));
+    localStorage.setItem('weeklyTokenUsageTotal', '0');
+    return;
+  }
+  if (now >= getResetDueDate(parseInt(startStr, 10), getTokenUsageInterval()).getTime()) {
+    localStorage.setItem('weeklyTokenUsageStart', String(now));
+    localStorage.setItem('weeklyTokenUsageTotal', '0');
+  }
+}
+
+function addToWeeklyTokenUsage(turnTokens) {
+  checkWeeklyTokenReset();
+  const total = parseInt(localStorage.getItem('weeklyTokenUsageTotal') || '0', 10) + turnTokens;
+  localStorage.setItem('weeklyTokenUsageTotal', String(total));
+  renderWeeklyTokenUsage();
+}
+
+function formatTimeLeft(ms) {
+  if (ms <= 0) return '0h';
+  const hours = ms / (1000 * 60 * 60);
+  if (hours < 48) return `${Math.ceil(hours)}h`;
+  return `${Math.ceil(hours / 24)}d`;
+}
+
+function renderWeeklyTokenUsage() {
+  checkWeeklyTokenReset();
+  const els = document.querySelectorAll('.token-usage-weekly');
+  if (!els.length) return;
+  const total = parseInt(localStorage.getItem('weeklyTokenUsageTotal') || '0', 10);
+  const startStr = localStorage.getItem('weeklyTokenUsageStart');
+  const interval = getTokenUsageInterval();
+  const dueMs = startStr ? getResetDueDate(parseInt(startStr, 10), interval).getTime() : Date.now();
+  const text = `${total.toLocaleString()} tokens · resets in ${formatTimeLeft(dueMs - Date.now())}`;
+  els.forEach(el => { el.textContent = text; });
+}
+
+let openTokenUsageMenuEl = null;
+
+function closeTokenUsageMenu() {
+  if (openTokenUsageMenuEl) { openTokenUsageMenuEl.remove(); openTokenUsageMenuEl = null; }
+  document.removeEventListener('click', closeTokenUsageMenu);
+}
+
+function toggleTokenUsageMenu(btnEl) {
+  if (openTokenUsageMenuEl) { closeTokenUsageMenu(); return; }
+  const rect = btnEl.getBoundingClientRect();
+  const current = getTokenUsageInterval();
+  const menu = document.createElement('div');
+  menu.className = 'conv-menu';
+  menu.style.top = `${rect.bottom + 4}px`;
+  menu.style.left = `${Math.max(4, rect.right - 150)}px`;
+  menu.innerHTML = Object.entries(TOKEN_USAGE_INTERVALS)
+    .map(([key, label]) => `<button data-interval="${key}">${key === current ? '✓' : ''} Reset ${label}</button>`)
+    .join('');
+  menu.addEventListener('click', e => {
+    e.stopPropagation();
+    const interval = e.target.closest('button')?.dataset.interval;
+    if (interval) setTokenUsageInterval(interval);
+    closeTokenUsageMenu();
+  });
+  document.body.appendChild(menu);
+  openTokenUsageMenuEl = menu;
+  setTimeout(() => document.addEventListener('click', closeTokenUsageMenu), 0);
 }
 
 // ── Conversations ──────────────────────────────────────────────────────────────
@@ -1350,6 +1737,7 @@ function newConversation() {
   renderConvList();
   renderMessages();
   document.getElementById('empty-state').style.display = 'flex';
+  setStreamingUI(false); // brand new conversation, can't already be streaming
   closeCodeEditor();
 }
 
@@ -1359,15 +1747,99 @@ function loadConversation(id) {
   renderMessages();
   const conv = conversations.find(c => c.id === id);
   const empty = document.getElementById('empty-state');
-  empty.style.display = conv && conv.messages.length ? 'none' : 'flex';
+  if (empty) empty.style.display = conv && conv.messages.length ? 'none' : 'flex';
+  // Reflect whatever this conversation's own streaming state actually is —
+  // it may be mid-response in the background if the user started it, then
+  // switched away to look at (or start) something else.
+  const stream = activeStreams.get(id);
+  setStreamingUI(!!stream);
+  if (stream) document.getElementById('token-count').textContent = stream.tokenCount ? `${stream.tokenCount} tokens` : 'Streaming...';
   closeCodeEditor();
 }
 
 function deleteConversation(id) {
+  const conv = conversations.find(c => c.id === id);
+  if (conv && !confirm(`Delete "${conv.title}"? This can't be undone.`)) return;
   conversations = conversations.filter(c => c.id !== id);
   if (currentConvId === id) { currentConvId = null; renderMessages(); }
   saveConvs();
   renderConvList();
+}
+
+// Plain-text transcript used by both Copy and Save — tool calls/results are
+// summarized rather than dumped as raw JSON so the export reads like a
+// conversation, not a debug log.
+function conversationToText(conv) {
+  const lines = [`# ${conv.title}`, ''];
+  for (const m of conv.messages) {
+    if (m.role === 'user') {
+      lines.push(`User: ${m.displayText !== undefined ? m.displayText : m.content}`, '');
+    } else if (m.role === 'assistant') {
+      lines.push(`Assistant: ${m.content}`, '');
+    } else if (m.role === 'tool_call') {
+      lines.push(`[used tool: ${m.name}(${JSON.stringify(m.arguments)})]`, '');
+    } else if (m.role === 'tool_result') {
+      lines.push(`[tool result: ${m.result}]`, '');
+    }
+  }
+  return lines.join('\n');
+}
+
+let openConvMenuEl = null;
+
+function closeConvMenu() {
+  if (openConvMenuEl) { openConvMenuEl.remove(); openConvMenuEl = null; }
+  document.removeEventListener('click', closeConvMenu);
+}
+
+function toggleConvMenu(id, btnEl) {
+  if (openConvMenuEl) { closeConvMenu(); return; }
+  const rect = btnEl.getBoundingClientRect();
+  const menu = document.createElement('div');
+  menu.className = 'conv-menu';
+  menu.style.top = `${rect.bottom + 4}px`;
+  menu.style.left = `${Math.max(4, rect.right - 140)}px`;
+  menu.innerHTML = `
+    <button data-action="copy">📋 Copy</button>
+    <button data-action="save">💾 Save</button>
+    <button data-action="delete" class="danger">🗑 Delete</button>
+  `;
+  menu.addEventListener('click', e => {
+    e.stopPropagation();
+    const action = e.target.closest('button')?.dataset.action;
+    if (action === 'copy') copyConversation(id);
+    else if (action === 'save') saveConversationToFile(id);
+    else if (action === 'delete') deleteConversation(id);
+    closeConvMenu();
+  });
+  document.body.appendChild(menu);
+  openConvMenuEl = menu;
+  // Deferred so this same click doesn't immediately trigger the listener.
+  setTimeout(() => document.addEventListener('click', closeConvMenu), 0);
+}
+
+async function copyConversation(id) {
+  const conv = conversations.find(c => c.id === id);
+  if (!conv) return;
+  try {
+    await navigator.clipboard.writeText(conversationToText(conv));
+  } catch {
+    alert('Could not copy to clipboard — your browser may be blocking clipboard access.');
+  }
+}
+
+function saveConversationToFile(id) {
+  const conv = conversations.find(c => c.id === id);
+  if (!conv) return;
+  const blob = new Blob([conversationToText(conv)], { type: 'text/plain' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${conv.title.replace(/[^a-zA-Z0-9 _-]/g, '').trim() || 'conversation'}.txt`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 function renderConvList() {
@@ -1378,13 +1850,29 @@ function renderConvList() {
   }
   list.innerHTML = conversations.map(c => `
     <div class="conv-item ${c.id === currentConvId ? 'active' : ''}" data-cid="${c.id}">
-      <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">💬 ${escHtml(c.title)}</span>
-      <button class="del-btn" data-cid="${c.id}">×</button>
+      <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${activeStreams.has(c.id) ? '<span class="conv-streaming-dot" title="Still working…"></span>' : '💬'} ${escHtml(c.title)}</span>
+      <button class="conv-menu-btn" data-cid="${c.id}" title="More">⋮</button>
     </div>
   `).join('');
 }
 
 function currentConv() { return conversations.find(c => c.id === currentConvId); }
+
+// The chat surface used to be talk-only (/api/chat, no tool execution); it now
+// runs the same real tool-executing loop as Agent mode. agentHistory is the
+// raw API-format transcript (including tool calls/results) that gives the
+// model context across turns — separate from conv.messages, which is the
+// prettified transcript actually rendered in the UI. Older saved
+// conversations predate this field, so backfill it from the plain
+// user/assistant turns they already have.
+function ensureAgentHistory(conv) {
+  if (!conv.agentHistory) {
+    conv.agentHistory = conv.messages
+      .filter(m => m.role === 'user' || m.role === 'assistant')
+      .map(m => ({ role: m.role, content: m.content }));
+  }
+  return conv.agentHistory;
+}
 
 // ── Chat ───────────────────────────────────────────────────────────────────────
 
@@ -1414,10 +1902,93 @@ function renderMessages() {
   container.innerHTML = conv.messages.map(renderMsg).join('');
   addCopyButtons();
   container.querySelectorAll('pre code').forEach(el => hljs.highlightElement(el));
+  // If this conversation is still streaming in the background, restore its
+  // in-progress bubble — sendMessage() only creates one at send time, but
+  // switching away and back rebuilds this whole container from conv.messages,
+  // which doesn't include the not-yet-committed partial assistant reply.
+  const stream = activeStreams.get(conv.id);
+  if (stream) insertThinkingBubble(stream.fullText);
   container.scrollTop = container.scrollHeight;
 }
 
+// Shown when the agent hits a `sudo`-prefixed run_command and needs
+// elevation to continue (see PENDING_SUDO / /api/sudo/{id} in the backend).
+// On Linux/macOS we collect the actual sudo password here. On Windows there
+// is nothing for us to collect — UAC renders its own prompt on a secure
+// desktop no webpage can read from — so this just asks the human to consent
+// to triggering it, no password field. Resolves to the typed password (or
+// '' on Windows) on Run, or null if the user closed/denied it.
+function requestSudoPassword(command, os) {
+  const isWindows = os === 'Windows';
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;z-index:9999';
+    overlay.innerHTML = `
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:20px;max-width:440px;width:90%;box-shadow:0 8px 30px rgba(0,0,0,.4)">
+        <div style="font-weight:600;margin-bottom:8px;font-size:15px">🔒 The agent wants to run a privileged command</div>
+        <div style="font-size:12px;opacity:.8;margin-bottom:10px">${isWindows
+          ? 'Click Run and approve the Windows permission (UAC) prompt that appears next — enter your password there if it asks, not here.'
+          : 'Enter your sudo password to allow it, or deny it.'}</div>
+        <code style="display:block;font-size:11px;background:rgba(127,127,127,.15);padding:8px;border-radius:6px;word-break:break-all;margin-bottom:12px">${escHtml(command)}</code>
+        ${isWindows ? '' : `<div class="pw-wrap" style="display:block;margin-bottom:12px">
+          <input type="password" id="sudo-pw-input" placeholder="sudo password" autocomplete="off"
+            style="padding:8px;box-sizing:border-box;border-radius:6px;border:1px solid var(--border);background:var(--bg,transparent);color:inherit">
+          <button type="button" class="pw-toggle-btn" tabindex="-1" onclick="togglePwVisibility('sudo-pw-input', this)">👁</button>
+        </div>`}
+        <div style="display:flex;gap:8px;justify-content:flex-end">
+          <button id="sudo-pw-cancel" class="btn" style="padding:6px 14px">Deny</button>
+          <button id="sudo-pw-submit" class="btn primary" style="padding:6px 14px">Run</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const input = overlay.querySelector('#sudo-pw-input');
+    const finish = (val) => { overlay.remove(); resolve(val); };
+    overlay.querySelector('#sudo-pw-submit').onclick = () => finish(isWindows ? '' : input.value);
+    overlay.querySelector('#sudo-pw-cancel').onclick = () => finish(null);
+    overlay.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') finish(isWindows ? '' : input.value);
+      if (e.key === 'Escape') finish(null);
+    });
+    setTimeout(() => (input || overlay.querySelector('#sudo-pw-submit')).focus(), 0);
+  });
+}
+
+// Fire-and-forget: prompts for a password/consent and POSTs the answer.
+// Doesn't block the caller's stream-reading loop — the backend just sits
+// there awaiting the future until this resolves, so the stream naturally
+// stalls until the user responds.
+async function handleSudoRequired(data) {
+  const password = await requestSudoPassword(data.command, data.os);
+  try {
+    await fetch(`${API}/api/sudo/${data.request_id}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: password || '', cancel: password === null })
+    });
+  } catch {}
+}
+
 function renderMsg(msg, idx) {
+  if (msg.role === 'tool_call') {
+    return `
+    <div class="message">
+      <div class="avatar ai-av">🔧</div>
+      <div class="bubble" style="font-size:13px">
+        <strong>Using tool:</strong> ${escHtml(msg.name)}<br>
+        <code style="font-size:11px;background:rgba(255,255,255,.1);padding:2px 6px;border-radius:4px">${escHtml(JSON.stringify(msg.arguments))}</code>
+      </div>
+    </div>`;
+  }
+  if (msg.role === 'tool_result') {
+    return `
+    <div class="message">
+      <div class="avatar ai-av">📋</div>
+      <div class="bubble" style="font-size:12px;background:rgba(210,153,34,.1);border-color:rgba(210,153,34,.3)">
+        <strong>Result of ${escHtml(msg.name)}:</strong>
+        <pre style="margin:4px 0 0;font-size:11px;white-space:pre-wrap">${escHtml((msg.result || '').slice(0, 500))}</pre>
+      </div>
+    </div>`;
+  }
   const isUser = msg.role === 'user';
   // Older saved messages have no displayText/attachments — fall back to the raw content.
   const displayText = isUser && msg.displayText !== undefined ? msg.displayText : msg.content;
@@ -1484,21 +2055,27 @@ function sendQuick(text) {
 }
 
 function stopStreaming() {
-  if (abortController) { abortController.abort(); abortController = null; }
+  // Stops whichever conversation is currently being viewed — not necessarily
+  // the only one streaming, since other chats may be running in the background.
+  const stream = activeStreams.get(currentConvId);
+  if (stream && stream.abortController) stream.abortController.abort();
 }
 
 async function sendMessage() {
   const input = document.getElementById('chat-input');
   const text = input.value.trim();
-  if (!text || isStreaming) return;
+  if (!currentConvId) newConversation();
+  // Captured once — this whole function tracks ITS conversation from here on,
+  // even if the user switches to (or starts) a different chat while this one
+  // is still streaming. Never rely on the (mutable) currentConvId global below.
+  const convId = currentConvId;
+  if (!text || activeStreams.has(convId)) return;
 
   const model = document.getElementById('model-select').value;
   if (!model) { alert('Please select a model first'); return; }
 
-  if (!currentConvId) newConversation();
-  document.getElementById('token-count').textContent = 'Streaming...';
-
-  const conv = currentConv();
+  const conv = conversations.find(c => c.id === convId);
+  const viewingThis = () => currentConvId === convId;
 
   let messageContent = text;
   let attachmentsMeta = [];
@@ -1516,54 +2093,58 @@ async function sendMessage() {
     messageContent = `${fileContext}\n\n${text}`;
     attachmentsMeta = pendingFiles.map(f => ({ filename: f.filename, type: f.type, size: f.size }));
     pendingFiles = [];
-    document.getElementById('file-attachments').innerHTML = '';
-    document.getElementById('file-attachments').style.display = 'none';
+    if (viewingThis()) {
+      document.getElementById('file-attachments').innerHTML = '';
+      document.getElementById('file-attachments').style.display = 'none';
+    }
   }
 
   // displayText/attachments drive the chat-bubble preview; content (with the
   // full file text inlined) is what actually gets sent to the model.
   conv.messages.push({ role: 'user', content: messageContent, displayText: text, attachments: attachmentsMeta });
+  ensureAgentHistory(conv).push({ role: 'user', content: messageContent });
   if (conv.title === 'New Chat') conv.title = text.slice(0, 40);
   saveConvs();
+  renderConvList();
 
-  input.value = '';
-  input.style.height = 'auto';
-  document.getElementById('empty-state')?.remove();
-
-  renderMessages();
-
-  const container = document.getElementById('chat-messages');
-  const thinkDiv = document.createElement('div');
-  thinkDiv.className = 'message';
-  thinkDiv.id = 'thinking-msg';
-  thinkDiv.innerHTML = `
-    <div class="avatar ai-av">🤖</div>
-    <div class="bubble"><div class="thinking"><span></span><span></span><span></span></div></div>
-  `;
-  container.appendChild(thinkDiv);
-  container.scrollTop = container.scrollHeight;
-
-  const sendBtn = document.getElementById('send-btn');
-  const stopBtn = document.getElementById('stop-btn');
-  sendBtn.style.display = 'none';
-  stopBtn.style.display = '';
-  isStreaming = true;
-  document.getElementById('chat-activity-bar').classList.add('active');
-
-  let fullText = '';
-  let tokenCount = 0;
-  // Throttle DOM updates — at most one innerHTML rebuild every 80ms to avoid
-  // hammering the GPU with browser compositing while Ollama is running inference.
-  let renderPending = false;
-  const bubbleEl = thinkDiv.querySelector('.bubble');
-
-  function flushRender() {
-    renderPending = false;
-    bubbleEl.innerHTML = renderMarkdown(fullText);
-    addCopyButtons();
-    container.scrollTop = container.scrollHeight;
+  if (viewingThis()) {
+    input.value = '';
+    input.style.height = 'auto';
+    document.getElementById('empty-state')?.remove();
+    renderMessages();
   }
 
+  const streamState = { abortController: new AbortController(), fullText: '', tokenCount: 0 };
+  activeStreams.set(convId, streamState);
+  renderConvList(); // shows the streaming dot next to this chat right away
+
+  // Renders the streaming bubble for `convId` if (and only if) it's the
+  // conversation currently on screen — every DOM touch below goes through
+  // this so a background chat's tokens never bleed into whatever the user
+  // has switched to looking at. Re-queried every call rather than closed
+  // over once, since renderMessages()/loadConversation() recreate the DOM
+  // node whenever the user navigates away from and back to this chat.
+  function bubbleIfViewing() {
+    if (!viewingThis()) return null;
+    const think = document.getElementById('thinking-msg');
+    return think ? think.querySelector('.bubble') : null;
+  }
+
+  if (viewingThis()) {
+    setStreamingUI(true);
+    insertThinkingBubble(streamState.fullText);
+  }
+
+  let renderPending = false;
+  function flushRender() {
+    renderPending = false;
+    const bubbleEl = bubbleIfViewing();
+    if (!bubbleEl) return;
+    bubbleEl.innerHTML = streamState.fullText ? renderMarkdown(streamState.fullText) : '<div class="thinking"><span></span><span></span><span></span></div>';
+    addCopyButtons();
+    const container = document.getElementById('chat-messages');
+    container.scrollTop = container.scrollHeight;
+  }
   function scheduleRender() {
     if (!renderPending) {
       renderPending = true;
@@ -1571,11 +2152,9 @@ async function sendMessage() {
     }
   }
 
-  abortController = new AbortController();
-
   try {
     const system = document.getElementById('system-prompt').value;
-    let cleanMessages = conv.messages.filter((m, i, arr) => {
+    let cleanMessages = ensureAgentHistory(conv).filter((m, i, arr) => {
       if (m.role === 'user' && i < arr.length - 1 && arr[i + 1].role === 'user') return false;
       return true;
     });
@@ -1584,16 +2163,19 @@ async function sendMessage() {
       cleanMessages = cleanMessages.slice(-MAX_HISTORY_MESSAGES);
     }
 
-    const res = await fetch(`${API}/api/chat`, {
+    // Chat now runs the same real tool-executing agent loop as Agent mode
+    // (/api/agent) instead of a talk-only endpoint — so asking it to fix,
+    // install, or write something actually does it instead of just
+    // describing what it would do.
+    const res = await fetch(`${API}/api/agent`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, messages: cleanMessages, system }),
-      signal: abortController.signal
+      body: JSON.stringify({ model, message: text, conversation: cleanMessages, system }),
+      signal: streamState.abortController.signal
     });
 
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
-    bubbleEl.innerHTML = '';
 
     while (true) {
       const { done, value } = await reader.read();
@@ -1601,49 +2183,119 @@ async function sendMessage() {
       for (const line of decoder.decode(value).split('\n').filter(Boolean)) {
         try {
           const data = JSON.parse(line);
-          if (data.message?.content) {
-            fullText += data.message.content;
-            tokenCount++;
-            document.getElementById('token-count').textContent = `${tokenCount} tokens`;
+          if (data.type === 'token') {
+            streamState.fullText += data.content;
+            streamState.tokenCount++;
+            if (viewingThis()) document.getElementById('token-count').textContent = `${streamState.tokenCount} tokens`;
             scheduleRender();
-          }
-          // Ollama's final chunk carries real token counts — prompt_eval_count
-          // is how much context this turn actually used, eval_count is what
-          // it generated. Together that's the conversation's current context
-          // size, far more accurate than counting streamed chunks.
-          if (data.done && typeof data.prompt_eval_count === 'number') {
-            const total = data.prompt_eval_count + (data.eval_count || 0);
-            updateTokenUsageDisplay(total, model);
+          } else if (data.type === 'tool_call') {
+            // That turn's whole "response" was just the tool-call fence, not
+            // real narration for the user — don't leave it flashed in the bubble.
+            streamState.fullText = '';
+            conv.messages.push({ role: 'tool_call', name: data.name, arguments: data.arguments });
+            if (viewingThis()) {
+              flushRender();
+              const container = document.getElementById('chat-messages');
+              container.insertAdjacentHTML('beforeend', renderMsg({ role: 'tool_call', name: data.name, arguments: data.arguments }));
+              container.scrollTop = container.scrollHeight;
+            }
+          } else if (data.type === 'tool_result') {
+            conv.messages.push({ role: 'tool_result', name: data.name, result: data.result });
+            if (viewingThis()) {
+              const container = document.getElementById('chat-messages');
+              container.insertAdjacentHTML('beforeend', renderMsg({ role: 'tool_result', name: data.name, result: data.result }));
+              container.scrollTop = container.scrollHeight;
+            }
+          } else if (data.type === 'sudo_required') {
+            if (viewingThis()) {
+              const container = document.getElementById('chat-messages');
+              container.insertAdjacentHTML('beforeend', `
+                <div class="message">
+                  <div class="avatar ai-av">🔒</div>
+                  <div class="bubble" style="font-size:13px">Waiting for your sudo password to run:<br>
+                    <code style="font-size:11px;background:rgba(255,255,255,.1);padding:2px 6px;border-radius:4px">${escHtml(data.command)}</code>
+                  </div>
+                </div>`);
+              container.scrollTop = container.scrollHeight;
+            }
+            handleSudoRequired(data);
+          } else if (data.type === 'done') {
+            streamState.fullText = data.content;
+            if (data.conversation) conv.agentHistory = data.conversation;
+            // Ollama's final chunk carries real token counts — prompt_eval_count
+            // is how much context this turn actually used, eval_count is what
+            // it generated. Together that's the conversation's current context
+            // size, far more accurate than counting streamed chunks. The
+            // running weekly/monthly total is real usage regardless of which
+            // chat is on screen right now, so it always counts; the visible
+            // context-usage bar only updates if this is the chat being viewed.
+            if (data.usage) {
+              const totalTokens = data.usage.prompt_eval_count + (data.usage.eval_count || 0);
+              addToWeeklyTokenUsage(totalTokens);
+              if (viewingThis()) updateTokenUsageDisplay(totalTokens, model);
+            }
+          } else if (data.type === 'error') {
+            const bubbleEl = bubbleIfViewing();
+            if (bubbleEl) bubbleEl.innerHTML = 'Error: ' + escHtml(data.content);
+            if (data.conversation) conv.agentHistory = data.conversation;
           }
         } catch {}
       }
     }
   } catch (err) {
     if (err.name !== 'AbortError') {
-      thinkDiv.querySelector('.bubble').textContent = 'Error: ' + err.message;
+      const bubbleEl = bubbleIfViewing();
+      if (bubbleEl) bubbleEl.textContent = 'Error: ' + err.message;
     }
   }
 
   // Final render with syntax highlighting (done once, not on every chunk)
-  if (fullText) {
-    conv.messages.push({ role: 'assistant', content: fullText });
-    // Set before addCopyButtons() so the Edit button can resolve this message
-    // index right away, without needing a full renderMessages() re-render.
-    bubbleEl.dataset.msgIdx = conv.messages.length - 1;
-    bubbleEl.innerHTML = renderMarkdown(fullText);
-    addCopyButtons();
-    bubbleEl.querySelectorAll('pre code').forEach(el => hljs.highlightElement(el));
-    container.scrollTop = container.scrollHeight;
+  if (streamState.fullText) {
+    conv.messages.push({ role: 'assistant', content: streamState.fullText });
+    const bubbleEl = bubbleIfViewing();
+    if (bubbleEl) {
+      // Set before addCopyButtons() so the Edit button can resolve this message
+      // index right away, without needing a full renderMessages() re-render.
+      bubbleEl.dataset.msgIdx = conv.messages.length - 1;
+      bubbleEl.innerHTML = renderMarkdown(streamState.fullText);
+      addCopyButtons();
+      bubbleEl.querySelectorAll('pre code').forEach(el => hljs.highlightElement(el));
+      document.getElementById('chat-messages').scrollTop = document.getElementById('chat-messages').scrollHeight;
+    }
     saveConvs();
-    renderConvList();
   }
 
-  thinkDiv.id = '';
-  isStreaming = false;
-  abortController = null;
-  sendBtn.style.display = '';
-  stopBtn.style.display = 'none';
-  document.getElementById('chat-activity-bar').classList.remove('active');
+  activeStreams.delete(convId);
+  renderConvList();
+  if (viewingThis()) {
+    const think = document.getElementById('thinking-msg');
+    if (think) think.id = '';
+    setStreamingUI(false);
+  }
+}
+
+// Shows/hides the send/stop buttons and activity bar for whichever
+// conversation is currently on screen — called both from sendMessage() (for
+// the chat that's actually running) and from loadConversation() (so
+// switching into a chat that's streaming in the background immediately
+// reflects that, and switching into an idle one immediately looks idle).
+function setStreamingUI(streaming) {
+  document.getElementById('send-btn').style.display = streaming ? 'none' : '';
+  document.getElementById('stop-btn').style.display = streaming ? '' : 'none';
+  document.getElementById('chat-activity-bar').classList.toggle('active', streaming);
+}
+
+function insertThinkingBubble(existingText) {
+  const container = document.getElementById('chat-messages');
+  const thinkDiv = document.createElement('div');
+  thinkDiv.className = 'message';
+  thinkDiv.id = 'thinking-msg';
+  thinkDiv.innerHTML = `
+    <div class="avatar ai-av">🤖</div>
+    <div class="bubble">${existingText ? renderMarkdown(existingText) : '<div class="thinking"><span></span><span></span><span></span></div>'}</div>
+  `;
+  container.appendChild(thinkDiv);
+  container.scrollTop = container.scrollHeight;
 }
 
 // ── App Analyzer ───────────────────────────────────────────────────────────────
@@ -1828,6 +2480,7 @@ async function loadCatalog() {
     const note = document.getElementById('models-ram-note');
     if (note && ram.total_gb) note.textContent = `This machine has ${ram.total_gb} GB RAM (${ram.available_gb} GB free).`;
   } catch {}
+  renderCloudProviders();
 }
 
 function setCatalogFilter(filter, btn) {
@@ -1839,11 +2492,14 @@ function setCatalogFilter(filter, btn) {
 
 function renderModelsTab() {
   const search = (document.getElementById('catalog-search')?.value || '').toLowerCase();
-  const isInstalled = name => installedModels.some(im => im === name || im.startsWith(name.split(':')[0] + ':'));
+  const isInstalled = (name, provider) => {
+    const list = provider === 'lmstudio' ? installedModelsLmstudio : installedModels;
+    return list.some(im => im === name || im.startsWith(name.split(':')[0] + ':'));
+  };
 
   let items = catalog.filter(m => {
     if (catalogFilter === 'small')     return m.size_gb < 4;
-    if (catalogFilter === 'installed') return isInstalled(m.name);
+    if (catalogFilter === 'installed') return isInstalled(m.name, m.provider);
     if (catalogFilter !== 'all')       return m.category === catalogFilter;
     return true;
   }).filter(m => !search || m.name.toLowerCase().includes(search) || m.desc.toLowerCase().includes(search));
@@ -1867,13 +2523,15 @@ function renderModelsTab() {
   }
 
   el.innerHTML = items.map(m => {
-    const installed = isInstalled(m.name);
-    const id = m.name.replace(/[:.]/g, '_');
+    const provider = m.provider || 'ollama';
+    const installed = isInstalled(m.name, provider);
+    const id = m.name.replace(/[:.\/]/g, '_');
     const sizeLabel = m.size_gb == null ? '' : m.size_gb >= 20 ? `${m.size_gb} GB — needs CPU offload` : `${m.size_gb} GB`;
+    const providerBadge = `<span class="model-badge">${provider === 'lmstudio' ? 'LM Studio' : 'Ollama'}</span>`;
     return `
       <div class="model-card" id="card-${id}">
         <div class="model-info">
-          <div class="model-name">${m.name}</div>
+          <div class="model-name">${m.name} ${providerBadge}</div>
           <div class="model-desc">${m.desc}</div>
           ${sizeLabel ? `<div class="model-size">${sizeLabel}</div>` : ''}
           <div class="pull-progress" id="progress-${id}"></div>
@@ -1881,23 +2539,126 @@ function renderModelsTab() {
         <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">
           <span class="model-status ${installed ? '' : 'not-installed'}">${installed ? 'Installed' : 'Not installed'}</span>
           ${installed
-            ? `<button class="btn btn-accent btn-sm" onclick="useModel('${m.name}')">Use</button>
-               <button class="btn btn-secondary btn-sm" onclick="deleteModel('${m.name}')">Remove</button>`
-            : `<button class="btn btn-accent btn-sm" onclick="pullModel('${m.name}', document.getElementById('progress-${id}'))">Pull</button>`
+            ? (provider === 'ollama'
+                ? `<button class="btn btn-accent btn-sm" onclick="useModel('${m.name}')">Use</button>
+                   <button class="btn btn-secondary btn-sm" onclick="deleteModel('${m.name}')">Remove</button>`
+                : `<span style="font-size:11px;color:var(--muted)" title="Chat/Agent only talks to Ollama models right now">Installed in LM Studio</span>`)
+            : `<button class="btn btn-accent btn-sm" onclick="pullModel('${m.name}', document.getElementById('progress-${id}'), '${provider}')">Pull</button>`
           }
         </div>
       </div>`;
   }).join('');
 }
 
-async function pullModel(modelName, progressEl) {
-  const id = modelName.replace(/[:.]/g, '_');
+async function renderCloudProviders() {
+  const el = document.getElementById('cloud-providers-list');
+  if (!el) return;
+  try {
+    const r = await fetch(`${API}/api/keys`);
+    const providers = await r.json();
+    el.innerHTML = Object.entries(providers).map(([id, p]) => `
+      <div class="model-card" id="cloud-card-${id}">
+        <div class="model-info">
+          <div class="model-name">${escHtml(p.label)}</div>
+          <div class="model-desc">${p.configured ? '✓ API key configured' : 'No API key set'}</div>
+        </div>
+        <div style="display:flex;gap:6px;align-items:center">
+          <div class="pw-wrap" style="flex:none;width:180px">
+            <input type="password" id="cloud-key-${id}" placeholder="${p.configured ? 'Replace key…' : 'Paste API key…'}"
+              style="padding:6px 8px;border-radius:6px;border:1px solid var(--border);background:var(--bg,transparent);color:inherit">
+            <button type="button" class="pw-toggle-btn" tabindex="-1" onclick="togglePwVisibility('cloud-key-${id}', this)">👁</button>
+          </div>
+          <button class="btn btn-accent btn-sm" onclick="saveApiKey('${id}')">Save</button>
+          ${p.configured ? `<button class="btn btn-secondary btn-sm" onclick="clearApiKey('${id}')">Remove</button>` : ''}
+        </div>
+      </div>`).join('');
+  } catch {
+    el.innerHTML = '<p style="font-size:13px;color:var(--muted)">Could not load provider status.</p>';
+  }
+}
+
+async function saveApiKey(provider) {
+  const input = document.getElementById(`cloud-key-${provider}`);
+  const key = input.value.trim();
+  if (!key) return;
+  const card = document.getElementById(`cloud-card-${provider}`);
+  const desc = card?.querySelector('.model-desc');
+  const original = desc?.textContent;
+  if (desc) desc.textContent = 'Checking key…';
+  try {
+    const r = await fetch(`${API}/api/keys`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider, key })
+    });
+    if (!r.ok) {
+      const e = await r.json();
+      throw new Error(e.detail || 'Key was rejected');
+    }
+    input.value = '';
+    await renderCloudProviders();
+    await loadModels();
+  } catch (err) {
+    if (desc) desc.textContent = 'Error: ' + err.message;
+    else alert('Error: ' + err.message);
+  }
+}
+
+async function clearApiKey(provider) {
+  if (!confirm(`Remove the saved API key for this provider?`)) return;
+  await fetch(`${API}/api/keys`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ provider, key: '' })
+  });
+  await renderCloudProviders();
+  await loadModels();
+}
+
+async function searchOnlineModels() {
+  const q = document.getElementById('online-search-input').value.trim();
+  const provider = document.getElementById('online-search-provider').value;
+  const el = document.getElementById('online-search-results');
+  if (!q) { el.innerHTML = ''; return; }
+  el.innerHTML = '<p style="font-size:13px;color:var(--muted)">Searching…</p>';
+  try {
+    const r = await fetch(`${API}/api/models/search?q=${encodeURIComponent(q)}&provider=${provider}`);
+    const d = await r.json();
+    const results = d.results || [];
+    if (!results.length) { el.innerHTML = '<p style="font-size:13px;color:var(--muted)">No results.</p>'; return; }
+    el.innerHTML = results.map(m => {
+      const installed = (m.provider === 'lmstudio' ? installedModelsLmstudio : installedModels)
+        .some(im => im === m.name || im.startsWith(m.name.split(':')[0] + ':'));
+      const id = 'online_' + m.name.replace(/[^a-zA-Z0-9]/g, '_');
+      const providerBadge = `<span class="model-badge">${m.provider === 'lmstudio' ? 'LM Studio' : 'Ollama'}</span>`;
+      return `
+        <div class="model-card" id="card-${id}">
+          <div class="model-info">
+            <div class="model-name">${m.name} ${providerBadge}</div>
+            <div class="model-desc">${m.desc}${m.size_label ? ' · ' + m.size_label : ''}</div>
+            <div class="pull-progress" id="progress-${id}"></div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">
+            ${installed
+              ? `<span class="model-status">Installed</span>`
+              : `<button class="btn btn-accent btn-sm" onclick="pullModel('${m.name}', document.getElementById('progress-${id}'), '${m.provider}')">Install</button>`
+            }
+          </div>
+        </div>`;
+    }).join('');
+  } catch (err) {
+    el.innerHTML = `<span style="color:var(--danger)">Error: ${err.message}</span>`;
+  }
+}
+
+async function pullModel(modelName, progressEl, provider = 'ollama') {
+  const id = modelName.replace(/[:.\/]/g, '_');
   progressEl.innerHTML = `<progress max="100" value="0" id="pb-${id}"></progress><div id="pstatus-${id}">Starting download...</div>`;
   try {
     const res = await fetch(`${API}/api/models/pull`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: modelName })
+      body: JSON.stringify({ model: modelName, provider })
     });
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
@@ -2014,11 +2775,40 @@ let filesLoadedOnce = false;
 let emailInitedOnce = false;
 let calendarInitedOnce = false;
 let skillsInitedOnce = false;
+let lessonsInitedOnce = false;
 let routinesInitedOnce = false;
+
+function scrollTabs(direction) {
+  document.getElementById('tabs-scroller').scrollBy({ left: direction * 160, behavior: 'smooth' });
+}
+
+// The arrows only make sense when the tab strip actually overflows its
+// container, and each side should disable itself once you've scrolled all
+// the way there — otherwise they sit at the edge doing nothing and look
+// broken/invisible rather than genuinely reflecting whether scrolling is
+// possible. Re-run on resize (window growing/shrinking changes whether the
+// strip overflows at all) and on scroll (reaching either end).
+function updateTabArrows() {
+  const scroller = document.getElementById('tabs-scroller');
+  const arrows = document.querySelectorAll('.tabs-arrow');
+  const leftArrow = arrows[0], rightArrow = arrows[1];
+  if (!scroller || !leftArrow || !rightArrow) return;
+  const overflowing = scroller.scrollWidth > scroller.clientWidth + 1;
+  leftArrow.disabled = !overflowing || scroller.scrollLeft <= 0;
+  rightArrow.disabled = !overflowing || scroller.scrollLeft >= scroller.scrollWidth - scroller.clientWidth - 1;
+  leftArrow.style.opacity = leftArrow.disabled ? '0.25' : '1';
+  rightArrow.style.opacity = rightArrow.disabled ? '0.25' : '1';
+}
+window.addEventListener('resize', updateTabArrows);
+document.addEventListener('DOMContentLoaded', () => {
+  updateTabArrows();
+  const scroller = document.getElementById('tabs-scroller');
+  if (scroller) scroller.addEventListener('scroll', updateTabArrows);
+});
 
 function switchTab(name) {
   document.querySelectorAll('.tab').forEach((t, i) => {
-    const names = ['chat', 'analyze', 'generate', 'runner', 'agent', 'files', 'search', 'imagegen', 'models', 'email', 'calendar', 'skills', 'routines'];
+    const names = ['chat', 'analyze', 'generate', 'runner', 'agent', 'files', 'search', 'imagegen', 'models', 'email', 'calendar', 'skills', 'lessons', 'routines'];
     t.classList.toggle('active', names[i] === name);
   });
   document.querySelectorAll('.tab-panel').forEach(p => {
@@ -2028,6 +2818,7 @@ function switchTab(name) {
   if (name === 'email' && !emailInitedOnce) { emailInitedOnce = true; initEmailTab(); }
   if (name === 'calendar' && !calendarInitedOnce) { calendarInitedOnce = true; initCalendarTab(); }
   if (name === 'skills' && !skillsInitedOnce) { skillsInitedOnce = true; loadSkills(); }
+  if (name === 'lessons' && !lessonsInitedOnce) { lessonsInitedOnce = true; loadLessons(); }
   if (name === 'routines' && !routinesInitedOnce) { routinesInitedOnce = true; loadRoutines(); }
   if (name === 'search' && !searchIndexCheckedOnce) { searchIndexCheckedOnce = true; checkSearchIndexStatus(); }
 }
@@ -2571,6 +3362,17 @@ async function runAgent() {
                   <pre style="margin:4px 0 0;font-size:11px;white-space:pre-wrap">${escHtml(data.result.slice(0,500))}</pre>
                 </div>
               </div>`;
+          } else if (data.type === 'sudo_required') {
+            conv.innerHTML += `
+              <div class="message" style="max-width:900px;width:100%;display:flex;gap:12px;animation:fadeIn .2s ease">
+                <div class="avatar ai-av" style="width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0;border:1px solid var(--border);background:var(--surface)">🔒</div>
+                <div class="bubble" style="max-width:calc(100% - 50px);font-size:13px">
+                  Waiting for your sudo password to run:<br>
+                  <code style="font-size:11px;background:rgba(255,255,255,.1);padding:2px 6px;border-radius:4px">${escHtml(data.command)}</code>
+                </div>
+              </div>`;
+            conv.scrollTop = conv.scrollHeight;
+            handleSudoRequired(data);
           } else if (data.type === 'done') {
             fullText = data.content;
             // Adopt the server's authoritative conversation state — it
@@ -2853,6 +3655,189 @@ function onEmailProviderChange() {
   document.getElementById('email-provider-note').textContent = p?.note || '';
 }
 
+let lastAutoDetectedEmail = '';
+
+// Fires when the email address field loses focus — same idea as Thunderbird's
+// account setup, which auto-detects IMAP/SMTP settings from just the address
+// instead of making you look up and type your provider's host/port. Known
+// domains (gmail.com, outlook.com, etc.) resolve instantly against the
+// existing provider list; anything else queries Mozilla's autoconfig/ISPDB
+// protocol, which covers most other providers too. Falls back to manual
+// "Custom" entry — silently, since not finding one isn't an error, just means
+// the user fills in host/port themselves like before.
+async function autoDetectEmailSettings() {
+  const email = document.getElementById('email-address').value.trim();
+  if (!email.includes('@') || email === lastAutoDetectedEmail) return;
+  lastAutoDetectedEmail = email;
+  const status = document.getElementById('email-setup-status');
+  status.textContent = 'Detecting mail settings…';
+  try {
+    const r = await fetch(`${API}/api/email/autoconfig?email=${encodeURIComponent(email)}`);
+    if (!r.ok) { status.textContent = ''; return; }
+    const d = await r.json();
+    const select = document.getElementById('email-provider-select');
+    if (d.provider && emailProviders[d.provider]) {
+      select.value = d.provider;
+      onEmailProviderChange();
+    }
+    if (d.provider === 'custom' || !emailProviders[d.provider]) {
+      select.value = 'custom';
+      onEmailProviderChange();
+      document.getElementById('email-imap-host').value = d.imap_host || '';
+      document.getElementById('email-smtp-host').value = d.smtp_host || '';
+    }
+    status.textContent = `✓ Detected mail settings for ${email.split('@')[1]}`;
+    setTimeout(() => { if (status.textContent.startsWith('✓ Detected')) status.textContent = ''; }, 3000);
+  } catch {
+    status.textContent = '';
+  }
+}
+
+// ── Google Sign-In (OAuth) ───────────────────────────────────────────────────
+
+function toggleGoogleOAuthSetup() {
+  const box = document.getElementById('google-oauth-setup');
+  const showing = box.style.display !== 'none';
+  box.style.display = showing ? 'none' : 'flex';
+  if (!showing) document.getElementById('google-redirect-uri-hint').textContent = `${location.origin}/api/oauth/google/callback`;
+}
+
+async function saveGoogleOAuthConfig() {
+  const client_id = document.getElementById('google-client-id').value.trim();
+  const client_secret = document.getElementById('google-client-secret').value.trim();
+  const status = document.getElementById('google-oauth-setup-status');
+  if (!client_id || !client_secret) { status.textContent = 'Enter both the Client ID and Secret.'; return; }
+  try {
+    const r = await fetch(`${API}/api/oauth/google/config`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ client_id, client_secret })
+    });
+    if (!r.ok) throw new Error('Save failed');
+    document.getElementById('google-client-id').value = '';
+    document.getElementById('google-client-secret').value = '';
+    status.textContent = '✓ Saved — click "Sign in with Google" to try it.';
+  } catch (err) {
+    status.textContent = 'Error: ' + err.message;
+  }
+}
+
+async function startGoogleSignIn() {
+  // Checked here first, not just left to the backend to reject — a plain GET
+  // navigation to an endpoint that 400s lands you on a bare JSON error page
+  // with no link back into the app at all, unlike every other error path in
+  // this app which surfaces inline. Real success still redirects Google's
+  // consent screen back to `/`, same as before.
+  try {
+    const r = await fetch(`${API}/api/oauth/google/config`);
+    const { configured } = await r.json();
+    if (!configured) {
+      alert('Google sign-in isn\'t set up yet — open "⚙ Google setup" above and follow the one-time steps first.');
+      return;
+    }
+  } catch {
+    alert('Could not reach the backend to check Google sign-in status.');
+    return;
+  }
+  const popup = window.open(`${API}/api/oauth/google/login`, 'google-oauth', 'width=520,height=680');
+  if (!popup) {
+    alert('Your browser blocked the sign-in pop-up — allow pop-ups for this site and try again.');
+  }
+}
+
+// Runs on every page load — Google redirects back to `/` (not straight to a
+// JSON endpoint) after consent, with the result in the query string, since
+// that's the only page this app serves. Cleans the query string off afterward
+// so a refresh doesn't re-trigger the same prompt.
+// Runs on every page load. Normally this fires inside the popup window (see
+// startGoogleSignIn) once Google redirects it back to `/` — in that case we
+// hand the result off to the main window via postMessage and close ourselves,
+// so the user's actual LLM Coder tab/window is never navigated away from at
+// all. If there's no opener (popup was blocked and Google redirected the main
+// window directly instead), fall back to handling it right here.
+async function handleGoogleOAuthRedirect() {
+  const params = new URLSearchParams(location.search);
+  const pendingId = params.get('google_oauth_pending');
+  const error = params.get('google_oauth_error');
+  if (!pendingId && !error) return;
+  history.replaceState({}, '', location.pathname);
+
+  if (window.opener && !window.opener.closed) {
+    window.opener.postMessage({ type: 'google-oauth-result', pendingId, error }, location.origin);
+    window.close();
+    return;
+  }
+  await processGoogleOAuthResult(pendingId, error);
+}
+
+window.addEventListener('message', (e) => {
+  if (e.origin !== location.origin || e.data?.type !== 'google-oauth-result') return;
+  processGoogleOAuthResult(e.data.pendingId, e.data.error);
+});
+
+async function processGoogleOAuthResult(pendingId, error) {
+  if (error) {
+    alert(error === 'not_configured'
+      ? 'Google sign-in isn\'t set up yet — open "⚙ Google setup" above and follow the one-time steps first.'
+      : 'Google sign-in failed: ' + error);
+    return;
+  }
+  try {
+    const r = await fetch(`${API}/api/oauth/google/pending/${pendingId}`);
+    if (!r.ok) throw new Error((await r.json()).detail || 'Sign-in expired');
+    const d = await r.json();
+    showGoogleImportConfirm(pendingId, d);
+  } catch (err) {
+    alert('Google sign-in: ' + err.message);
+  }
+}
+
+function showGoogleImportConfirm(pendingId, info) {
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;z-index:9999';
+  const calendarOptions = (info.calendars || []).map(c =>
+    `<option value="${escHtml(c.id)}">${escHtml(c.summary)}</option>`).join('');
+  overlay.innerHTML = `
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:20px;max-width:440px;width:90%;box-shadow:0 8px 30px rgba(0,0,0,.4)">
+      <div style="font-weight:600;margin-bottom:8px;font-size:15px">🔵 Signed in as ${escHtml(info.email)}</div>
+      <div style="font-size:12px;opacity:.8;margin-bottom:12px">Nothing's been added yet — choose what to import:</div>
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:8px">
+        <input type="checkbox" id="google-import-email" checked> Import this Gmail account (read + send)
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:8px">
+        <input type="checkbox" id="google-import-calendar" ${calendarOptions ? 'checked' : 'disabled'}>
+        Import a Google Calendar (real read/write, not just the ICS feed)
+      </label>
+      ${calendarOptions ? `<select id="google-calendar-select" style="width:100%;margin-bottom:12px">${calendarOptions}</select>` : '<div style="font-size:11px;color:var(--muted);margin-bottom:12px">No calendars found on this account.</div>'}
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button id="google-import-cancel" class="btn" style="padding:6px 14px">Cancel</button>
+        <button id="google-import-confirm" class="btn primary" style="padding:6px 14px">Import</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+
+  overlay.querySelector('#google-import-cancel').onclick = async () => {
+    await fetch(`${API}/api/oauth/google/cancel/${pendingId}`, { method: 'POST' });
+    overlay.remove();
+  };
+  overlay.querySelector('#google-import-confirm').onclick = async () => {
+    const import_email = overlay.querySelector('#google-import-email').checked;
+    const import_calendar = calendarOptions ? overlay.querySelector('#google-import-calendar').checked : false;
+    const calendar_id = calendarOptions ? overlay.querySelector('#google-calendar-select').value : 'primary';
+    try {
+      const r = await fetch(`${API}/api/oauth/google/confirm`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pending_id: pendingId, import_email, import_calendar, calendar_id })
+      });
+      if (!r.ok) throw new Error((await r.json()).detail || 'Import failed');
+      overlay.remove();
+      await loadEmailAccounts();
+      await loadCalendarAccounts();
+    } catch (err) {
+      alert('Import failed: ' + err.message);
+    }
+  };
+}
+
 async function loadEmailAccounts() {
   try {
     const r = await fetch(`${API}/api/email/accounts`);
@@ -2879,7 +3864,10 @@ async function addEmailAccount() {
   const p = emailProviders[key] || {};
   const label = document.getElementById('email-label').value.trim();
   const email = document.getElementById('email-address').value.trim();
-  const app_password = document.getElementById('email-app-password').value;
+  // Trimmed — a stray leading/trailing space or newline from copy-pasting an
+  // app password (very easy to pick up from a browser's password display) is
+  // invisible in the field but makes IMAP reject otherwise-correct credentials.
+  const app_password = document.getElementById('email-app-password').value.trim();
   const status = document.getElementById('email-setup-status');
   if (!label || !email || !app_password) { status.textContent = 'Fill in label, email, and app password.'; return; }
 
@@ -3038,16 +4026,30 @@ async function scanEmailForEvents(i) {
 
 let calendarAccounts = [];
 let calendarProviders = {};
+let calendarFeedUrl = `${API}/api/calendar/feed.ics`;
 
 async function initCalendarTab() {
-  document.getElementById('calendar-feed-url').textContent = `${API}/api/calendar/feed.ics`;
+  // "localhost" only ever means the fetching device itself — useless once
+  // copied into another app or device. Swap in the machine's actual LAN IP
+  // so calendar clients on the same network (phone, another PC) can reach
+  // it. Google Calendar specifically still can't use this — see the note
+  // rendered alongside it — since Google's own servers, not your browser,
+  // poll a subscribed URL, and they can't reach a private LAN address at all.
+  try {
+    const r = await fetch(`${API}/api/system/lan-ip`);
+    const { ip } = await r.json();
+    calendarFeedUrl = `http://${ip}:8081/api/calendar/feed.ics`;
+  } catch {
+    calendarFeedUrl = `${API}/api/calendar/feed.ics`;
+  }
+  document.getElementById('calendar-feed-url').textContent = calendarFeedUrl;
   await loadCalendarProviders();
   await loadCalendarAccounts();
   await loadPendingEvents();
 }
 
 function copyFeedUrl() {
-  navigator.clipboard.writeText(`${API}/api/calendar/feed.ics`);
+  navigator.clipboard.writeText(calendarFeedUrl);
 }
 
 function toggleCalendarSetup() {
@@ -3092,7 +4094,7 @@ async function addCalendarAccount() {
   const p = calendarProviders[key] || {};
   const label = document.getElementById('calendar-label').value.trim();
   const username = document.getElementById('calendar-username').value.trim();
-  const app_password = document.getElementById('calendar-app-password').value;
+  const app_password = document.getElementById('calendar-app-password').value.trim(); // see email note on pasted whitespace
   const status = document.getElementById('calendar-setup-status');
   if (!label) { status.textContent = 'Enter a label.'; return; }
   if (key !== 'local' && p.caldav_supported === false) {
@@ -3273,6 +4275,60 @@ async function saveSkillDraft() {
     document.getElementById('skill-draft-area').innerHTML = '';
     document.getElementById('skill-learn-context').value = '';
     await loadSkills();
+  } catch (err) {
+    alert('Error: ' + err.message);
+  }
+}
+
+// ── Lessons ────────────────────────────────────────────────────────────────────
+
+async function loadLessons() {
+  const list = document.getElementById('lessons-list');
+  try {
+    const r = await fetch(`${API}/api/lessons`);
+    const d = await r.json();
+    const lessons = d.lessons || [];
+    if (!lessons.length) {
+      list.innerHTML = '<div class="runner-placeholder">No lessons yet.</div>';
+      return;
+    }
+    list.innerHTML = lessons.map(l => `
+      <div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:8px">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+          <div style="font-weight:500;font-size:13px">${escHtml(l.title)}</div>
+          <span class="model-badge">${escHtml(l.added || '')}</span>
+        </div>
+        <div style="font-size:12px;margin:6px 0">${escHtml(l.lesson)}</div>
+        ${l.why ? `<div style="font-size:12px;color:var(--muted);border-left:2px solid var(--border);padding-left:8px;margin:6px 0">Why: ${escHtml(l.why)}</div>` : ''}
+        <button class="btn btn-secondary btn-sm" onclick="deleteLesson('${l.id}')">Delete</button>
+      </div>
+    `).join('');
+  } catch (err) {
+    list.innerHTML = `<span class="stderr">Error: ${err.message}</span>`;
+  }
+}
+
+async function deleteLesson(id) {
+  if (!confirm('Delete this lesson?')) return;
+  await fetch(`${API}/api/lessons/${id}`, { method: 'DELETE' });
+  await loadLessons();
+}
+
+async function addLesson() {
+  const title = document.getElementById('lesson-title').value.trim();
+  const lesson = document.getElementById('lesson-text').value.trim();
+  const why = document.getElementById('lesson-why').value.trim();
+  if (!title || !lesson) { alert('Fill in at least a title and the lesson itself.'); return; }
+  try {
+    const r = await fetch(`${API}/api/lessons`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title, lesson, why })
+    });
+    if (!r.ok) { const e = await r.json(); throw new Error(e.detail || 'Failed'); }
+    document.getElementById('lesson-title').value = '';
+    document.getElementById('lesson-text').value = '';
+    document.getElementById('lesson-why').value = '';
+    await loadLessons();
   } catch (err) {
     alert('Error: ' + err.message);
   }

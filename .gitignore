@@ -1,6 +1,7 @@
 backend/venv/
 backend/__pycache__/
 conversations.json
+config.json
 email_accounts.json
 calendar_accounts.json
 calendar_events.json
@@ -8,4 +9,6 @@ skills.json
 routines.json
 search_index.json
 contacts.json
+api_keys.json
+google_oauth.json
 *.pyc

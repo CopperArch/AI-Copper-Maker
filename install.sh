@@ -85,17 +85,22 @@ fi
 
 if ! command -v ollama &>/dev/null; then
     info "Installing Ollama..."
-    # Try AUR first (Arch-based distros), fall back to official installer
-    if command -v yay &>/dev/null; then
-        yay -S --noconfirm "$OLLAMA_PKG" 2>/dev/null || {
-            warn "$OLLAMA_PKG AUR install failed, trying official installer..."
-            curl -fsSL https://ollama.com/install.sh | sh
-        }
-    elif command -v paru &>/dev/null; then
-        paru -S --noconfirm "$OLLAMA_PKG" 2>/dev/null || curl -fsSL https://ollama.com/install.sh | sh
-    else
-        curl -fsSL https://ollama.com/install.sh | sh
-    fi
+    # Ollama's own installer is vendor-maintained, works correctly across every
+    # distro (including Arch), and already auto-detects AMD/ROCm GPUs itself —
+    # so it's the trustworthy default. An AUR package is unvetted (anyone can
+    # publish one) and `--noconfirm` installs it with no chance to review the
+    # PKGBUILD first, so AUR is only used as a last-resort fallback if the
+    # official installer itself fails, not tried ahead of it.
+    curl -fsSL https://ollama.com/install.sh | sh || {
+        warn "Official installer failed, trying an AUR helper as a fallback..."
+        if command -v yay &>/dev/null; then
+            yay -S --noconfirm "$OLLAMA_PKG"
+        elif command -v paru &>/dev/null; then
+            paru -S --noconfirm "$OLLAMA_PKG"
+        else
+            error "No AUR helper found either — install Ollama manually from https://ollama.com/download"
+        fi
+    }
     success "Ollama installed"
 else
     success "Ollama already installed: $(ollama --version)"
