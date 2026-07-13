@@ -4,6 +4,10 @@ A completely **uncensored**, locally-run AI coding assistant and agent workspace
 
 Built by [Browns Entertainment](https://github.com/DgBrown21).
 
+## License
+
+Licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE) — free to use, modify, and share for any noncommercial purpose. Commercial use (selling it, running it as a paid service, bundling it into a paid product, etc.) requires a separate commercial license — contact [redacted] to arrange one.
+
 ---
 
 ## v0.2 — What's New
