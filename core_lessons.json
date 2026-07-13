@@ -1,0 +1,51 @@
+[
+  {
+    "id": "ask-before-installing",
+    "title": "Ask before installing new software",
+    "lesson": "Before actually running a command that installs something new onto the user's machine (a package manager install, `ollama pull`, `flatpak install`, `git clone` + build, `npm install`/`pip install` of a new dependency, etc.), stop and say — in plain language, no tool call — exactly what you want to install and why it's needed for their request, then wait for their next message before actually running it. This is different from the general \"just do it\" approach: everything else in a task (reading files, running code you already have permission to run, editing what you wrote) doesn't need a check-in, but changing what's installed on the user's machine does. Keep it brief — one or two sentences on what and why — not a whole plan to approve.",
+    "why": "Requested directly by the user after a task installed several large packages and a manual toolchain without ever checking in first.",
+    "added": "2026-07-13"
+  },
+  {
+    "id": "prefer-prebuilt-release",
+    "title": "Prefer a pre-built release over building from source",
+    "lesson": "Prefer using an existing pre-built release/binary over building from source when one is available (check the project's README — many repos explicitly say to download a release rather than build it yourself) — search for it and check with the user before downloading and running something you found yourself.",
+    "why": "Building from source pulls in compilers/SDKs/toolchains that a release download usually doesn't need at all.",
+    "added": "2026-07-13"
+  },
+  {
+    "id": "verify-repo-before-building",
+    "title": "Verify a repo/URL actually resolves before installing anything to build it",
+    "lesson": "Verify a specific repo/URL you found actually resolves (e.g. fetch it, don't just trust a search snippet) BEFORE installing anything to build it. Confirm the target is real and reachable first; only then consider installing a build environment for it.",
+    "why": "A real run once installed two large GNOME SDK flatpaks and a whole manual Go toolchain (several tool calls, real disk space, one sudo elevation) chasing a `git clone` that then 404'd because the exact repo path was wrong.",
+    "added": "2026-07-13"
+  },
+  {
+    "id": "github-trust-signals",
+    "title": "Check a GitHub project's trust signals and read its README before using it",
+    "lesson": "When you're about to use a GitHub project you found (clone it, build it, run its install script), actually look at its repo page first, not just a search snippet: check its star count and how recently/actively it's maintained as a basic trust signal before running anything from it — an obscure repo with no stars and no real activity is a much bigger risk to just execute than a well-known, widely-used one. And read its actual README for the documented install method rather than guessing a generic `git clone && build` process — most projects say plainly whether they want a release download, a package manager, or a specific build command, and guessing instead of reading it is how you end up building unnecessary infrastructure for something the README would have told you didn't need it.",
+    "why": "Requested directly by the user after the same incident above — checking legitimacy and the documented install method would have avoided the wasted build.",
+    "added": "2026-07-13"
+  },
+  {
+    "id": "check-before-big-infrastructure",
+    "title": "Check with the user before installing substantial new build infrastructure",
+    "lesson": "If achieving the goal would require installing substantial new infrastructure you don't already have (a whole compiler/SDK/toolchain, several large packages) just to attempt something uncertain, check with the user before committing to that — it may not even pan out, and it's a much bigger ask than the small non-root installs you can freely do on your own.",
+    "why": "Same incident as above — the eventual payoff (a working WeMod launcher) never actually materialized before the turn budget ran out.",
+    "added": "2026-07-13"
+  },
+  {
+    "id": "never-guess-a-name-or-url",
+    "title": "Never guess a download URL, package name, or model tag",
+    "lesson": "Never guess a download URL, package name, or model tag and act on it as if it were confirmed real — a plausible-looking name that doesn't actually exist wastes the user's time at best and, if it silently succeeds against the wrong thing, misleads them. Verify first: use web_search to confirm a package/model genuinely exists and get its exact name, or check a trusted source directly (e.g. `brew info --cask <name>`, `flatpak search <name>`, `winget search <name>`) rather than typing what seems like it should be the right name.",
+    "why": "General correctness principle — an invented name that happens to fail loudly is only the good case; one that silently matches the wrong thing is worse.",
+    "added": "2026-07-13"
+  },
+  {
+    "id": "picking-an-ollama-model",
+    "title": "How to pick an Ollama model for a task",
+    "lesson": "Don't just pick a model name from memory — web_search for it first (e.g. \"uncensored abliterated <task> ollama pull model\") to confirm it's a real, currently-pullable tag, and prefer well-established publishers of uncensored/abliterated models (e.g. huihui_ai) over an unknown one-off upload. After `ollama pull`, don't assume it will run fast just because it downloaded — check_command won't tell you this, but `ollama ps` (via run_command) will: look at `size_vram` versus the model's total `size` for whatever's currently loaded. If a big chunk of the model isn't in VRAM, it's spilling onto slower CPU/RAM inference, which the user will feel as sluggishness even though the pull \"succeeded.\" If speed matters for the task, prefer a smaller parameter count/quantization that fits entirely in the available VRAM over a larger one that spills — say so plainly if you had to make that trade-off rather than silently picking the biggest name.",
+    "why": "Learned while picking this app's own default model — a 32B model was technically working but silently spilling ~40% onto slow CPU inference.",
+    "added": "2026-07-13"
+  }
+]
