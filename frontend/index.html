@@ -171,6 +171,8 @@
   .btn-primary { background: var(--accent); color: #fff; }
   .btn-secondary { background: var(--border); color: var(--text); }
   .btn-accent { background: var(--accent2); color: #fff; }
+  .btn-danger { background: var(--danger); color: #fff; }
+  .btn-danger:disabled { opacity: .4; cursor: not-allowed; }
   .btn-sm { padding: 4px 10px; font-size: 12px; }
   .btn-full { width: 100%; justify-content: center; }
 
@@ -441,6 +443,18 @@
   .analyze-form .field { display: flex; flex-direction: column; gap: 4px; }
   .analyze-form label { font-size: 12px; color: var(--muted); }
   .analyze-form textarea { height: 80px; resize: vertical; font-family: inherit; }
+  .apk-dropzone {
+    border: 1.5px dashed var(--border); border-radius: 8px; padding: 16px;
+    text-align: center; font-size: 12px; color: var(--muted); cursor: pointer;
+    transition: border-color .15s, background .15s;
+  }
+  .apk-dropzone:hover, .apk-dropzone.drag-over { border-color: var(--accent2); background: rgba(31,111,235,.06); }
+  .apk-result-item {
+    padding: 8px 10px; border-radius: 6px; cursor: pointer; font-size: 13px;
+    display: flex; justify-content: space-between; gap: 10px;
+  }
+  .apk-result-item:hover { background: var(--border); }
+  .apk-result-item .apk-result-path { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .analyze-output {
     flex: 1;
     padding: 20px;
@@ -816,6 +830,16 @@
           </div>
 
           <div class="field">
+            <label>Analyze a real APK (optional, grounds Clone Mode in the real app)</label>
+            <div id="apk-dropzone" class="apk-dropzone" ondragover="event.preventDefault(); this.classList.add('drag-over')" ondragleave="this.classList.remove('drag-over')" ondrop="handleApkDrop(event)" onclick="document.getElementById('apk-file-input').click()">
+              <span id="apk-dropzone-text">📦 Drop an APK here, or click to browse</span>
+            </div>
+            <input type="file" id="apk-file-input" accept=".apk" style="display:none" onchange="handleApkFileSelect(event)">
+            <button class="btn btn-secondary btn-sm btn-full" style="margin-top:6px" onclick="findApksOnDevice()" id="apk-scan-btn">🔍 Find APKs on this device</button>
+            <div id="apk-status" style="font-size:12px;color:var(--muted);margin-top:6px"></div>
+          </div>
+
+          <div class="field">
             <label>App Name</label>
             <input type="text" id="an-name" placeholder="e.g. MyFitnessPal">
           </div>
@@ -872,6 +896,9 @@
           <button class="btn btn-accent btn-full" onclick="analyzeApp()" id="analyze-btn">
             Analyze & Plan
           </button>
+          <button class="btn btn-danger btn-full" onclick="sendFeaturesToGenerator()" id="send-features-btn" disabled style="margin-top:8px">
+            ⚡ Send features to Generator
+          </button>
         </div>
 
         <div class="analyze-output" id="analyze-output">
@@ -891,6 +918,7 @@
       <div class="generate-layout">
         <div class="generate-form">
           <h2>⚡ Generate Project</h2>
+          <button class="btn btn-secondary btn-full btn-sm" onclick="showLoadProjectModal()">📂 Load Saved Project</button>
           <div class="field">
             <label>App Name</label>
             <input type="text" id="gen-name" placeholder="My Awesome App">
@@ -898,9 +926,11 @@
           <div class="field">
             <label>Platform</label>
             <select id="gen-platform">
-              <option value="react-native">React Native (Expo)</option>
-              <option value="flutter">Flutter</option>
-              <option value="react-native-cli">React Native CLI</option>
+              <optgroup label="📱 Mobile (iOS / Android)">
+                <option value="react-native">React Native (Expo)</option>
+                <option value="flutter">Flutter</option>
+                <option value="react-native-cli">React Native CLI</option>
+              </optgroup>
             </select>
           </div>
           <div class="field">
@@ -919,6 +949,8 @@
           <div style="margin-top:8px;display:flex;flex-direction:column;gap:6px">
             <button class="btn btn-secondary btn-full btn-sm" onclick="copyGenerateOutput()">Copy All Output</button>
             <button class="btn btn-primary btn-full btn-sm" id="save-project-btn" onclick="saveProjectToDisk()" disabled>💾 Save to Disk</button>
+            <button class="btn btn-accent btn-full btn-sm" id="run-project-btn" onclick="runGeneratedProject()" disabled>▶ Run Code</button>
+            <button class="btn btn-secondary btn-full btn-sm" id="build-apk-btn" onclick="buildApk()" disabled>📱 Build Android APK</button>
           </div>
           <div id="save-project-status" style="font-size:12px;margin-top:6px"></div>
         </div>
@@ -938,6 +970,20 @@
     <div class="tab-panel" id="tab-runner">
       <div class="runner-layout">
         <div class="runner-panel">
+          <div id="project-run-panel" style="display:none;border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:12px">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
+              <div>
+                <div style="font-weight:600;font-size:14px" id="project-run-title">Running project</div>
+                <div style="font-size:12px;color:var(--muted)" id="project-run-status">Starting...</div>
+              </div>
+              <div style="display:flex;gap:6px">
+                <a href="#" id="project-run-open-link" target="_blank" rel="noopener" class="btn btn-secondary btn-sm" style="display:none">↗ Open in new tab</a>
+                <button class="btn btn-secondary btn-sm" id="project-run-stop-btn" onclick="stopProjectRun()" disabled>■ Stop</button>
+              </div>
+            </div>
+            <pre id="project-run-log" style="margin-top:10px;max-height:160px;overflow-y:auto;font-size:11px;background:var(--bg);border-radius:6px;padding:8px;white-space:pre-wrap"></pre>
+            <iframe id="project-run-iframe" style="display:none;width:100%;height:420px;border:1px solid var(--border);border-radius:6px;margin-top:10px;background:#fff" title="Live app preview"></iframe>
+          </div>
           <div class="runner-toolbar">
             <h2>▶ Code Runner</h2>
             <select id="runner-lang">
@@ -1412,6 +1458,7 @@ let activeStreams = new Map();
 let features = [];
 let lastAnalyzerAppName = '';
 let lastAnalyzerFeatures = [];
+let pendingApkContext = '';
 let catalog = [];
 let catalogFilter = 'all';
 let suggestedModel = null;
@@ -1702,6 +1749,11 @@ async function loadModelContextLengths() {
   } catch {}
 }
 
+// Pure UI — updates the header's per-conversation context-usage readout only.
+// Callers are responsible for also calling addToWeeklyTokenUsage() themselves
+// (kept separate so a call site that shouldn't touch this display, like a
+// background conversation, can still record real usage into the running
+// weekly/period total without double-counting one that does both).
 function updateTokenUsageDisplay(totalTokens, modelName) {
   const textEl = document.getElementById('token-usage-text');
   const barEl = document.getElementById('token-usage-bar');
@@ -1718,7 +1770,6 @@ function updateTokenUsageDisplay(totalTokens, modelName) {
     textEl.textContent = `${totalTokens.toLocaleString()} tokens`;
     barEl.style.display = 'none';
   }
-  addToWeeklyTokenUsage(totalTokens);
 }
 
 // ── Configurable-period token usage total ───────────────────────────────────
@@ -2604,6 +2655,122 @@ function renderPendingToolRows(conv) {
   return html;
 }
 
+// ── APK Analysis (feeds App Analyzer's Clone Mode with real ground truth) ──────
+
+function handleApkDrop(event) {
+  event.preventDefault();
+  event.currentTarget.classList.remove('drag-over');
+  const file = event.dataTransfer.files[0];
+  if (file) uploadAndAnalyzeApk(file);
+}
+
+function handleApkFileSelect(event) {
+  const file = event.target.files[0];
+  if (file) uploadAndAnalyzeApk(file);
+  event.target.value = ''; // allow re-selecting the same file later
+}
+
+function setApkStatus(text, isError = false, isHtml = false) {
+  const el = document.getElementById('apk-status');
+  el.style.color = isError ? 'var(--danger)' : 'var(--muted)';
+  if (isHtml) el.innerHTML = text; else el.textContent = text;
+}
+
+async function uploadAndAnalyzeApk(file) {
+  if (!file.name.toLowerCase().endsWith('.apk')) {
+    setApkStatus('Not an .apk file', true);
+    return;
+  }
+  setApkStatus(`Uploading ${file.name}...`);
+  try {
+    const form = new FormData();
+    form.append('file', file);
+    const res = await fetch(`${API}/api/apk/upload`, { method: 'POST', body: form });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Upload failed');
+    await analyzeApkAtPath(data.path);
+  } catch (err) {
+    setApkStatus(`Error: ${err.message}`, true);
+  }
+}
+
+async function analyzeApkAtPath(path) {
+  setApkStatus('Decompiling APK... this can take a moment');
+  try {
+    const res = await fetch(`${API}/api/apk/analyze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Analysis failed');
+
+    pendingApkContext = data.apk_context;
+    const nameInput = document.getElementById('an-name');
+    if (!nameInput.value.trim()) nameInput.value = data.app_name;
+
+    const decompNote = data.decompiled
+      ? `${data.strings_total.toLocaleString()} strings decompiled`
+      : 'manifest only — bytecode decompile failed';
+    setApkStatus(
+      `✓ ${escHtml(data.app_name)} (${escHtml(data.package)}) — ${data.permissions.length} permissions, ` +
+      `${data.activities.length} screens, ${decompNote}. ` +
+      `<a href="#" id="apk-clear-link" style="color:var(--accent2)">clear</a>`,
+      false, true
+    );
+    document.getElementById('apk-clear-link').onclick = (e) => { e.preventDefault(); clearApkContext(); };
+  } catch (err) {
+    setApkStatus(`Error: ${err.message}`, true);
+  }
+}
+
+function clearApkContext() {
+  pendingApkContext = '';
+  setApkStatus('');
+}
+
+async function findApksOnDevice() {
+  const btn = document.getElementById('apk-scan-btn');
+  btn.disabled = true; btn.textContent = 'Scanning...';
+  try {
+    const res = await fetch(`${API}/api/apk/scan`);
+    const data = await res.json();
+    showApkScanResults(data.results || []);
+  } catch (err) {
+    setApkStatus(`Scan failed: ${err.message}`, true);
+  }
+  btn.disabled = false; btn.textContent = '🔍 Find APKs on this device';
+}
+
+function showApkScanResults(results) {
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;z-index:9999';
+  const list = results.length
+    ? results.map(r => `
+        <div class="apk-result-item" data-path="${escHtml(r.path)}">
+          <span>${escHtml(r.name)}</span>
+          <span class="apk-result-path">${escHtml(r.path)}</span>
+        </div>`).join('')
+    : '<p style="color:var(--muted);font-size:13px">No .apk files found in your home folder or any mounted drives.</p>';
+  overlay.innerHTML = `
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:20px;max-width:520px;width:90%;max-height:70vh;display:flex;flex-direction:column;box-shadow:0 8px 30px rgba(0,0,0,.4)">
+      <div style="font-weight:600;font-size:15px;margin-bottom:10px">APKs found (${results.length})</div>
+      <div style="overflow-y:auto;flex:1;display:flex;flex-direction:column;gap:2px">${list}</div>
+      <div style="display:flex;justify-content:flex-end;margin-top:14px">
+        <button class="btn" style="padding:6px 14px" id="apk-scan-close-btn">Close</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  overlay.querySelector('#apk-scan-close-btn').onclick = () => overlay.remove();
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+  overlay.querySelector('div[style*="overflow-y"]').addEventListener('click', (e) => {
+    const item = e.target.closest('.apk-result-item');
+    if (!item) return;
+    overlay.remove();
+    analyzeApkAtPath(item.dataset.path);
+  });
+}
+
 // ── App Analyzer ───────────────────────────────────────────────────────────────
 
 async function analyzeApp() {
@@ -2618,6 +2785,10 @@ async function analyzeApp() {
 
   const btn = document.getElementById('analyze-btn');
   btn.disabled = true; btn.textContent = 'Analyzing...';
+
+  const sendBtn = document.getElementById('send-features-btn');
+  sendBtn.disabled = true;
+  sendBtn.textContent = '⚡ Send features to Generator';
 
   const cloneMode = document.getElementById('an-clone').checked;
   lastAnalyzerAppName = name;
@@ -2637,6 +2808,7 @@ async function analyzeApp() {
         reviews: document.getElementById('an-reviews').value,
         price_target: document.getElementById('an-price').value,
         clone_mode: cloneMode,
+        apk_context: pendingApkContext,
       })
     });
 
@@ -2663,6 +2835,12 @@ async function analyzeApp() {
             text += data.message.content;
             if (!renderPendingA) { renderPendingA = true; setTimeout(flushRenderA, 80); }
           }
+          // Local Ollama's own final chunk carries real usage counts (flat
+          // fields, not nested — this proxies Ollama's raw stream unchanged).
+          // Cloud-routed analyze calls don't have these, so nothing to add.
+          if (data.done && data.prompt_eval_count !== undefined) {
+            addToWeeklyTokenUsage(data.prompt_eval_count + (data.eval_count || 0));
+          }
         } catch (e) {
           if (e.message?.startsWith('Ollama')) throw e;
         }
@@ -2675,12 +2853,20 @@ async function analyzeApp() {
     const featuresMatch = text.match(/```features\s*\n([\s\S]*?)```/);
     if (featuresMatch) {
       lastAnalyzerFeatures = featuresMatch[1].split('\n').map(l => l.replace(/^[-*\d.\s]+/, '').trim()).filter(Boolean);
-      if (lastAnalyzerFeatures.length) {
-        const bar = document.createElement('div');
-        bar.style.cssText = 'padding:12px 20px;border-top:1px solid var(--border)';
-        bar.innerHTML = `<button class="btn btn-primary btn-full btn-sm" onclick="sendFeaturesToGenerator()">⚡ Send ${lastAnalyzerFeatures.length} features to Generator</button>`;
-        output.appendChild(bar);
-      }
+    }
+    // The dedicated ```features block is the last thing the model writes, so
+    // it's the first casualty of a truncated/cut-off response — and plain
+    // (non-Clone Mode) analyses never produce one at all. Either way, fall
+    // back to pulling bullet points straight out of whichever feature
+    // section the model actually reached, so the button still works.
+    if (!lastAnalyzerFeatures.length) {
+      let bullets = extractBulletsFromSection(text, /#{2,6}\s*1\.\s*Complete Feature Inventory/i);
+      if (!bullets.length) bullets = extractBulletsFromSection(text, /#{2,6}\s*2\.\s*Core Features/i);
+      lastAnalyzerFeatures = bullets;
+    }
+    if (lastAnalyzerFeatures.length) {
+      sendBtn.disabled = false;
+      sendBtn.textContent = `⚡ Send ${lastAnalyzerFeatures.length} features to Generator`;
     }
   } catch (err) {
     output.innerHTML = `<p style="color:var(--danger)">Error: ${err.message}</p>`;
@@ -2689,12 +2875,30 @@ async function analyzeApp() {
   btn.disabled = false; btn.textContent = 'Analyze & Plan';
 }
 
+// Pulls flat bullet points out of one markdown section (from `headingRegex`
+// up to the next `## ` heading, or end of text) — used as a fallback feature
+// source when the model didn't produce (or reach) the dedicated machine-
+// parsed ```features block.
+function extractBulletsFromSection(text, headingRegex) {
+  const startMatch = text.match(headingRegex);
+  if (!startMatch) return [];
+  const rest = text.slice(startMatch.index + startMatch[0].length);
+  const endIdx = rest.search(/\n#{2,6}\s/);
+  const section = endIdx === -1 ? rest : rest.slice(0, endIdx);
+  return section.split('\n')
+    .map(l => l.trim())
+    .filter(l => /^[-*]\s+/.test(l))
+    .map(l => l.replace(/^[-*]\s+/, '').replace(/\*\*/g, '').trim())
+    .filter(Boolean);
+}
+
 function sendFeaturesToGenerator() {
   if (!lastAnalyzerFeatures.length) return;
   document.getElementById('gen-name').value = lastAnalyzerAppName;
   features = [...lastAnalyzerFeatures];
   renderFeatureTags();
   switchTab('generate');
+  generateProject();
 }
 
 // ── Project Generator ──────────────────────────────────────────────────────────
@@ -2774,6 +2978,9 @@ async function generateProject() {
             text += data.message.content;
             if (!renderPendingG) { renderPendingG = true; setTimeout(flushRenderG, 80); }
           }
+          if (data.done && data.prompt_eval_count !== undefined) {
+            addToWeeklyTokenUsage(data.prompt_eval_count + (data.eval_count || 0));
+          }
         } catch (e) {
           if (e.message?.startsWith('Ollama')) throw e;
         }
@@ -2783,6 +2990,8 @@ async function generateProject() {
     output.innerHTML = renderMarkdown(text);
     output.querySelectorAll('pre code').forEach(el => hljs.highlightElement(el));
     document.getElementById('save-project-btn').disabled = false;
+    document.getElementById('run-project-btn').disabled = false;
+    document.getElementById('build-apk-btn').disabled = false;
   } catch (err) {
     output.innerHTML = `<p style="color:var(--danger)">Error: ${err.message}</p>`;
   }
@@ -2793,6 +3002,73 @@ async function generateProject() {
 function copyGenerateOutput() {
   const output = document.getElementById('generate-output');
   navigator.clipboard.writeText(output.innerText);
+}
+
+// ── Load Saved Project ──────────────────────────────────────────────────────────
+
+async function showLoadProjectModal() {
+  let projects;
+  try {
+    const res = await fetch(`${API}/api/projects/list`);
+    const data = await res.json();
+    projects = data.projects || [];
+  } catch (err) {
+    alert('Could not list saved projects: ' + err.message);
+    return;
+  }
+
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;z-index:9999';
+  const list = projects.length
+    ? projects.map(p => `
+        <div class="apk-result-item" data-name="${escHtml(p.name)}">
+          <span>${escHtml(p.name)}</span>
+          <span class="apk-result-path">${new Date(p.modified * 1000).toLocaleString()}</span>
+        </div>`).join('')
+    : `<p style="color:var(--muted);font-size:13px">No saved projects found yet — use Save to Disk after generating one.</p>`;
+  overlay.innerHTML = `
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:20px;max-width:520px;width:90%;max-height:70vh;display:flex;flex-direction:column;box-shadow:0 8px 30px rgba(0,0,0,.4)">
+      <div style="font-weight:600;font-size:15px;margin-bottom:10px">Saved Projects (${projects.length})</div>
+      <div style="overflow-y:auto;flex:1;display:flex;flex-direction:column;gap:2px">${list}</div>
+      <div style="display:flex;justify-content:flex-end;margin-top:14px">
+        <button class="btn" style="padding:6px 14px" id="load-project-close-btn">Close</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  overlay.querySelector('#load-project-close-btn').onclick = () => overlay.remove();
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+  overlay.querySelector('div[style*="overflow-y"]').addEventListener('click', (e) => {
+    const item = e.target.closest('.apk-result-item');
+    if (!item) return;
+    overlay.remove();
+    loadSavedProject(item.dataset.name);
+  });
+}
+
+async function loadSavedProject(name) {
+  const output = document.getElementById('generate-output');
+  output.innerHTML = '<div style="padding:20px;color:var(--muted)"><div class="thinking"><span></span><span></span><span></span></div> Loading...</div>';
+  try {
+    const res = await fetch(`${API}/api/projects/load`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Load failed');
+
+    lastGeneratedContent = data.content;
+    lastGeneratedAppName = name;
+    document.getElementById('gen-name').value = name;
+    output.innerHTML = '<pre><code>' + escHtml(data.content) + '</code></pre>';
+    document.getElementById('save-project-btn').disabled = false;
+    document.getElementById('run-project-btn').disabled = false;
+    document.getElementById('build-apk-btn').disabled = false;
+    document.getElementById('save-project-status').textContent = `Loaded ${data.file_count} files from ${data.project_dir}`;
+    document.getElementById('save-project-status').style.color = 'var(--muted)';
+  } catch (err) {
+    output.innerHTML = `<p style="color:var(--danger)">Error: ${err.message}</p>`;
+  }
 }
 
 // ── Models Tab ─────────────────────────────────────────────────────────────────
@@ -3381,6 +3657,244 @@ async function saveProjectToDisk() {
   btn.textContent = '💾 Save to Disk';
 }
 
+// ── Run Generated Project (Generate Project → Run Code) ────────────────────────
+
+let currentProjectRunId = null;
+
+// Needs a real path on disk for Run Code/Build APK to act on — re-saving
+// here is idempotent (just rewrites the same files), so the user doesn't
+// have to click Save to Disk separately first.
+async function saveGeneratedProjectForAction() {
+  const r = await fetch(`${API}/api/save-project`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      app_name: lastGeneratedAppName,
+      content: lastGeneratedContent,
+      save_dir: document.getElementById('save-dir-input').value.trim() || saveDir
+    })
+  });
+  const result = await r.json();
+  if (!r.ok) throw new Error(result.detail || 'Save failed');
+  const status = document.getElementById('save-project-status');
+  status.style.color = 'var(--accent)';
+  status.innerHTML = `✓ Saved ${result.file_count} files to:<br><code style="font-size:10px;word-break:break-all">${result.project_dir}</code>`;
+  return result.project_dir;
+}
+
+async function runGeneratedProject() {
+  if (!lastGeneratedContent) return;
+  const runBtn = document.getElementById('run-project-btn');
+  runBtn.disabled = true;
+  runBtn.textContent = 'Saving...';
+
+  let projectDir;
+  try {
+    projectDir = await saveGeneratedProjectForAction();
+  } catch (err) {
+    alert('Could not save project before running: ' + err.message);
+    runBtn.disabled = false;
+    runBtn.textContent = '▶ Run Code';
+    return;
+  }
+
+  runBtn.disabled = false;
+  runBtn.textContent = '▶ Run Code';
+  switchTab('runner');
+  startProjectRun(projectDir, document.getElementById('gen-platform').value, lastGeneratedAppName);
+}
+
+async function ensureExpoTokenConfigured() {
+  const res = await fetch(`${API}/api/keys/expo`);
+  const data = await res.json();
+  if (data.configured) return true;
+
+  const token = prompt('Building a real .apk uses EAS Build (Expo\'s free cloud build service). Paste an Expo access token to continue — get one at expo.dev under Account Settings → Access Tokens:');
+  if (!token || !token.trim()) return false;
+
+  const r = await fetch(`${API}/api/keys/expo`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token: token.trim() })
+  });
+  const result = await r.json();
+  if (!r.ok) {
+    alert('Token rejected: ' + (result.detail || 'unknown error'));
+    return false;
+  }
+  return true;
+}
+
+async function buildApk() {
+  if (!lastGeneratedContent) return;
+  if (!(await ensureExpoTokenConfigured())) return;
+
+  const buildBtn = document.getElementById('build-apk-btn');
+  buildBtn.disabled = true;
+  buildBtn.textContent = 'Saving...';
+
+  let projectDir;
+  try {
+    projectDir = await saveGeneratedProjectForAction();
+  } catch (err) {
+    alert('Could not save project before building: ' + err.message);
+    buildBtn.disabled = false;
+    buildBtn.textContent = '📱 Build Android APK';
+    return;
+  }
+
+  buildBtn.disabled = false;
+  buildBtn.textContent = '📱 Build Android APK';
+  switchTab('runner');
+  startApkBuild(projectDir, lastGeneratedAppName);
+}
+
+async function startApkBuild(projectDir, appName) {
+  const panel = document.getElementById('project-run-panel');
+  const title = document.getElementById('project-run-title');
+  const status = document.getElementById('project-run-status');
+  const log = document.getElementById('project-run-log');
+  const openLink = document.getElementById('project-run-open-link');
+  const iframe = document.getElementById('project-run-iframe');
+  const stopBtn = document.getElementById('project-run-stop-btn');
+  const statusLabels = {
+    configuring: 'Configuring EAS Build...',
+    building: 'Building on Expo\'s servers (this can take 5-20+ minutes)...',
+    downloading: 'Downloading .apk...'
+  };
+
+  panel.style.display = 'block';
+  title.textContent = `Building APK: ${appName}`;
+  status.textContent = 'Starting...';
+  status.style.color = 'var(--muted)';
+  log.textContent = '';
+  openLink.style.display = 'none';
+  iframe.style.display = 'none';
+  iframe.src = 'about:blank';
+  stopBtn.disabled = true; // no cancel endpoint for a cloud build — closing/navigating away just stops watching it, the build itself keeps running on Expo's servers
+  currentProjectRunId = null;
+
+  try {
+    const res = await fetch(`${API}/api/project/build-apk`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project_dir: projectDir })
+    });
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      for (const line of decoder.decode(value).split('\n').filter(Boolean)) {
+        let data;
+        try { data = JSON.parse(line); } catch { continue; }
+        if (data.type === 'status') {
+          status.textContent = statusLabels[data.status] || data.status;
+        } else if (data.type === 'log') {
+          log.textContent += data.text;
+          log.scrollTop = log.scrollHeight;
+        } else if (data.type === 'ready') {
+          status.textContent = '✓ Built';
+          status.style.color = 'var(--accent)';
+          log.textContent += `\nAPK saved to: ${data.path}\n`;
+          log.scrollTop = log.scrollHeight;
+        } else if (data.type === 'error') {
+          status.textContent = '✗ ' + data.text.trim().split('\n')[0];
+          status.style.color = 'var(--danger)';
+          log.textContent += data.text;
+        }
+      }
+    }
+  } catch (err) {
+    status.textContent = 'Error: ' + err.message;
+    status.style.color = 'var(--danger)';
+  }
+}
+
+async function startProjectRun(projectDir, platform, appName) {
+  const panel = document.getElementById('project-run-panel');
+  const title = document.getElementById('project-run-title');
+  const status = document.getElementById('project-run-status');
+  const log = document.getElementById('project-run-log');
+  const openLink = document.getElementById('project-run-open-link');
+  const iframe = document.getElementById('project-run-iframe');
+  const stopBtn = document.getElementById('project-run-stop-btn');
+  const statusLabels = {
+    installing: 'Installing dependencies...',
+    installing_web_deps: 'Installing web support...',
+    starting: 'Starting dev server...'
+  };
+
+  panel.style.display = 'block';
+  title.textContent = `Running: ${appName}`;
+  status.textContent = 'Starting...';
+  status.style.color = 'var(--muted)';
+  log.textContent = '';
+  openLink.style.display = 'none';
+  iframe.style.display = 'none';
+  iframe.src = 'about:blank';
+  stopBtn.disabled = true; // only meaningful once a dev server is actually up — see startProjectRun's 'ready' handling
+  currentProjectRunId = null;
+
+  try {
+    const res = await fetch(`${API}/api/project/run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project_dir: projectDir, platform })
+    });
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      for (const line of decoder.decode(value).split('\n').filter(Boolean)) {
+        let data;
+        try { data = JSON.parse(line); } catch { continue; }
+        if (data.type === 'run_id') {
+          currentProjectRunId = data.run_id;
+        } else if (data.type === 'status') {
+          status.textContent = statusLabels[data.status] || data.status;
+        } else if (data.type === 'log') {
+          log.textContent += data.text;
+          log.scrollTop = log.scrollHeight;
+        } else if (data.type === 'ready') {
+          status.textContent = '✓ Running';
+          status.style.color = 'var(--accent)';
+          openLink.href = data.url;
+          openLink.style.display = '';
+          iframe.src = data.url;
+          iframe.style.display = 'block';
+          currentProjectRunId = data.run_id;
+          stopBtn.disabled = false;
+        } else if (data.type === 'error') {
+          status.textContent = '✗ ' + data.text.trim().split('\n')[0];
+          status.style.color = 'var(--danger)';
+          log.textContent += data.text;
+        }
+      }
+    }
+  } catch (err) {
+    status.textContent = 'Error: ' + err.message;
+    status.style.color = 'var(--danger)';
+  }
+}
+
+async function stopProjectRun() {
+  if (!currentProjectRunId) return;
+  const stopBtn = document.getElementById('project-run-stop-btn');
+  stopBtn.disabled = true;
+  try {
+    await fetch(`${API}/api/project/run/${currentProjectRunId}/stop`, { method: 'POST' });
+    document.getElementById('project-run-status').textContent = 'Stopped';
+    document.getElementById('project-run-status').style.color = 'var(--muted)';
+    document.getElementById('project-run-open-link').style.display = 'none';
+    const iframe = document.getElementById('project-run-iframe');
+    iframe.style.display = 'none';
+    iframe.src = 'about:blank';
+  } catch {}
+  currentProjectRunId = null;
+}
+
 // ── Web Search ─────────────────────────────────────────────────────────────────
 
 async function doSearch() {
@@ -3757,6 +4271,11 @@ async function runAgent() {
             // includes every tool call/result from this run, so the next
             // message actually has full context instead of starting blind.
             if (data.conversation) agentMessages = data.conversation;
+            if (data.usage) {
+              const totalTokens = data.usage.prompt_eval_count + (data.usage.eval_count || 0);
+              addToWeeklyTokenUsage(totalTokens);
+              updateTokenUsageDisplay(totalTokens, model);
+            }
           } else if (data.type === 'error') {
             receivedTerminalEvent = true;
             const textEl = agentTextEl();

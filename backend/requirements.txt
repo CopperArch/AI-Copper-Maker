@@ -7,3 +7,4 @@ pydantic
 caldav
 icalendar
 apscheduler
+androguard

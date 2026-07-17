@@ -81,7 +81,7 @@ fi
 
 echo ""
 echo "╔══════════════════════════════════════════════════════╗"
-echo "║  LLM Coder — Uncensored Edition v0.2                ║"
+echo "║  LLM Coder — Uncensored Edition REV 1               ║"
 echo "║  Running at http://localhost:8081                    ║"
 echo "║  Chat · Agent · Email · Calendar · Skills · Routines ║"
 echo "║  Search (web + semantic) · Files · Code Run · Backup ║"

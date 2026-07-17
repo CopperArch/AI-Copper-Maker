@@ -31,7 +31,7 @@ cat <<'EOF'
   ██║     ██║     ██║╚██╔╝██║    ██║     ██║   ██║██║  ██║██╔══╝  ██╔══██╗
   ███████╗███████╗██║ ╚═╝ ██║    ╚██████╗╚██████╔╝██████╔╝███████╗██║  ██║
   ╚══════╝╚══════╝╚═╝     ╚═╝     ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝
-  LLM Coder — Uncensored Edition v0.2
+  LLM Coder — Uncensored Edition REV 1
 EOF
 echo -e "${NC}"
 
@@ -292,7 +292,7 @@ fi
 # ── 6. Done ────────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${GREEN}╔══════════════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║  LLM Coder — Uncensored Edition v0.2               ║${NC}"
+echo -e "${GREEN}║  LLM Coder — Uncensored Edition REV 1              ║${NC}"
 echo -e "${GREEN}║  Installation complete!                             ║${NC}"
 echo -e "${GREEN}║  Run: ./launch.sh (or the systemd service, if set up)║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════════════╝${NC}"

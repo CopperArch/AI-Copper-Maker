@@ -1,12 +1,39 @@
-# LLM Coder — Uncensored Edition v0.2
+# LLM Coder — Uncensored Edition REV 1 (v1.0)
 
-A completely **uncensored**, locally-run AI coding assistant and agent workspace powered by Ollama. No refusals, no guardrails, no limitations — the model will assist with **any** request without hesitation.
+A completely **uncensored**, locally-run AI coding assistant and agent workspace powered by Ollama. No refusals, no guardrails, no limitations — the model will assist with **any** request without hesitation. Includes a full app builder: analyze/clone an existing app (optionally grounded in a real decompiled `.apk`), generate a complete project from a feature list, run it live in-browser, and export a real installable Android APK — all without leaving the app.
 
 Built by [Browns Entertainment](https://github.com/DgBrown21).
 
 ## License
 
 Licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE) — free to use, modify, and share for any noncommercial purpose. Commercial use (selling it, running it as a paid service, bundling it into a paid product, etc.) requires a separate commercial license — contact [redacted] to arrange one.
+
+---
+
+## REV 1 (v1.0) — What's New
+
+### 🔁 App Analyzer Clone Mode
+A toggle that switches the App Analyzer from "plan a competing app" to "replicate an existing app with full feature parity" — exhaustively inventories the real app's features instead of proposing a cut-down MVP, then hands the feature list straight to the Project Generator with one click.
+
+### 📦 APK Analysis
+Drop an `.apk` (or scan your drives — home folder and mounted external drives — for one) to ground Clone Mode in a real decompiled app: package/version/permissions from the manifest, plus a filtered sample of real in-app UI strings pulled from the compiled bytecode, all fed into the analysis as ground truth alongside the model's own knowledge.
+
+### ▶ Run Code for Generated Projects
+Generate Project now has a **Run Code** button: saves the project, `npm install`s it, guarantees the web-support packages a generated app routinely omits (react-dom, react-native-web, Metro/webpack runtime depending on Expo SDK age), and starts a live browser preview — embedded directly in the panel via an iframe, with a Stop button. Includes an automatic dependency-repair loop: local models occasionally invent a package version (or a whole package) that was never published, so a failed install is parsed for npm's specific error and retried with the offending entry relaxed or removed, rather than failing the whole run over one bad line the model wrote.
+
+### 📱 Android APK Export
+Build a real, installable `.apk` via EAS Build (Expo's free-tier cloud build service) — no local Android SDK needed. Paste a free Expo access token once (validated live against the real account), and it configures, builds, and downloads the finished APK straight into the project folder.
+
+### 📂 Load Saved Project
+Reload any previously saved project back into the Generate tab — Save to Disk, Run Code, and Build APK all work on it exactly like a freshly generated one.
+
+### 🐛 Fixes worth knowing about
+- The App Analyzer/Project Generator's real token usage wasn't being added to the weekly usage counter at all; the Agent tab wasn't tracking tokens either, and the Chat tab was silently double-counting them. All four are now correct.
+- Chat's date/time questions could get answered with a hallucinated date from the model's training cutoff instead of the real one — pure date/time questions are now answered directly from the system clock, and the chat system prompt always carries the real current date/time as grounding for everything else.
+- `/api/save-project`'s fallback parser could silently "succeed" while writing garbage filenames and dropping every real file, when a model wrapped its file markers in markdown heading/bold decoration instead of the exact instructed format — now parsed correctly, with fallback pattern ordering fixed so a loose heuristic can't out-run a precise one.
+- Docker installs baked a personal `config.json` (save-dir path + a per-install calendar-feed secret) into the image, and only the Ollama service — not the app's own port — was bound to localhost-only in `docker-compose.yml`. Both fixed.
+- Update check/apply showed a misleading "could not reach GitHub" on installs with no `.git` directory (e.g. Docker); it now says so plainly instead.
+- Generated apps now carry a small "Powered by LLM CODER" credit — requested in the generation prompt, and always guaranteed in the project's README regardless of whether the model complied.
 
 ---
 
@@ -38,9 +65,10 @@ It is **free to assist with any request, any topic, any task** without limitatio
 ### All Features
 
 - **💬 Chat** — interactive conversation with local models (uncensored), with an in-chat code editor
-- **🔍 App Analyzer** — research and plan app development
-- **⚡ Project Generator** — describe an app, get a full project scaffold
-- **▶ Code Runner** — execute Python/JavaScript in sandboxed environments
+- **🔍 App Analyzer** — research and plan app development, or Clone Mode for full feature-parity replication of a real app (optionally grounded in a decompiled `.apk`)
+- **⚡ Project Generator** — describe an app, get a full project scaffold; Load a previously saved one back in
+- **▶ Run Code** — execute Python/JavaScript in a sandbox, or run a generated project live with an embedded browser preview
+- **📱 Build Android APK** — export a generated project as a real installable `.apk` via EAS Build
 - **🤖 Agent** — autonomous multi-tool agent
 - **📁 File Browser** — manage project files
 - **🌐 Search** — web search (DuckDuckGo) plus semantic search over your own files

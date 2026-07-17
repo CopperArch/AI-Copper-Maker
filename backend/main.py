@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import glob
 import imaplib
 import json
 import os
@@ -7,6 +8,7 @@ import platform
 import re
 import shutil
 import smtplib
+import socket
 import subprocess
 import tempfile
 import time
@@ -22,6 +24,13 @@ from pathlib import Path
 
 import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from androguard.core.apk import APK as AndroguardAPK
+from androguard.misc import AnalyzeAPK
+# androguard logs every parsed manifest tag at DEBUG via loguru (not stdlib
+# logging, so the usual logging.getLogger(...).setLevel() has no effect on
+# it) — left alone this floods the uvicorn console on every APK analyzed.
+from loguru import logger as _apk_logger
+_apk_logger.remove()
 from fastapi import FastAPI, HTTPException, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse, Response, RedirectResponse
@@ -34,6 +43,11 @@ from pydantic import BaseModel
 # module has finished loading, so the forward reference here is safe.
 scheduler: AsyncIOScheduler | None = None
 
+# "Run Code" project runs (npx expo start / flutter run web-server) live here,
+# keyed by run_id — see the "Project Run" section far below. Declared this
+# early because the lifespan shutdown handler needs to clean these up.
+RUNNING_PROJECT_RUNS: dict[str, dict] = {}
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global scheduler
@@ -43,6 +57,13 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(_check_new_mail, IntervalTrigger(minutes=5), id="mail-poll", replace_existing=True)
     yield
     scheduler.shutdown(wait=False)
+    # A "Run Code" dev server (npx expo start / flutter run) is deliberately
+    # left running in the background after its request ends — kill any that
+    # are still alive rather than leaking them past this process's lifetime.
+    for state in RUNNING_PROJECT_RUNS.values():
+        proc = state.get("process")
+        if proc and proc.returncode is None:
+            proc.kill()
 
 app = FastAPI(title="LLM Coder - Uncensored Edition", lifespan=lifespan)
 
@@ -220,6 +241,7 @@ class AnalyzeRequest(BaseModel):
     reviews: str = ""
     price_target: str = "free with premium"
     clone_mode: bool = False
+    apk_context: str = ""
 
 class PullRequest(BaseModel):
     model: str
@@ -369,6 +391,359 @@ async def execute_code(req: ExecuteRequest):
     return StreamingResponse(stream(), media_type="application/x-ndjson")
 
 
+# ── Project Run (installs + starts a saved generated project for a live
+#    browser preview, driven from Generate Project's "Run Code" button) ───────
+# Unlike /api/execute above, this isn't a one-shot script — it npm-installs a
+# real multi-file project, then starts a dev server that's meant to keep
+# running indefinitely, so it's tracked in RUNNING_PROJECT_RUNS rather than
+# awaited to completion.
+
+class ProjectRunRequest(BaseModel):
+    project_dir: str
+    platform: str = "react-native"
+
+async def _iter_lines(stream):
+    while True:
+        line = await stream.readline()
+        if not line:
+            break
+        yield line.decode(errors="replace")
+
+def _find_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+_NPM_BAD_VERSION_RE = re.compile(r"No matching version found for (@?[\w./-]+)@(\S+?)\.")
+_NPM_NOT_FOUND_RE = re.compile(r"'([^']+?)@[^']+' could not be found")
+_NPM_NO_VERSIONS_RE = re.compile(r"No versions available for (\S+)")
+
+def _find_bad_npm_package(log_text: str):
+    """Local models routinely hallucinate a dependency version, or even a
+    whole package that was never published — confirmed live: one generated
+    project's package.json referenced 5 different nonexistent expo-*/
+    stripe-react-native entries in a row, each with npm's own distinct error
+    shape. Returns (package, action) where action is "relax" (the package is
+    real but that exact pinned version isn't — try "latest" instead) or
+    "remove" (the package itself doesn't exist at all), or None if this
+    doesn't look like that kind of failure."""
+    m = _NPM_BAD_VERSION_RE.search(log_text)
+    if m:
+        return m.group(1), "relax"
+    m = _NPM_NOT_FOUND_RE.search(log_text)
+    if m:
+        return m.group(1), "remove"
+    m = _NPM_NO_VERSIONS_RE.search(log_text)
+    if m:
+        return m.group(1), "remove"
+    return None
+
+def _patch_package_json(project_dir: Path, package: str, action: str) -> bool:
+    pkg_file = project_dir / "package.json"
+    try:
+        data = json.loads(pkg_file.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    changed = False
+    for section in ("dependencies", "devDependencies"):
+        deps = data.get(section)
+        if isinstance(deps, dict) and package in deps:
+            if action == "remove":
+                del deps[package]
+            else:
+                deps[package] = "latest"
+            changed = True
+    if changed:
+        pkg_file.write_text(json.dumps(data, indent=2))
+    return changed
+
+async def _drain_running_process(run_id: str):
+    """Keeps reading a dev server's stdout after we've already told the
+    frontend it's ready — otherwise a full stdout pipe buffer would eventually
+    block (and hang) the still-running child process."""
+    state = RUNNING_PROJECT_RUNS.get(run_id)
+    proc = state.get("process") if state else None
+    if not proc:
+        return
+    async for _ in _iter_lines(proc.stdout):
+        pass
+
+@app.post("/api/project/run")
+async def run_project(req: ProjectRunRequest):
+    cfg = load_config()
+    base = Path(cfg.get("save_dir", DEFAULT_SAVE_DIR)).expanduser().resolve()
+    project_dir = Path(req.project_dir).expanduser().resolve()
+    if not project_dir.is_relative_to(base):
+        raise HTTPException(403, "Path outside allowed directory")
+    if not project_dir.exists():
+        raise HTTPException(404, "Project directory not found — save the project to disk first")
+
+    run_id = uuid.uuid4().hex
+    RUNNING_PROJECT_RUNS[run_id] = {"status": "installing", "process": None, "url": None}
+    state = RUNNING_PROJECT_RUNS[run_id]
+
+    async def stream():
+        yield json.dumps({"type": "run_id", "run_id": run_id}) + "\n"
+
+        if req.platform == "react-native-cli":
+            # Bare RN CLI has no web target without a from-scratch webpack
+            # setup the generator doesn't produce — an emulator/device is the
+            # only real way to run this one, so say so rather than pretend.
+            yield json.dumps({"type": "error", "text": "Bare React Native CLI projects need a connected Android/iOS device or emulator — there's no browser preview available for this platform. Regenerate with React Native (Expo) if you want a live preview here.\n"}) + "\n"
+            state["status"] = "error"
+            return
+
+        is_flutter = req.platform == "flutter"
+        install_cmd = ["flutter", "pub", "get"] if is_flutter else ["npm", "install"]
+        runtime_needed = "flutter" if is_flutter else "npm"
+        if shutil.which(runtime_needed) is None:
+            yield json.dumps({"type": "error", "text": f"'{runtime_needed}' not found on this system — install {'the Flutter SDK' if is_flutter else 'Node.js'} first.\n"}) + "\n"
+            state["status"] = "error"
+            return
+
+        yield json.dumps({"type": "status", "status": "installing"}) + "\n"
+        MAX_INSTALL_REPAIR_ATTEMPTS = 8
+        for attempt in range(MAX_INSTALL_REPAIR_ATTEMPTS):
+            log_so_far = ""
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *install_cmd, cwd=str(project_dir),
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+                )
+                async for line in _iter_lines(proc.stdout):
+                    log_so_far += line
+                    yield json.dumps({"type": "log", "text": line}) + "\n"
+                code = await asyncio.wait_for(proc.wait(), timeout=300)
+            except asyncio.TimeoutError:
+                proc.kill()
+                yield json.dumps({"type": "error", "text": "Install timed out after 5 minutes.\n"}) + "\n"
+                state["status"] = "error"
+                return
+
+            if code == 0:
+                break
+
+            bad = _find_bad_npm_package(log_so_far) if not is_flutter else None
+            if bad and _patch_package_json(project_dir, *bad):
+                pkg, action = bad
+                fix = "removing it" if action == "remove" else "relaxing its pinned version to latest"
+                yield json.dumps({"type": "log", "text": f"'{pkg}' doesn't exist on npm — {fix} and retrying install...\n"}) + "\n"
+                continue
+
+            yield json.dumps({"type": "error", "text": f"Install failed (exit code {code}).\n"}) + "\n"
+            state["status"] = "error"
+            return
+        else:
+            yield json.dumps({"type": "error", "text": f"Install still failing after {MAX_INSTALL_REPAIR_ATTEMPTS} automatic dependency repairs — giving up.\n"}) + "\n"
+            state["status"] = "error"
+            return
+
+        if not is_flutter:
+            # Guaranteed regardless of what the model's package.json declared
+            # — confirmed live, one at a time: `expo start --web` refuses to
+            # start at all without each of these, and generated projects
+            # routinely omit some or all of them since the model has no way
+            # to know this ahead of time. Best-effort: a failure here isn't
+            # fatal, the start command below will surface a clearer error if
+            # some other package turns out to still be missing.
+            #
+            # @expo/webpack-config (only needed pre-SDK49) is installed in a
+            # SEPARATE call from the rest — confirmed live: on a modern SDK
+            # its peer-dependency requirement conflicts with the installed
+            # expo version, and npm aborts the ENTIRE install command on a
+            # peer conflict, not just the one bad package — bundled together,
+            # a single incompatible entry silently took the other, otherwise
+            # perfectly installable packages down with it.
+            yield json.dumps({"type": "status", "status": "installing_web_deps"}) + "\n"
+            for web_deps_cmd in (
+                ["npx", "--yes", "expo", "install", "react-dom", "react-native-web",
+                 "@expo/metro-runtime", "expo-asset", "expo-status-bar"],
+                ["npx", "--yes", "expo", "install", "@expo/webpack-config"],
+            ):
+                try:
+                    web_deps_proc = await asyncio.create_subprocess_exec(
+                        *web_deps_cmd, cwd=str(project_dir),
+                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+                    )
+                    async for line in _iter_lines(web_deps_proc.stdout):
+                        yield json.dumps({"type": "log", "text": line}) + "\n"
+                    await asyncio.wait_for(web_deps_proc.wait(), timeout=120)
+                except asyncio.TimeoutError:
+                    web_deps_proc.kill()
+
+        port = _find_free_port()
+        # Ports picked explicitly rather than relying on each tool's own
+        # default — Expo's own default (8081) collides with this app's own
+        # backend port, confirmed live.
+        start_cmd = (["flutter", "run", "-d", "web-server", f"--web-port={port}"] if is_flutter
+                     # --yes: some SDKs (older ones especially) don't bundle
+                     # their own @expo/cli, so npx has to fetch it — without
+                     # --yes it prompts "install it globally?" and, since
+                     # there's no TTY attached here, silently answers "no"
+                     # and exits clean instead of actually starting anything.
+                     # Confirmed live against a real SDK 43 project.
+                     else ["npx", "--yes", "expo", "start", "--web", "--port", str(port)])
+
+        yield json.dumps({"type": "status", "status": "starting"}) + "\n"
+        server_proc = await asyncio.create_subprocess_exec(
+            *start_cmd, cwd=str(project_dir),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            env={**os.environ, "CI": "1"},
+        )
+        state["process"] = server_proc
+        # Older SDKs' "This command requires Expo CLI. Do you want to install
+        # it globally [Y/n]?" prompt isn't suppressed by CI=1 or npx --yes —
+        # confirmed live against a real SDK 43 project — so feed it an
+        # explicit "y" in case it's waiting on stdin, then close stdin (any
+        # newer SDK that never prompts just ignores this).
+        try:
+            server_proc.stdin.write(b"y\n")
+            await server_proc.stdin.drain()
+            server_proc.stdin.close()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+        url_re = re.compile(r"https?://[\w.\-]+:\d+\S*")
+        found_url = None
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            if server_proc.returncode is not None:
+                break
+            try:
+                raw = await asyncio.wait_for(server_proc.stdout.readline(), timeout=5)
+            except asyncio.TimeoutError:
+                continue
+            if not raw:
+                break
+            text = raw.decode(errors="replace")
+            yield json.dumps({"type": "log", "text": text}) + "\n"
+            m = url_re.search(text)
+            if m:
+                found_url = m.group(0)
+                break
+
+        if found_url:
+            state["status"] = "ready"
+            state["url"] = found_url
+            yield json.dumps({"type": "ready", "url": found_url, "run_id": run_id}) + "\n"
+            asyncio.create_task(_drain_running_process(run_id))
+        else:
+            state["status"] = "error"
+            exit_note = "" if server_proc.returncode is None else f" (process exited with code {server_proc.returncode})"
+            yield json.dumps({"type": "error", "text": f"Dev server didn't report a ready URL in time{exit_note}.\n"}) + "\n"
+            if server_proc.returncode is None:
+                server_proc.kill()
+
+    return StreamingResponse(stream(), media_type="application/x-ndjson")
+
+@app.post("/api/project/run/{run_id}/stop")
+async def stop_project_run(run_id: str):
+    state = RUNNING_PROJECT_RUNS.get(run_id)
+    if not state:
+        raise HTTPException(404, "No such run")
+    proc = state.get("process")
+    if proc and proc.returncode is None:
+        proc.terminate()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            proc.kill()
+    del RUNNING_PROJECT_RUNS[run_id]
+    return {"ok": True}
+
+
+class BuildApkRequest(BaseModel):
+    project_dir: str
+
+@app.post("/api/project/build-apk")
+async def build_apk(req: BuildApkRequest):
+    """Builds a real, installable .apk via EAS Build (Expo's cloud build
+    service) — no local Android SDK/Java toolchain needed, but it does need
+    the user's own Expo account (a free-tier EXPO_TOKEN, checked below) since
+    the build actually runs on Expo's servers, not this machine. A cloud
+    build commonly takes 5-20+ minutes; this streams progress the whole way
+    and only returns once the .apk has been downloaded back into the project
+    folder (or the build failed)."""
+    cfg = load_config()
+    base = Path(cfg.get("save_dir", DEFAULT_SAVE_DIR)).expanduser().resolve()
+    project_dir = Path(req.project_dir).expanduser().resolve()
+    if not project_dir.is_relative_to(base):
+        raise HTTPException(403, "Path outside allowed directory")
+    if not project_dir.exists():
+        raise HTTPException(404, "Project directory not found — save the project to disk first")
+
+    token = _load_api_keys().get("expo_token")
+    if not token:
+        raise HTTPException(400, "No Expo access token configured — add one first (get one at expo.dev under Account Settings → Access Tokens).")
+
+    async def stream():
+        env = {**os.environ, "EXPO_TOKEN": token, "CI": "1"}
+
+        if not (project_dir / "eas.json").exists():
+            yield json.dumps({"type": "status", "status": "configuring"}) + "\n"
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "npx", "--yes", "eas-cli", "build:configure", "-p", "android",
+                    cwd=str(project_dir), env=env,
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+                )
+                async for line in _iter_lines(proc.stdout):
+                    yield json.dumps({"type": "log", "text": line}) + "\n"
+                await asyncio.wait_for(proc.wait(), timeout=60)
+            except asyncio.TimeoutError:
+                proc.kill()
+                yield json.dumps({"type": "error", "text": "eas build:configure timed out.\n"}) + "\n"
+                return
+
+        yield json.dumps({"type": "status", "status": "building"}) + "\n"
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "npx", "--yes", "eas-cli", "build", "-p", "android", "-e", "preview",
+                "--non-interactive", "--wait", "--json",
+                cwd=str(project_dir), env=env,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            )
+            output_lines = []
+            async for line in _iter_lines(proc.stdout):
+                output_lines.append(line)
+                yield json.dumps({"type": "log", "text": line}) + "\n"
+            code = await asyncio.wait_for(proc.wait(), timeout=1800)
+        except asyncio.TimeoutError:
+            proc.kill()
+            yield json.dumps({"type": "error", "text": "Build timed out after 30 minutes.\n"}) + "\n"
+            return
+
+        if code != 0:
+            yield json.dumps({"type": "error", "text": f"Build failed (exit code {code}).\n"}) + "\n"
+            return
+
+        full_output = "".join(output_lines)
+        try:
+            start = full_output.index("[")
+            build_info = json.loads(full_output[start:])
+            apk_url = build_info[0]["artifacts"]["buildUrl"]
+        except (ValueError, KeyError, IndexError, json.JSONDecodeError):
+            yield json.dumps({"type": "error", "text": "Build finished but the download URL couldn't be found in EAS's output — check the log above, or run `npx eas-cli build:list` in the project folder to find it manually.\n"}) + "\n"
+            return
+
+        yield json.dumps({"type": "status", "status": "downloading"}) + "\n"
+        dest = project_dir / f"{project_dir.name}.apk"
+        try:
+            async with httpx.AsyncClient(timeout=300, follow_redirects=True) as client:
+                async with client.stream("GET", apk_url) as r:
+                    with open(dest, "wb") as f:
+                        async for chunk in r.aiter_bytes():
+                            f.write(chunk)
+        except Exception as e:
+            yield json.dumps({"type": "error", "text": f"Build succeeded but downloading the .apk failed: {e}\nDownload it manually from: {apk_url}\n"}) + "\n"
+            return
+
+        yield json.dumps({"type": "ready", "path": str(dest)}) + "\n"
+
+    return StreamingResponse(stream(), media_type="application/x-ndjson")
+
+
 # ── Health ─────────────────────────────────────────────────────────────────────
 
 @app.get("/api/system/ram")
@@ -430,7 +805,7 @@ REPO_DIR = Path(__file__).parent.parent
 # No formal release process (no GitHub Releases/tags exist for this repo —
 # see the note on /api/update/check below) — bump this by hand alongside the
 # README's own "v0.2" heading whenever a notable batch of changes lands.
-APP_VERSION = "0.2.0"
+APP_VERSION = "1.0.0"
 
 
 async def _run_git(*args: str) -> tuple[int, str]:
@@ -1548,6 +1923,40 @@ async def set_api_key(req: ApiKeyRequest):
     _save_api_keys(keys)
     return {"ok": True}
 
+class ExpoTokenRequest(BaseModel):
+    token: str
+
+@app.get("/api/keys/expo")
+async def get_expo_key_status():
+    keys = _load_api_keys()
+    return {"configured": bool(keys.get("expo_token"))}
+
+@app.post("/api/keys/expo")
+async def set_expo_key(req: ExpoTokenRequest):
+    keys = _load_api_keys()
+    token = req.token.strip()
+    if token:
+        # Validated against the real eas-cli tool (confirmed live: `eas-cli
+        # whoami` cleanly prints "Not logged in" and exits non-zero with a
+        # bad/missing token, no auth needed to run the check itself) — same
+        # "reject a bad key now, don't let it fail silently at build time"
+        # reasoning as the LLM provider keys above.
+        proc = await asyncio.create_subprocess_exec(
+            "npx", "--yes", "eas-cli", "whoami",
+            env={**os.environ, "EXPO_TOKEN": token},
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+        lines = [l for l in out.decode(errors="replace").splitlines() if not l.strip().startswith("npm warn")]
+        text = "\n".join(lines).strip()
+        if proc.returncode != 0 or "not logged in" in text.lower():
+            raise HTTPException(400, f"That token was rejected by Expo — {text or 'unknown error'}")
+        keys["expo_token"] = token
+    else:
+        keys.pop("expo_token", None)
+    _save_api_keys(keys)
+    return {"ok": True}
+
 @app.get("/api/models/cloud")
 async def list_cloud_models():
     """Only lists a provider's model as usable once a key is actually
@@ -1694,8 +2103,39 @@ async def _stream_chat_ndjson(model: str, messages: list, timeout: int = 600):
 
 # ── Chat with Tool Calling ─────────────────────────────────────────────────────
 
+# A system-prompt hint telling the model the real date (see build_system_prompt)
+# is only ever a suggestion the model can ignore — confirmed live: asked "what
+# is today's date" with nothing injected, this class of local model guessed a
+# date from its training data instead of admitting it didn't know. For this
+# narrow, unambiguous question there's no need to trust the model at all —
+# answer it directly from the system clock and skip generation entirely so it
+# genuinely cannot get it wrong.
+_DATE_TIME_QUERY_RE = re.compile(
+    "|".join([
+        r"^what(?:'s|s| is)\s+(?:today'?s\s+|the\s+current\s+|current\s+|the\s+)?(?:date|day|time)"
+        r"(?:\s+is\s+it)?(?:\s+today)?(?:\s+right\s+now)?\s*\??$",
+        r"^what\s+day\s+is\s+it\s*\??$",
+        r"^what\s+time\s+is\s+it\s*\??$",
+        r"^(?:today'?s|current)\s+(?:date|time)\s*\??$",
+    ]),
+    re.IGNORECASE,
+)
+
+def _deterministic_date_answer(text: str) -> str | None:
+    if not _DATE_TIME_QUERY_RE.match(text.strip()):
+        return None
+    now = datetime.now()
+    return f"Today is {now.strftime('%A, %Y-%m-%d')}. The current time is {now.strftime('%H:%M')}."
+
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
+    if req.messages and req.messages[-1].role == "user":
+        canned = _deterministic_date_answer(req.messages[-1].content)
+        if canned:
+            async def canned_stream():
+                yield (json.dumps({"message": {"content": canned}, "done": True}) + "\n").encode()
+            return StreamingResponse(canned_stream(), media_type="application/x-ndjson")
+
     messages = [{"role": "system", "content": build_system_prompt(req.system)}] + \
                [{"role": m.role, "content": m.content} for m in req.messages]
 
@@ -2057,6 +2497,171 @@ async def submit_sudo_password(request_id: str, req: SudoPasswordRequest):
     return {"ok": True}
 
 
+# ── APK Analysis (for the App Analyzer's "clone an existing app" flow) ────────
+# Finds and decompiles a real APK so Clone Mode can ground its feature
+# inventory in actual manifest/bytecode facts instead of the model's memory
+# alone. Scanning reaches beyond the home directory into mounted removable
+# drives (external HDDs etc, where APKs pulled off a phone tend to live) —
+# a deliberately wider net than the rest of the app's file tools, which stay
+# inside the home directory.
+
+def _apk_scan_roots() -> list[Path]:
+    roots = [Path.home()]
+    for pattern in ("/run/media/*/*", "/media/*", "/mnt/*"):
+        roots.extend(Path(p) for p in glob.glob(pattern) if Path(p).is_dir())
+    return roots
+
+def _is_path_under_apk_roots(target: Path) -> bool:
+    return any(target.is_relative_to(root.resolve()) for root in _apk_scan_roots())
+
+APK_UPLOAD_DIR_NAME = "apk-uploads"
+
+@app.get("/api/apk/scan")
+async def scan_for_apks():
+    def _scan():
+        found = []
+        visited = 0
+        for root in _apk_scan_roots():
+            for f in _safe_rglob(root):
+                visited += 1
+                if visited > 200_000 or len(found) >= 200:
+                    return found
+                if f.suffix.lower() == ".apk":
+                    st = _safe_stat(f)
+                    found.append({
+                        "path": str(f),
+                        "name": f.name,
+                        "size": st.st_size if st else 0,
+                        "modified": st.st_mtime if st else 0,
+                    })
+        return found
+    results = await asyncio.to_thread(_scan)
+    return {"results": results}
+
+@app.post("/api/apk/upload")
+async def upload_apk(request: Request):
+    import aiofiles
+    form = await request.form()
+    field = next((form[k] for k in form if hasattr(form[k], "filename") and form[k].filename), None)
+    if not field:
+        raise HTTPException(422, "No file uploaded")
+    if not field.filename.lower().endswith(".apk"):
+        raise HTTPException(422, "Not an .apk file")
+
+    cfg = load_config()
+    dest_dir = (Path(cfg.get("save_dir", DEFAULT_SAVE_DIR)).expanduser() / APK_UPLOAD_DIR_NAME).resolve()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = (dest_dir / Path(field.filename).name).resolve()
+    if not dest.is_relative_to(dest_dir):
+        raise HTTPException(400, "Invalid filename")
+
+    content = await field.read()
+    async with aiofiles.open(dest, "wb") as out:
+        await out.write(content)
+    return {"path": str(dest), "name": dest.name, "size": len(content)}
+
+# Strings pulled straight out of a DEX's constant pool are mostly internal
+# noise (type descriptors, obfuscated/minified identifiers, single tokens) —
+# this keeps only the ones that read like real UI copy, since that's the
+# actual feature signal we want (e.g. "Create Invoice", "Pay with Bank
+# Transfer"), and caps the result since a real app can have tens of thousands
+# of DEX strings.
+_SMALI_TYPE_RE = re.compile(r'^[\[]*L[a-zA-Z0-9_$/]+;$')
+
+def _filter_apk_strings(raw_strings: list[str], cap: int = 300) -> list[str]:
+    seen = set()
+    kept = []
+    for s in raw_strings:
+        s = s.strip()
+        if not (4 <= len(s) <= 80):
+            continue
+        if not s.isprintable():
+            continue
+        if _SMALI_TYPE_RE.match(s) or s.startswith("Landroid") or s.startswith("Lkotlin") or s.startswith("Landroidx"):
+            continue
+        if "/" in s and ";" in s:  # another common smali-descriptor shape
+            continue
+        if not re.search(r'[a-zA-Z]{3}', s):  # needs at least one real word-ish run
+            continue
+        if s in seen:
+            continue
+        seen.add(s)
+        kept.append(s)
+    kept.sort(key=len, reverse=True)
+    return kept[:cap]
+
+class ApkAnalyzeRequest(BaseModel):
+    path: str
+
+@app.post("/api/apk/analyze")
+async def analyze_apk(req: ApkAnalyzeRequest):
+    target = Path(req.path).expanduser().resolve()
+    if not _is_path_under_apk_roots(target):
+        raise HTTPException(403, "Path outside allowed directories")
+    if not target.exists() or target.suffix.lower() != ".apk":
+        raise HTTPException(404, "Not an existing .apk file")
+
+    def _analyze():
+        a = AndroguardAPK(str(target))
+        info = {
+            "package": a.get_package(),
+            "app_name": a.get_app_name() or a.get_package(),
+            "version_name": a.get_androidversion_name(),
+            "version_code": a.get_androidversion_code(),
+            "min_sdk": a.get_min_sdk_version(),
+            "target_sdk": a.get_target_sdk_version(),
+            "permissions": sorted(a.get_permissions()),
+            "activities": sorted(a.get_activities()),
+            "services": sorted(a.get_services()),
+            "receivers": sorted(a.get_receivers()),
+            "providers": sorted(a.get_providers()),
+            "strings_sample": [],
+            "strings_total": 0,
+            "decompiled": False,
+        }
+        try:
+            _, _, dx = AnalyzeAPK(str(target))
+            raw_strings = [s.get_value() for s in dx.get_strings()]
+            info["strings_total"] = len(raw_strings)
+            info["strings_sample"] = _filter_apk_strings(raw_strings)
+            info["decompiled"] = True
+        except Exception:
+            # DEX bytecode analysis is much heavier and more failure-prone
+            # than the manifest read above (odd multidex layouts, obfuscation,
+            # corrupt files) — the manifest facts alone are still useful, so
+            # don't fail the whole request over the decompile step.
+            pass
+        return info
+
+    try:
+        info = await asyncio.to_thread(_analyze)
+    except Exception as e:
+        raise HTTPException(422, f"Could not parse this APK: {e}")
+
+    def _short(names: list[str]) -> list[str]:
+        pkg_prefix = (info["package"] or "") + "."
+        return [n[len(pkg_prefix):] if n.startswith(pkg_prefix) else n for n in names]
+
+    context_lines = [
+        f"App name: {info['app_name']}",
+        f"Package: {info['package']}",
+        f"Version: {info['version_name']} (code {info['version_code']})",
+        f"SDK range: min {info['min_sdk']} / target {info['target_sdk']}",
+        f"Permissions ({len(info['permissions'])}): {', '.join(info['permissions']) or 'none declared'}",
+        f"Activities/screens ({len(info['activities'])}): {', '.join(_short(info['activities']))}",
+        f"Services ({len(info['services'])}): {', '.join(_short(info['services'])) or 'none'}",
+        f"Receivers ({len(info['receivers'])}): {', '.join(_short(info['receivers'])) or 'none'}",
+    ]
+    if info["strings_sample"]:
+        context_lines.append(
+            f"Sample of real in-app text found in the compiled code "
+            f"({len(info['strings_sample'])} of {info['strings_total']} total strings, "
+            f"longest/most descriptive first): {' | '.join(info['strings_sample'][:150])}"
+        )
+    info["apk_context"] = "\n".join(context_lines)
+    return info
+
+
 # ── App Analyzer ───────────────────────────────────────────────────────────────
 
 @app.post("/api/analyze")
@@ -2073,13 +2678,19 @@ CATEGORY: {req.category}
 ADDITIONAL DESCRIPTION FROM USER: {req.description or "Not provided — rely on your own knowledge of this real app."}
 KNOWN ISSUES (context only, do not use to cut scope): {req.reviews or "Not provided"}
 PLATFORM / PRICING NOTE: {req.price_target}
-
+{f'''
+REAL APK ANALYSIS (ground truth extracted from an actual installed copy of
+this app — treat this as more reliable than your own memory wherever they
+disagree, and make sure every screen/permission/component implied by this
+shows up in your feature inventory):
+{req.apk_context}
+''' if req.apk_context else ""}
 Provide:
 
 ## 1. Complete Feature Inventory
 Exhaustively list EVERY feature/module the real "{req.app_name}" actually
 has, grouped by area (core workflows, reporting, integrations, admin/settings,
-platform-specific extras, etc). Use your own real knowledge of this app.
+platform-specific extras, etc). Use your own real knowledge of this app{" plus the real APK analysis above" if req.apk_context else ""}.
 Do not omit advanced or niche features for brevity.
 
 ## 2. Data Model
@@ -2157,11 +2768,36 @@ Include real, working code — not pseudocode.
 @app.post("/api/generate")
 async def generate_project(req: GenerateRequest):
     features_str = "\n".join(f"- {f}" for f in req.features) if req.features else "- Core app functionality"
+
+    # Left to its own memory the model routinely picks a long-outdated SDK
+    # (confirmed live: two separate generations came back pinned to Expo SDK
+    # 43 and 48, both years old) whose own dependency tree has since been
+    # partly pulled from npm entirely — `npm install` then fails outright.
+    # Pinning current, real, known-good versions here removes that guesswork
+    # for the one thing most likely to break the whole project; anything
+    # else missing/wrong still gets caught by the install-time auto-repair
+    # and guaranteed-web-deps steps in /api/project/run.
+    version_guidance = ""
+    if req.platform == "react-native":
+        version_guidance = """
+IMPORTANT — package.json must pin these exact, real, currently-supported
+core versions (do NOT use an older Expo SDK from memory — older SDKs'
+own sub-dependencies are routinely no longer published on npm at all and
+will fail to install):
+"expo": "~52.0.0"
+"react": "18.3.1"
+"react-native": "0.76.5"
+Only add further packages beyond expo/react/react-native if a required
+feature actually needs one, and only packages you're confident really exist
+on npm — prefer something already bundled with Expo over inventing a new
+dependency you're not sure is real.
+"""
+
     prompt = f"""Generate a complete, ready-to-run {req.platform} project for: {req.app_name}
 
 Required features:
 {features_str}
-
+{version_guidance}
 Output the complete project as a series of files. For each file use this format:
 === FILE: path/to/filename.ext ===
 [complete file content]
@@ -2174,6 +2810,9 @@ Include:
 - Navigation setup
 - Any required API service files
 - README.md with setup instructions
+- A small, visible "Powered by LLM CODER" credit with the link
+  https://github.com/DgBrown21/LLM-CODER somewhere sensible in the app's UI
+  (e.g. a Settings or About screen footer) — not intrusive, just present.
 
 Write production-quality code, not demos."""
 
@@ -2249,6 +2888,24 @@ async def save_project(req: SaveProjectRequest):
     matches = file_pattern.findall(req.content)
 
     if not matches:
+        # Some local models wrap the primary === FILE: === convention in
+        # their own markdown heading/bold decoration instead of following it
+        # literally — e.g. "#### **FILE: path/to/file.ext ===**" — confirmed
+        # live (llm-coder-uncensored:14b does this routinely). Tried right
+        # after the exact-format pattern above and before the two looser
+        # heuristics below: those aren't anchored to an actual "FILE:"
+        # marker, so against this exact shape they silently matched unrelated
+        # markdown (a fence-to-fence span landing on "### **END FILE**", the
+        # "# Credits" heading) and wrote garbage filenames with the wrong
+        # content — confirmed live, this produced a save that looked
+        # successful but silently dropped every real file.
+        decorated_file_pattern = re.compile(
+            r'FILE:\s*\**`?([^\n`*]+?)`?\**\s*(?:===)?\s*\**\s*\n+`{3,}[a-zA-Z0-9_+-]*\s*\n(.*?)`{3,}',
+            re.DOTALL
+        )
+        matches = decorated_file_pattern.findall(req.content)
+
+    if not matches:
         fence_pattern = re.compile(
             r'(?:#+\s*)?`{3,}(?:\w+)?\s*\n(?://|#|<!--)\s*(.+?)\s*(?:-->)?\n(.*?)`{3,}',
             re.DOTALL
@@ -2277,7 +2934,80 @@ async def save_project(req: SaveProjectRequest):
         target.write_text(content.strip() + "\n")
         saved.append(str(target.relative_to(project_dir)))
 
+    # The prompt asks the model to credit LLM CODER somewhere in the app's own
+    # UI, but that's only ever best-effort (freeform generated code, no
+    # guarantee it complied) — so always guarantee it in the README too,
+    # regardless of what the model actually produced.
+    ATTRIBUTION = (
+        "\n\n---\n\nBuilt with [LLM CODER](https://github.com/DgBrown21/LLM-CODER) "
+        "— a local, self-hosted AI coding assistant.\n"
+    )
+    readme_rel = next((p for p in saved if Path(p).name.lower() == "readme.md"), None)
+    if readme_rel:
+        readme_path = project_dir / readme_rel
+        readme_path.write_text(readme_path.read_text() + ATTRIBUTION)
+    else:
+        readme_path = project_dir / "README.md"
+        readme_path.write_text(f"# {req.app_name}\n{ATTRIBUTION}")
+        saved.append("README.md")
+
     return {"saved": saved, "project_dir": str(project_dir), "file_count": len(saved)}
+
+
+# ── Load Saved Project (Generate Project's "Load" button) ──────────────────────
+# Reconstructs a previously saved project back into the same === FILE: === /
+# === END FILE === text the Generate tab already works with, so Save/Copy/Run
+# Code all keep working unchanged on a reloaded project.
+
+MAX_LOAD_FILE_BYTES = 512 * 1024  # matches the semantic-index file-size cap elsewhere
+
+@app.get("/api/projects/list")
+async def list_saved_projects():
+    cfg = load_config()
+    base = Path(cfg.get("save_dir", DEFAULT_SAVE_DIR)).expanduser().resolve()
+    if not base.exists():
+        return {"projects": []}
+    projects = []
+    for entry in _safe_iterdir(base):
+        if entry.is_dir() and entry.name not in NOISE_DIRS and entry.name not in ("uploads", APK_UPLOAD_DIR_NAME):
+            st = _safe_stat(entry)
+            projects.append({"name": entry.name, "modified": st.st_mtime if st else 0})
+    projects.sort(key=lambda p: p["modified"], reverse=True)
+    return {"projects": projects}
+
+class LoadProjectRequest(BaseModel):
+    name: str
+
+@app.post("/api/projects/load")
+async def load_project(req: LoadProjectRequest):
+    cfg = load_config()
+    base = Path(cfg.get("save_dir", DEFAULT_SAVE_DIR)).expanduser().resolve()
+    project_dir = (base / req.name).resolve()
+    if not project_dir.is_relative_to(base):
+        raise HTTPException(403, "Path outside allowed directory")
+    if not project_dir.is_dir():
+        raise HTTPException(404, "Project not found")
+
+    parts = []
+    file_count = 0
+    for f in sorted(_safe_rglob(project_dir)):
+        if f.is_symlink():
+            continue
+        st = _safe_stat(f)
+        if not st or st.st_size > MAX_LOAD_FILE_BYTES:
+            continue
+        try:
+            content = f.read_text()
+        except (UnicodeDecodeError, OSError):
+            continue  # skip binary/unreadable files (images, lockfiles, etc.)
+        rel = f.relative_to(project_dir)
+        parts.append(f"=== FILE: {rel} ===\n{content}\n=== END FILE ===")
+        file_count += 1
+
+    if not parts:
+        raise HTTPException(422, "No readable text files found in this project")
+
+    return {"content": "\n\n".join(parts), "project_dir": str(project_dir), "file_count": file_count}
 
 
 # ── Email & Calendar: shared account storage ────────────────────────────────────
@@ -3378,6 +4108,13 @@ Content to learn from:
 
 
 def build_system_prompt(base: str) -> str:
+    # Local models otherwise have no way to know "today" and fall back to a
+    # guess from their training data (confirmed live: asked for today's date
+    # with nothing injected, the model guessed a date from 2023) — so always
+    # tell it the real current date/time regardless of which skills exist.
+    now = datetime.now().strftime("%A, %Y-%m-%d %H:%M")
+    base = f"{base}\n\nThe current date and time is {now}. Use this as ground truth for any question about today's date, time, or relative dates — do not guess from your training data."
+
     skills = _load_json_list(SKILLS_FILE)
     if not skills:
         return base
