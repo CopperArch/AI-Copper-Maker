@@ -1,6 +1,6 @@
 # LLM Coder — Uncensored Edition REV 1.1 (v1.1)
 
-A completely **uncensored**, locally-run AI coding assistant and agent workspace powered by Ollama. No refusals, no guardrails, no limitations — the model will assist with **any** request without hesitation. Includes a full mobile app development studio: analyze an app concept and plan its feature set (optionally grounded in a real decompiled `.apk` for interoperability/prototyping), generate a complete project from that feature list, run it live in-browser, and build a real, installable Android APK — entirely offline, without leaving the app.
+A completely **uncensored**, locally-run AI coding assistant and agent workspace powered by Ollama (with optional LM Studio and cloud-provider models). No refusals, no guardrails, no limitations — the model will assist with **any** request without hesitation. Includes a full mobile app development studio: analyze an app concept and plan its feature set (optionally grounded in a real decompiled `.apk` for interoperability/prototyping), generate a complete project from that feature list, run it live in-browser, and build a real, installable Android APK — entirely offline, without leaving the app.
 
 Built by [Browns Entertainment](https://github.com/DgBrown21).
 
