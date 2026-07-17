@@ -62,7 +62,7 @@ if [ -n "$DOCKER_CMD" ]; then
             warn "docker-compose not found, building manually..."
             $DOCKER_CMD build -t llm-coder .
             $DOCKER_CMD run -d --name llm-coder-ollama -v ollama-models:/root/.ollama --network host ollama/ollama
-            $DOCKER_CMD run -d --name llm-coder-app -p 8081:8081 -e OLLAMA_HOST=http://localhost:11434 -v projects:/root/Downloads/LLM-CODER llm-coder
+            $DOCKER_CMD run -d --name llm-coder-app -p 127.0.0.1:8081:8081 -e OLLAMA_HOST=http://localhost:11434 -v projects:/root/Downloads/LLM-CODER llm-coder
         }
         echo ""
         echo -e "${GREEN}╔══════════════════════════════════════════════════════╗${NC}"
@@ -270,7 +270,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=$SCRIPT_DIR/backend
-ExecStart=$SCRIPT_DIR/backend/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8081
+ExecStart=$SCRIPT_DIR/backend/venv/bin/uvicorn main:app --host 127.0.0.1 --port 8081
 Restart=on-failure
 RestartSec=5
 

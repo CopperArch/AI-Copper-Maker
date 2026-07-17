@@ -295,6 +295,42 @@
   }
   .pre-actions button:hover { background: rgba(255,255,255,.2); }
 
+  /* Tool-use rows — nested inside the same reply bubble as the narration
+     around them (Claude-style: a small collapsed row per tool call, inline,
+     left-aligned, expand-on-click for args/result) instead of their own
+     separate message boxes — so an agent turn with tool use still reads as
+     one continuous block, with the running/typed text always last (at the
+     bottom), and tool rows sitting inline exactly where they happened. */
+  .tool-row {
+    font-size: 12px; margin-bottom: 6px; border-radius: 8px;
+    border: 1px solid var(--border); background: rgba(127,127,127,.06);
+    overflow: hidden;
+  }
+  .tool-row summary {
+    list-style: none; cursor: pointer; padding: 6px 10px;
+    display: flex; align-items: center; gap: 6px;
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+    color: var(--muted);
+  }
+  .tool-row summary::-webkit-details-marker { display: none; }
+  .tool-row summary::before { content: '▸'; font-size: 9px; transition: transform .15s ease; flex-shrink: 0; }
+  .tool-row[open] summary::before { transform: rotate(90deg); }
+  .tool-row-name { color: var(--text); font-weight: 600; }
+  .tool-row-preview {
+    opacity: .7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 360px;
+  }
+  .tool-row-status { margin-left: auto; opacity: .6; font-size: 11px; }
+  .tool-row-body { padding: 2px 10px 10px; border-top: 1px solid var(--border); }
+  .tool-row-body .tool-row-label { font-size: 10px; text-transform: uppercase; letter-spacing: .4px; color: var(--muted); margin-top: 8px; }
+  /* Arguments is a bare <code>; Result is <pre><code>. Boxed styling lives on
+     whichever one is the outermost so the two don't nest double borders/bg. */
+  .tool-row-body > code, .tool-row-body pre {
+    display: block; margin-top: 4px; font-size: 11px; white-space: pre-wrap; word-break: break-all;
+    background: rgba(255,255,255,.05); padding: 6px 8px; border-radius: 6px;
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+  }
+  .tool-row-body pre code { display: block; background: none; padding: 0; font: inherit; }
+
   /* ── Edit Panel (CodeMirror) ── */
   #edit-panel {
     position: fixed; top: 0; right: -480px; width: 460px; max-width: 90vw; height: 100vh;
@@ -348,6 +384,8 @@
     margin-bottom: 6px; flex-wrap: wrap;
   }
   .chat-meta span { font-size: 12px; color: var(--muted); }
+  #token-count.token-count-ready { color: var(--warn); font-weight: 600; }
+  #token-count.token-count-thinking { color: var(--danger); font-weight: 600; }
 
   /* Animated activity bar — shows while the model is generating */
   .activity-bar {
@@ -476,6 +514,41 @@
   .runner-output .stderr { color: var(--danger); }
   .runner-output .exit { color: var(--muted); font-size: 11px; margin-top: 8px; border-top: 1px solid var(--border); padding-top: 8px; }
   .runner-placeholder { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--muted); font-size: 13px; text-align: center; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+
+  /* ── Email: Outlook/Gmail-style inbox list + reading pane ── */
+  .email-list, .email-detail {
+    background: var(--surface);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  .email-row {
+    display: flex; flex-direction: column; gap: 3px;
+    padding: 10px 14px; margin: 6px 8px;
+    border: 1px solid var(--border); border-radius: 10px;
+    cursor: pointer; transition: background .1s ease, border-color .1s ease;
+  }
+  .email-row:hover { background: rgba(255,255,255,.04); }
+  .email-row.active { background: rgba(31,111,235,.15); border-color: var(--accent2); }
+  .email-row-top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .email-row-sender { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .email-row-date { font-size: 11px; color: var(--muted); flex-shrink: 0; }
+  .email-row-subject { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .email-row-preview { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .email-detail-header { padding: 20px 24px; border-bottom: 1px solid var(--border); }
+  .email-detail-subject { font-size: 19px; font-weight: 600; margin-bottom: 14px; }
+  .email-detail-from-row { display: flex; align-items: center; gap: 12px; }
+  .email-avatar {
+    width: 38px; height: 38px; border-radius: 50%; background: var(--accent2); color: #fff;
+    display: flex; align-items: center; justify-content: center; font-size: 15px; font-weight: 600; flex-shrink: 0;
+  }
+  .email-from-name { font-weight: 600; font-size: 13px; }
+  .email-from-addr { font-size: 12px; color: var(--muted); }
+  .email-detail-date { font-size: 12px; color: var(--muted); margin-left: auto; white-space: nowrap; }
+  .email-detail-body {
+    padding: 20px 24px; font-size: 14px; line-height: 1.7; white-space: pre-wrap;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  .email-detail-actions { padding: 0 24px 20px; display: flex; gap: 8px; flex-wrap: wrap; }
 
   /* ── Models Panel ── */
   .models-panel { padding: 24px; overflow-y: auto; max-width: 860px; }
@@ -711,9 +784,9 @@
 
       <div class="chat-input-area">
         <div class="chat-meta">
-          <span id="token-count">Ready</span>
-          <span class="token-usage-weekly" id="token-usage-weekly-inline" style="font-size:11px;color:var(--muted)"></span>
-          <button class="conv-menu-btn" id="token-usage-menu-btn-inline" title="Reset interval" style="font-size:13px;padding:0 4px">⋮</button>
+          <span id="token-count" class="token-count-ready">Ready</span>
+          <span id="turn-token-count" style="font-size:11px;color:var(--muted)"></span>
+          <span id="queue-indicator" style="font-size:11px;color:var(--muted)"></span>
           <span class="system-toggle" onclick="toggleSystemPrompt()">⚙ System prompt</span>
           <span style="font-size:11px;color:var(--muted);margin-left:auto">📎 Drop files or folders anywhere on chat</span>
         </div>
@@ -735,7 +808,12 @@
       <div class="analyze-layout">
         <div class="analyze-form">
           <h2>🔍 App Analyzer</h2>
-          <p style="font-size:12px;color:var(--muted)">Research a popular app, paste in its details and user complaints, and get a full development plan to build a better version.</p>
+          <p style="font-size:12px;color:var(--muted)">Research a popular app, paste in its details and user complaints, and get a full development plan to build a better version — or switch on Clone Mode to replicate it with full feature parity instead.</p>
+
+          <div class="field" style="flex-direction:row;align-items:center;gap:8px;">
+            <input type="checkbox" id="an-clone" style="width:auto;">
+            <label for="an-clone" style="font-size:12px;">🔁 Clone Mode — exact feature parity, not an MVP or competitor</label>
+          </div>
 
           <div class="field">
             <label>App Name</label>
@@ -1115,11 +1193,11 @@
             </div>
           </div>
 
-          <div style="flex:1;display:flex;overflow:hidden;gap:12px;min-height:0">
-            <div id="email-message-list" class="runner-output" style="width:300px;flex-shrink:0;overflow-y:auto;padding:6px">
+          <div style="flex:1;display:flex;overflow:hidden;gap:0;min-height:0;border:1px solid var(--border);border-radius:8px">
+            <div id="email-message-list" class="email-list" style="width:320px;flex-shrink:0;overflow-y:auto;border-right:1px solid var(--border)">
               <div class="runner-placeholder">Add an account, pick it above, then Refresh.</div>
             </div>
-            <div id="email-message-detail" class="runner-output" style="flex:1;overflow-y:auto">
+            <div id="email-message-detail" class="email-detail" style="flex:1;overflow-y:auto">
               <div class="runner-placeholder">Select a message to read it.</div>
             </div>
           </div>
@@ -1332,6 +1410,8 @@ let installedModelsLmstudio = [];
 // still streaming. Each entry: { abortController, fullText, tokenCount }.
 let activeStreams = new Map();
 let features = [];
+let lastAnalyzerAppName = '';
+let lastAnalyzerFeatures = [];
 let catalog = [];
 let catalogFilter = 'all';
 let suggestedModel = null;
@@ -1382,10 +1462,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   loadCatalog();
   renderWeeklyTokenUsage();
   document.getElementById('token-usage-menu-btn').addEventListener('click', e => {
-    e.stopPropagation();
-    toggleTokenUsageMenu(e.currentTarget);
-  });
-  document.getElementById('token-usage-menu-btn-inline').addEventListener('click', e => {
     e.stopPropagation();
     toggleTokenUsageMenu(e.currentTarget);
   });
@@ -1456,6 +1532,10 @@ async function checkForUpdate() {
 
 async function applyUpdate() {
   const banner = document.getElementById('update-banner');
+  // Also invoked from the About modal's "update now" link, where the banner
+  // may still be display:none (it only auto-shows when the periodic check
+  // finds something) — force it visible so the result isn't silently hidden.
+  banner.style.display = 'flex';
   banner.innerHTML = '<span>Updating…</span>';
   try {
     const r = await fetch(`${API}/api/update/apply`, { method: 'POST' });
@@ -1519,9 +1599,14 @@ function showAboutModal() {
         and cloud-provider models). It chats, writes and runs code, manages files, emails, and calendars,
         and can install software for you — always asking first and explaining why.
       </p>
-      <div style="font-size:12px;color:var(--muted);border-top:1px solid var(--border);padding-top:12px">
+      <div style="font-size:12px;color:var(--muted);border-top:1px solid var(--border);padding-top:12px;padding-bottom:12px;border-bottom:1px solid var(--border)">
         Designed By Browns Entertainment<br>
-        <a href="https://www.example.com" target="_blank" rel="noopener" style="color:var(--accent2)">www.example.com</a>
+        <a href="https://www.example.com" target="_blank" rel="noopener" style="color:var(--accent2)">www.example.com</a><br>
+        <span id="about-version">Version …</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;margin-top:12px">
+        <button id="about-check-update-btn" class="btn btn-secondary btn-sm">Check for updates</button>
+        <span id="about-update-status" style="font-size:12px;color:var(--muted)"></span>
       </div>
       <div style="display:flex;justify-content:flex-end;margin-top:16px">
         <button id="about-close-btn" class="btn" style="padding:6px 14px">Close</button>
@@ -1530,10 +1615,48 @@ function showAboutModal() {
   document.body.appendChild(overlay);
   const close = () => overlay.remove();
   overlay.querySelector('#about-close-btn').onclick = close;
+  overlay.querySelector('#about-check-update-btn').onclick = checkForUpdateFromAbout;
   overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
   document.addEventListener('keydown', function onEsc(e) {
     if (e.key === 'Escape') { close(); document.removeEventListener('keydown', onEsc); }
   });
+
+  fetch(`${API}/api/version`).then(r => r.json()).then(d => {
+    const el = document.getElementById('about-version');
+    if (el) el.textContent = `Version ${d.version}`;
+  }).catch(() => {
+    const el = document.getElementById('about-version');
+    if (el) el.textContent = '';
+  });
+}
+
+// Manual "Check for updates" button inside the About modal — separate from
+// the automatic banner (checkForUpdate(), polled every 30 min): this always
+// shows a result (up to date / update found / error), not just when one's
+// available, since a button that silently does nothing looks broken.
+async function checkForUpdateFromAbout() {
+  const status = document.getElementById('about-update-status');
+  const btn = document.getElementById('about-check-update-btn');
+  if (!status || !btn) return;
+  btn.disabled = true;
+  status.textContent = 'Checking…';
+  try {
+    const r = await fetch(`${API}/api/update/check`);
+    const d = await r.json();
+    if (d.error) {
+      status.textContent = d.error;
+    } else if (d.update_available) {
+      status.innerHTML = `${d.commits_behind} commit${d.commits_behind === 1 ? '' : 's'} behind — ` +
+        `<a href="#" id="about-update-now" style="color:var(--accent2)">update now</a>`;
+      document.getElementById('about-update-now').onclick = (e) => { e.preventDefault(); applyUpdate(); };
+    } else {
+      status.textContent = "You're up to date.";
+    }
+  } catch (err) {
+    status.textContent = 'Could not check: ' + err.message;
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 async function loadModels() {
@@ -1738,6 +1861,9 @@ function newConversation() {
   renderMessages();
   document.getElementById('empty-state').style.display = 'flex';
   setStreamingUI(false); // brand new conversation, can't already be streaming
+  setChatStatus(id, false);
+  document.getElementById('turn-token-count').textContent = '';
+  updateQueueIndicator(id);
   closeCodeEditor();
 }
 
@@ -1753,13 +1879,18 @@ function loadConversation(id) {
   // switched away to look at (or start) something else.
   const stream = activeStreams.get(id);
   setStreamingUI(!!stream);
-  if (stream) document.getElementById('token-count').textContent = stream.tokenCount ? `${stream.tokenCount} tokens` : 'Streaming...';
+  setChatStatus(id, !!stream);
+  document.getElementById('turn-token-count').textContent = stream ? `${stream.tokenCount} tokens Used On Question` : '';
+  updateQueueIndicator(id);
   closeCodeEditor();
 }
 
 function deleteConversation(id) {
   const conv = conversations.find(c => c.id === id);
   if (conv && !confirm(`Delete "${conv.title}"? This can't be undone.`)) return;
+  const stream = activeStreams.get(id);
+  if (stream && stream.abortController) stream.abortController.abort();
+  turnQueues.delete(id);
   conversations = conversations.filter(c => c.id !== id);
   if (currentConvId === id) { currentConvId = null; renderMessages(); }
   saveConvs();
@@ -1899,7 +2030,7 @@ function renderMessages() {
     container.appendChild(empty);
     return;
   }
-  container.innerHTML = conv.messages.map(renderMsg).join('');
+  container.innerHTML = renderMessageGroups(conv.messages);
   addCopyButtons();
   container.querySelectorAll('pre code').forEach(el => hljs.highlightElement(el));
   // If this conversation is still streaming in the background, restore its
@@ -1907,7 +2038,7 @@ function renderMessages() {
   // switching away and back rebuilds this whole container from conv.messages,
   // which doesn't include the not-yet-committed partial assistant reply.
   const stream = activeStreams.get(conv.id);
-  if (stream) insertThinkingBubble(stream.fullText);
+  if (stream) insertThinkingBubble(stream.fullText, renderPendingToolRows(conv));
   container.scrollTop = container.scrollHeight;
 }
 
@@ -1968,27 +2099,72 @@ async function handleSudoRequired(data) {
   } catch {}
 }
 
+// A single tool invocation, rendered Claude-style: one collapsed, inline
+// row (icon/name/args preview on one line, monospace, low-key) that expands
+// on click to show the full arguments and result — nested inside the
+// agent-turn bubble (see renderMessageGroups and runNextTurn's live-streaming
+// path) rather than as its own top-level message box. `id`, when given, lets
+// the live-streaming path find this exact row again to fill in the result
+// once it arrives (see the tool_result handler in runNextTurn).
+function renderToolRow(callMsg, resultMsg, id) {
+  const argsPreview = JSON.stringify(callMsg.arguments || {});
+  const shortPreview = argsPreview.length > 60 ? argsPreview.slice(0, 60) + '…' : argsPreview;
+  const idAttr = id ? ` id="${id}"` : '';
+  return `
+    <details class="tool-row"${idAttr}>
+      <summary>
+        <span class="tool-row-name">${escHtml(callMsg.name)}</span>
+        <span class="tool-row-preview">${escHtml(shortPreview)}</span>
+        <span class="tool-row-status">${resultMsg ? '' : 'running…'}</span>
+      </summary>
+      <div class="tool-row-body">
+        <div class="tool-row-label">Arguments</div>
+        <code>${escHtml(argsPreview)}</code>
+        ${resultMsg ? `<div class="tool-row-label">Result</div><pre><code>${escHtml((resultMsg.result || '').slice(0, 500))}</code></pre>` : ''}
+      </div>
+    </details>`;
+}
+
+// Groups each agent turn's tool_call/tool_result entries together with the
+// narration that follows into one bubble (tool rows first, narration text
+// always last/bottom) instead of a separate message row per tool call — a
+// saved conversation should read the same way it looked while it happened.
+// tool_call is always immediately followed by its own tool_result (see
+// _agent_turns in the backend), so they're paired up here into one row.
+function renderMessageGroups(messages) {
+  const html = [];
+  let i = 0;
+  while (i < messages.length) {
+    const role = messages[i].role;
+    if (role === 'tool_call' || role === 'tool_result' || role === 'assistant') {
+      let toolsHtml = '', assistantMsg = null, assistantIdx = -1;
+      while (i < messages.length && ['tool_call', 'tool_result', 'assistant'].includes(messages[i].role)) {
+        if (messages[i].role === 'assistant') {
+          assistantMsg = messages[i]; assistantIdx = i; i++;
+        } else if (messages[i].role === 'tool_call') {
+          const resultMsg = messages[i + 1] && messages[i + 1].role === 'tool_result' ? messages[i + 1] : null;
+          toolsHtml += renderToolRow(messages[i], resultMsg);
+          i += resultMsg ? 2 : 1;
+        } else {
+          i++; // stray tool_result with no preceding call — shouldn't happen, skip it
+        }
+      }
+      const idxAttr = assistantIdx >= 0 ? ` data-msg-idx="${assistantIdx}"` : '';
+      html.push(`
+        <div class="message">
+          <div class="avatar ai-av">🤖</div>
+          <div class="bubble"${idxAttr}>${toolsHtml}<div class="agent-turn-text">${assistantMsg ? renderMarkdown(assistantMsg.content) : ''}</div></div>
+        </div>
+      `);
+    } else {
+      html.push(renderMsg(messages[i], i));
+      i++;
+    }
+  }
+  return html.join('');
+}
+
 function renderMsg(msg, idx) {
-  if (msg.role === 'tool_call') {
-    return `
-    <div class="message">
-      <div class="avatar ai-av">🔧</div>
-      <div class="bubble" style="font-size:13px">
-        <strong>Using tool:</strong> ${escHtml(msg.name)}<br>
-        <code style="font-size:11px;background:rgba(255,255,255,.1);padding:2px 6px;border-radius:4px">${escHtml(JSON.stringify(msg.arguments))}</code>
-      </div>
-    </div>`;
-  }
-  if (msg.role === 'tool_result') {
-    return `
-    <div class="message">
-      <div class="avatar ai-av">📋</div>
-      <div class="bubble" style="font-size:12px;background:rgba(210,153,34,.1);border-color:rgba(210,153,34,.3)">
-        <strong>Result of ${escHtml(msg.name)}:</strong>
-        <pre style="margin:4px 0 0;font-size:11px;white-space:pre-wrap">${escHtml((msg.result || '').slice(0, 500))}</pre>
-      </div>
-    </div>`;
-  }
   const isUser = msg.role === 'user';
   // Older saved messages have no displayText/attachments — fall back to the raw content.
   const displayText = isUser && msg.displayText !== undefined ? msg.displayText : msg.content;
@@ -2018,8 +2194,15 @@ function addCopyButtons() {
   document.querySelectorAll('.bubble pre').forEach(pre => {
     if (pre.querySelector('.pre-actions')) return;
     const bubble = pre.closest('.bubble');
-    const msgIdx = bubble?.dataset.msgIdx;
-    const blockIdx = bubble ? Array.from(bubble.querySelectorAll('pre')).indexOf(pre) : -1;
+    // Edit only makes sense for fences inside the assistant's own narration
+    // (.agent-turn-text, which is exactly conv.messages[msgIdx].content) — a
+    // tool-row's result <pre> lives in the same bubble now but came from a
+    // completely different string, so counting it here would throw off which
+    // fence replaceNthCodeBlock() finds and rewrites for a narration edit.
+    const textEl = bubble?.querySelector('.agent-turn-text');
+    const inNarration = !textEl || textEl.contains(pre);
+    const msgIdx = inNarration ? bubble?.dataset.msgIdx : undefined;
+    const blockIdx = inNarration ? Array.from((textEl || bubble).querySelectorAll('pre')).indexOf(pre) : -1;
 
     const actions = document.createElement('div');
     actions.className = 'pre-actions';
@@ -2061,7 +2244,37 @@ function stopStreaming() {
   if (stream && stream.abortController) stream.abortController.abort();
 }
 
-async function sendMessage() {
+// convId -> queue of not-yet-sent user turns (plain message-content strings).
+// A turn is pushed here (and shown in the transcript) the moment it's typed,
+// but only merged into the agent's own history in runNextTurn() right before
+// it's actually sent — agentHistory gets wholesale-replaced with the
+// server's copy when an in-flight turn finishes, which would silently drop
+// anything merged in earlier while that turn was still streaming.
+let turnQueues = new Map();
+
+function updateQueueIndicator(convId) {
+  if (currentConvId !== convId) return;
+  const el = document.getElementById('queue-indicator');
+  if (!el) return;
+  const n = (turnQueues.get(convId) || []).length;
+  el.textContent = n ? `· ${n} queued` : '';
+}
+
+// Single source of truth for the small status label next to the chat input —
+// "Ready" (yellow) when idle, "Thinking…" (red) while a turn is streaming.
+// Previously this element only ever got overwritten with a live token count
+// while streaming and nothing ever set it back afterward, so it stayed stuck
+// showing a stale count forever with no visible "idle/done" state at all.
+function setChatStatus(convId, thinking) {
+  if (currentConvId !== convId) return;
+  const el = document.getElementById('token-count');
+  if (!el) return;
+  el.textContent = thinking ? 'Thinking…' : 'Ready';
+  el.classList.toggle('token-count-thinking', thinking);
+  el.classList.toggle('token-count-ready', !thinking);
+}
+
+function sendMessage() {
   const input = document.getElementById('chat-input');
   const text = input.value.trim();
   if (!currentConvId) newConversation();
@@ -2069,13 +2282,12 @@ async function sendMessage() {
   // even if the user switches to (or starts) a different chat while this one
   // is still streaming. Never rely on the (mutable) currentConvId global below.
   const convId = currentConvId;
-  if (!text || activeStreams.has(convId)) return;
+  if (!text) return;
 
   const model = document.getElementById('model-select').value;
   if (!model) { alert('Please select a model first'); return; }
 
   const conv = conversations.find(c => c.id === convId);
-  const viewingThis = () => currentConvId === convId;
 
   let messageContent = text;
   let attachmentsMeta = [];
@@ -2093,7 +2305,7 @@ async function sendMessage() {
     messageContent = `${fileContext}\n\n${text}`;
     attachmentsMeta = pendingFiles.map(f => ({ filename: f.filename, type: f.type, size: f.size }));
     pendingFiles = [];
-    if (viewingThis()) {
+    if (currentConvId === convId) {
       document.getElementById('file-attachments').innerHTML = '';
       document.getElementById('file-attachments').style.display = 'none';
     }
@@ -2102,17 +2314,40 @@ async function sendMessage() {
   // displayText/attachments drive the chat-bubble preview; content (with the
   // full file text inlined) is what actually gets sent to the model.
   conv.messages.push({ role: 'user', content: messageContent, displayText: text, attachments: attachmentsMeta });
-  ensureAgentHistory(conv).push({ role: 'user', content: messageContent });
   if (conv.title === 'New Chat') conv.title = text.slice(0, 40);
   saveConvs();
   renderConvList();
 
-  if (viewingThis()) {
+  if (currentConvId === convId) {
     input.value = '';
     input.style.height = 'auto';
     document.getElementById('empty-state')?.remove();
     renderMessages();
   }
+
+  if (!turnQueues.has(convId)) turnQueues.set(convId, []);
+  turnQueues.get(convId).push(messageContent);
+  updateQueueIndicator(convId);
+
+  runNextTurn(convId);
+}
+
+async function runNextTurn(convId) {
+  // Something's already streaming for this conversation — it drains the
+  // queue itself (see the bottom of this function) once it finishes.
+  if (activeStreams.has(convId)) return;
+  const queue = turnQueues.get(convId);
+  if (!queue || !queue.length) return;
+  const conv = conversations.find(c => c.id === convId);
+  if (!conv) { turnQueues.delete(convId); return; } // conversation was deleted while this turn waited
+
+  const messageContent = queue.shift();
+  updateQueueIndicator(convId);
+
+  const viewingThis = () => currentConvId === convId;
+  const model = document.getElementById('model-select').value;
+
+  ensureAgentHistory(conv).push({ role: 'user', content: messageContent });
 
   const streamState = { abortController: new AbortController(), fullText: '', tokenCount: 0 };
   activeStreams.set(convId, streamState);
@@ -2129,18 +2364,30 @@ async function sendMessage() {
     const think = document.getElementById('thinking-msg');
     return think ? think.querySelector('.bubble') : null;
   }
+  // The narration part specifically — always the last child of the bubble
+  // (tool rows get inserted before it, never after), so whatever's being
+  // typed stays visually pinned to the bottom of the reply the whole turn.
+  function textElIfViewing() {
+    if (!viewingThis()) return null;
+    const think = document.getElementById('thinking-msg');
+    return think ? think.querySelector('.agent-turn-text') : null;
+  }
 
   if (viewingThis()) {
     setStreamingUI(true);
+    setChatStatus(convId, true);
     insertThinkingBubble(streamState.fullText);
   }
 
+  let pendingToolRowId = null; // set on tool_call, consumed by the tool_result that (per the backend) always immediately follows it
+  let receivedTerminalEvent = false; // set by 'done'/'error' — tells the empty-fullText case apart from a stream that just died mid-turn
+  let wasAborted = false; // user clicked Stop
   let renderPending = false;
   function flushRender() {
     renderPending = false;
-    const bubbleEl = bubbleIfViewing();
-    if (!bubbleEl) return;
-    bubbleEl.innerHTML = streamState.fullText ? renderMarkdown(streamState.fullText) : '<div class="thinking"><span></span><span></span><span></span></div>';
+    const textEl = textElIfViewing();
+    if (!textEl) return;
+    textEl.innerHTML = streamState.fullText ? renderMarkdown(streamState.fullText) : '<div class="thinking"><span></span><span></span><span></span></div>';
     addCopyButtons();
     const container = document.getElementById('chat-messages');
     container.scrollTop = container.scrollHeight;
@@ -2170,7 +2417,7 @@ async function sendMessage() {
     const res = await fetch(`${API}/api/agent`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, message: text, conversation: cleanMessages, system }),
+      body: JSON.stringify({ model, message: messageContent, conversation: cleanMessages, system }),
       signal: streamState.abortController.signal
     });
 
@@ -2186,40 +2433,53 @@ async function sendMessage() {
           if (data.type === 'token') {
             streamState.fullText += data.content;
             streamState.tokenCount++;
-            if (viewingThis()) document.getElementById('token-count').textContent = `${streamState.tokenCount} tokens`;
+            if (viewingThis()) document.getElementById('turn-token-count').textContent = `${streamState.tokenCount} tokens Used On Question`;
             scheduleRender();
           } else if (data.type === 'tool_call') {
-            // That turn's whole "response" was just the tool-call fence, not
-            // real narration for the user — don't leave it flashed in the bubble.
+            // That turn's whole "response so far" was just the tool-call fence,
+            // not real narration for the user — don't leave it flashed in the
+            // bubble; show it waiting on the tool instead. The row goes in
+            // *before* the narration element (never after), so whatever gets
+            // typed next stays pinned to the bottom of the bubble.
             streamState.fullText = '';
             conv.messages.push({ role: 'tool_call', name: data.name, arguments: data.arguments });
             if (viewingThis()) {
-              flushRender();
-              const container = document.getElementById('chat-messages');
-              container.insertAdjacentHTML('beforeend', renderMsg({ role: 'tool_call', name: data.name, arguments: data.arguments }));
-              container.scrollTop = container.scrollHeight;
+              const textEl = textElIfViewing();
+              if (textEl) {
+                pendingToolRowId = 'tool-row-' + Math.random().toString(36).slice(2);
+                textEl.insertAdjacentHTML('beforebegin', renderToolRow({ name: data.name, arguments: data.arguments }, null, pendingToolRowId));
+                textEl.innerHTML = '<div class="thinking"><span></span><span></span><span></span></div>';
+              }
+              document.getElementById('chat-messages').scrollTop = document.getElementById('chat-messages').scrollHeight;
             }
           } else if (data.type === 'tool_result') {
             conv.messages.push({ role: 'tool_result', name: data.name, result: data.result });
             if (viewingThis()) {
-              const container = document.getElementById('chat-messages');
-              container.insertAdjacentHTML('beforeend', renderMsg({ role: 'tool_result', name: data.name, result: data.result }));
-              container.scrollTop = container.scrollHeight;
+              // Patches the same collapsed row tool_call just inserted, rather
+              // than adding a separate box — always immediately follows it (see
+              // _agent_turns in the backend), so pendingToolRowId still points at it.
+              const row = pendingToolRowId ? document.getElementById(pendingToolRowId) : null;
+              if (row) {
+                const status = row.querySelector('.tool-row-status');
+                if (status) status.textContent = '';
+                row.querySelector('.tool-row-body')?.insertAdjacentHTML('beforeend',
+                  `<div class="tool-row-label">Result</div><pre><code>${escHtml((data.result || '').slice(0, 500))}</code></pre>`);
+              }
+              pendingToolRowId = null;
+              document.getElementById('chat-messages').scrollTop = document.getElementById('chat-messages').scrollHeight;
             }
           } else if (data.type === 'sudo_required') {
             if (viewingThis()) {
-              const container = document.getElementById('chat-messages');
-              container.insertAdjacentHTML('beforeend', `
-                <div class="message">
-                  <div class="avatar ai-av">🔒</div>
-                  <div class="bubble" style="font-size:13px">Waiting for your sudo password to run:<br>
-                    <code style="font-size:11px;background:rgba(255,255,255,.1);padding:2px 6px;border-radius:4px">${escHtml(data.command)}</code>
-                  </div>
+              const textEl = textElIfViewing();
+              if (textEl) textEl.insertAdjacentHTML('beforebegin', `
+                <div class="tool-row" style="padding:6px 10px;display:flex;align-items:center;gap:6px;font-family:'JetBrains Mono','Fira Code',monospace;color:var(--muted)">
+                  🔒 Waiting for your sudo password to run: <code>${escHtml(data.command)}</code>
                 </div>`);
-              container.scrollTop = container.scrollHeight;
+              document.getElementById('chat-messages').scrollTop = document.getElementById('chat-messages').scrollHeight;
             }
             handleSudoRequired(data);
           } else if (data.type === 'done') {
+            receivedTerminalEvent = true;
             streamState.fullText = data.content;
             if (data.conversation) conv.agentHistory = data.conversation;
             // Ollama's final chunk carries real token counts — prompt_eval_count
@@ -2235,17 +2495,21 @@ async function sendMessage() {
               if (viewingThis()) updateTokenUsageDisplay(totalTokens, model);
             }
           } else if (data.type === 'error') {
-            const bubbleEl = bubbleIfViewing();
-            if (bubbleEl) bubbleEl.innerHTML = 'Error: ' + escHtml(data.content);
+            receivedTerminalEvent = true;
+            const textEl = textElIfViewing();
+            if (textEl) textEl.innerHTML = 'Error: ' + escHtml(data.content);
             if (data.conversation) conv.agentHistory = data.conversation;
           }
         } catch {}
       }
     }
   } catch (err) {
-    if (err.name !== 'AbortError') {
-      const bubbleEl = bubbleIfViewing();
-      if (bubbleEl) bubbleEl.textContent = 'Error: ' + err.message;
+    if (err.name === 'AbortError') {
+      wasAborted = true;
+    } else {
+      receivedTerminalEvent = true; // a definite (if unhappy) end state, not a silent dropped connection
+      const textEl = textElIfViewing();
+      if (textEl) textEl.textContent = 'Error: ' + err.message;
     }
   }
 
@@ -2253,16 +2517,35 @@ async function sendMessage() {
   if (streamState.fullText) {
     conv.messages.push({ role: 'assistant', content: streamState.fullText });
     const bubbleEl = bubbleIfViewing();
-    if (bubbleEl) {
+    const textEl = textElIfViewing();
+    if (bubbleEl && textEl) {
       // Set before addCopyButtons() so the Edit button can resolve this message
       // index right away, without needing a full renderMessages() re-render.
       bubbleEl.dataset.msgIdx = conv.messages.length - 1;
-      bubbleEl.innerHTML = renderMarkdown(streamState.fullText);
+      textEl.innerHTML = renderMarkdown(streamState.fullText);
       addCopyButtons();
       bubbleEl.querySelectorAll('pre code').forEach(el => hljs.highlightElement(el));
       document.getElementById('chat-messages').scrollTop = document.getElementById('chat-messages').scrollHeight;
     }
     saveConvs();
+  } else {
+    const textEl = textElIfViewing();
+    if (textEl) {
+      if (wasAborted) {
+        textEl.textContent = 'Stopped.';
+      } else if (receivedTerminalEvent) {
+        // The turn ended right after a tool call with no further narration —
+        // drop the now-stale "thinking" dots instead of leaving them bouncing
+        // forever with nothing left to ever replace them.
+        textEl.remove();
+      } else {
+        // The stream ended without ever reaching a 'done'/'error' event — a
+        // dropped connection or backend crash mid-turn, not a normal finish.
+        // Leaving the dots bouncing here would look identical to "still
+        // working" forever, which is exactly the confusing state to avoid.
+        textEl.innerHTML = 'Error: the connection ended before a response was received. Check that the backend is still running, then try again.';
+      }
+    }
   }
 
   activeStreams.delete(convId);
@@ -2271,31 +2554,54 @@ async function sendMessage() {
     const think = document.getElementById('thinking-msg');
     if (think) think.id = '';
     setStreamingUI(false);
+    setChatStatus(convId, false);
   }
+
+  runNextTurn(convId); // pick up whatever was typed/queued while this turn was in flight
 }
 
-// Shows/hides the send/stop buttons and activity bar for whichever
-// conversation is currently on screen — called both from sendMessage() (for
-// the chat that's actually running) and from loadConversation() (so
-// switching into a chat that's streaming in the background immediately
-// reflects that, and switching into an idle one immediately looks idle).
+// Shows/hides the stop button and activity bar for whichever conversation is
+// currently on screen — called both from runNextTurn() (for the chat that's
+// actually running) and from loadConversation() (so switching into a chat
+// that's streaming in the background immediately reflects that, and
+// switching into an idle one immediately looks idle). Send stays visible
+// throughout so another message can always be typed and queued.
 function setStreamingUI(streaming) {
-  document.getElementById('send-btn').style.display = streaming ? 'none' : '';
   document.getElementById('stop-btn').style.display = streaming ? '' : 'none';
   document.getElementById('chat-activity-bar').classList.toggle('active', streaming);
 }
 
-function insertThinkingBubble(existingText) {
+function insertThinkingBubble(existingText, toolsHtml) {
   const container = document.getElementById('chat-messages');
   const thinkDiv = document.createElement('div');
   thinkDiv.className = 'message';
   thinkDiv.id = 'thinking-msg';
   thinkDiv.innerHTML = `
     <div class="avatar ai-av">🤖</div>
-    <div class="bubble">${existingText ? renderMarkdown(existingText) : '<div class="thinking"><span></span><span></span><span></span></div>'}</div>
+    <div class="bubble">${toolsHtml || ''}<div class="agent-turn-text">${existingText ? renderMarkdown(existingText) : '<div class="thinking"><span></span><span></span><span></span></div>'}</div></div>
   `;
   container.appendChild(thinkDiv);
   container.scrollTop = container.scrollHeight;
+}
+
+// Tool rows already pushed to conv.messages for the turn currently in
+// flight (the assistant narration itself isn't pushed until the turn
+// finishes) — rebuilt the same paired way renderMessageGroups does, so
+// reattaching the streaming bubble after navigating away and back mid-turn
+// still shows whatever tool calls already ran.
+function renderPendingToolRows(conv) {
+  const msgs = conv.messages;
+  let start = msgs.length;
+  while (start > 0 && (msgs[start - 1].role === 'tool_call' || msgs[start - 1].role === 'tool_result')) start--;
+  const trailing = msgs.slice(start);
+  let html = '';
+  for (let i = 0; i < trailing.length; i++) {
+    if (trailing[i].role !== 'tool_call') continue;
+    const resultMsg = trailing[i + 1] && trailing[i + 1].role === 'tool_result' ? trailing[i + 1] : null;
+    html += renderToolRow(trailing[i], resultMsg);
+    if (resultMsg) i++;
+  }
+  return html;
 }
 
 // ── App Analyzer ───────────────────────────────────────────────────────────────
@@ -2313,6 +2619,10 @@ async function analyzeApp() {
   const btn = document.getElementById('analyze-btn');
   btn.disabled = true; btn.textContent = 'Analyzing...';
 
+  const cloneMode = document.getElementById('an-clone').checked;
+  lastAnalyzerAppName = name;
+  lastAnalyzerFeatures = [];
+
   let text = '';
 
   try {
@@ -2326,6 +2636,7 @@ async function analyzeApp() {
         description: document.getElementById('an-desc').value,
         reviews: document.getElementById('an-reviews').value,
         price_target: document.getElementById('an-price').value,
+        clone_mode: cloneMode,
       })
     });
 
@@ -2360,11 +2671,30 @@ async function analyzeApp() {
     // Final render with highlighting
     output.innerHTML = renderMarkdown(text);
     output.querySelectorAll('pre code').forEach(el => hljs.highlightElement(el));
+
+    const featuresMatch = text.match(/```features\s*\n([\s\S]*?)```/);
+    if (featuresMatch) {
+      lastAnalyzerFeatures = featuresMatch[1].split('\n').map(l => l.replace(/^[-*\d.\s]+/, '').trim()).filter(Boolean);
+      if (lastAnalyzerFeatures.length) {
+        const bar = document.createElement('div');
+        bar.style.cssText = 'padding:12px 20px;border-top:1px solid var(--border)';
+        bar.innerHTML = `<button class="btn btn-primary btn-full btn-sm" onclick="sendFeaturesToGenerator()">⚡ Send ${lastAnalyzerFeatures.length} features to Generator</button>`;
+        output.appendChild(bar);
+      }
+    }
   } catch (err) {
     output.innerHTML = `<p style="color:var(--danger)">Error: ${err.message}</p>`;
   }
 
   btn.disabled = false; btn.textContent = 'Analyze & Plan';
+}
+
+function sendFeaturesToGenerator() {
+  if (!lastAnalyzerFeatures.length) return;
+  document.getElementById('gen-name').value = lastAnalyzerAppName;
+  features = [...lastAnalyzerFeatures];
+  renderFeatureTags();
+  switchTab('generate');
 }
 
 // ── Project Generator ──────────────────────────────────────────────────────────
@@ -2531,9 +2861,9 @@ function renderModelsTab() {
     return `
       <div class="model-card" id="card-${id}">
         <div class="model-info">
-          <div class="model-name">${m.name} ${providerBadge}</div>
-          <div class="model-desc">${m.desc}</div>
-          ${sizeLabel ? `<div class="model-size">${sizeLabel}</div>` : ''}
+          <div class="model-name">${escHtml(m.name)} ${providerBadge}</div>
+          <div class="model-desc">${escHtml(m.desc)}</div>
+          ${sizeLabel ? `<div class="model-size">${escHtml(sizeLabel)}</div>` : ''}
           <div class="pull-progress" id="progress-${id}"></div>
         </div>
         <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">
@@ -2634,8 +2964,8 @@ async function searchOnlineModels() {
       return `
         <div class="model-card" id="card-${id}">
           <div class="model-info">
-            <div class="model-name">${m.name} ${providerBadge}</div>
-            <div class="model-desc">${m.desc}${m.size_label ? ' · ' + m.size_label : ''}</div>
+            <div class="model-name">${escHtml(m.name)} ${providerBadge}</div>
+            <div class="model-desc">${escHtml(m.desc)}${m.size_label ? ' · ' + escHtml(m.size_label) : ''}</div>
             <div class="pull-progress" id="progress-${id}"></div>
           </div>
           <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">
@@ -2662,23 +2992,34 @@ async function pullModel(modelName, progressEl, provider = 'ollama') {
     });
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
+    // Ollama's /api/pull emits {"error": "..."} (no "status" key) on a bad
+    // model name or a failure mid-stream; the LM Studio path emits a final
+    // {"status": "error"} — neither used to be checked, so a failed pull
+    // still fell through to the unconditional "✓ Download complete" below.
+    let errorMsg = '';
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
       for (const line of decoder.decode(value).split('\n').filter(Boolean)) {
         try {
           const d = JSON.parse(line);
+          if (d.error) errorMsg = d.error;
+          if (d.status === 'error') errorMsg = errorMsg || 'Download failed.';
           const st = document.getElementById(`pstatus-${id}`);
           const pb = document.getElementById(`pb-${id}`);
-          if (st) st.textContent = d.status || '';
+          if (st) st.textContent = d.status || d.error || '';
           if (pb && d.total && d.completed) pb.value = Math.round((d.completed / d.total) * 100);
         } catch {}
       }
     }
-    progressEl.innerHTML = '<span style="color:var(--accent)">✓ Download complete</span>';
+    if (errorMsg) {
+      progressEl.innerHTML = `<span style="color:var(--danger)">Error: ${escHtml(errorMsg)}</span>`;
+    } else {
+      progressEl.innerHTML = '<span style="color:var(--accent)">✓ Download complete</span>';
+    }
     await loadModels();
   } catch (err) {
-    progressEl.innerHTML = `<span style="color:var(--danger)">Error: ${err.message}</span>`;
+    progressEl.innerHTML = `<span style="color:var(--danger)">Error: ${escHtml(err.message)}</span>`;
   }
 }
 
@@ -2694,7 +3035,13 @@ function useModel(name) {
 
 async function deleteModel(name) {
   if (!confirm(`Remove model "${name}"?`)) return;
-  await fetch(`${API}/api/models/${encodeURIComponent(name)}`, { method: 'DELETE' });
+  try {
+    const r = await fetch(`${API}/api/models/${encodeURIComponent(name)}`, { method: 'DELETE' });
+    const d = await r.json();
+    if (!d.success) alert(`Could not remove "${name}" — it may be busy or already gone.`);
+  } catch (err) {
+    alert(`Could not remove "${name}": ${err.message}`);
+  }
   await loadModels();
 }
 
@@ -2837,7 +3184,7 @@ async function runCode() {
   btn.disabled = true;
   btn.textContent = 'Running...';
   output.innerHTML = '';
-  status.textContent = '';
+  status.textContent = 'Running…';
 
   try {
     const res = await fetch(`${API}/api/execute`, {
@@ -2848,7 +3195,8 @@ async function runCode() {
 
     if (!res.ok) {
       const err = await res.json();
-      output.innerHTML = `<span class="stderr">Error: ${err.detail || 'Request failed'}</span>`;
+      output.innerHTML = `<span class="stderr">Error: ${escHtml(err.detail || 'Request failed')}</span>`;
+      status.textContent = 'Failed to start.';
       return;
     }
 
@@ -2867,15 +3215,18 @@ async function runCode() {
             output.innerHTML += `<span class="stderr">${escHtml(data.text)}</span>`;
           } else if (data.type === 'exit') {
             output.innerHTML += `<div class="exit">⏹ Process exited with code ${data.code}</div>`;
+            status.textContent = data.code === 0 ? '✓ Finished' : `✗ Exited with code ${data.code}`;
           } else if (data.type === 'error') {
             output.innerHTML += `<span class="stderr">${escHtml(data.text)}</span>`;
+            status.textContent = '✗ Error';
           }
         } catch {}
       }
       output.scrollTop = output.scrollHeight;
     }
   } catch (err) {
-    output.innerHTML = `<span class="stderr">Connection error: ${err.message}</span>`;
+    output.innerHTML = `<span class="stderr">Connection error: ${escHtml(err.message)}</span>`;
+    status.textContent = '✗ Connection error';
   }
 
   btn.disabled = false;
@@ -3063,8 +3414,14 @@ async function doSearch() {
     `).join('');
   } catch (err) {
     output.innerHTML = `<span class="stderr">Error: ${err.message}</span>`;
+  } finally {
+    // Was a plain trailing statement — the early `return`s above (no
+    // results / data.error) skipped right past it, leaving the button
+    // stuck saying "Searching..." forever, disabled, so no further click
+    // ever sent another request. `finally` runs no matter which path
+    // above was taken.
+    btn.disabled = false; btn.textContent = 'Search';
   }
-  btn.disabled = false; btn.textContent = 'Search';
 }
 
 // ── Semantic File Search ──────────────────────────────────────────────────────
@@ -3136,8 +3493,12 @@ async function doSemanticSearch() {
     `).join('');
   } catch (err) {
     output.innerHTML = `<span class="stderr">Error: ${err.message}</span>`;
+  } finally {
+    // See the note in doSearch() above — the early `return`s for data.note/
+    // no-results used to skip right past this reset, leaving the button
+    // stuck disabled on "Searching..." forever.
+    btn.disabled = false; btn.textContent = 'Search';
   }
-  btn.disabled = false; btn.textContent = 'Search';
 }
 
 // ── Image Generation ──────────────────────────────────────────────────────────
@@ -3157,7 +3518,7 @@ async function doImageGen() {
     });
     if (!res.ok) {
       const err = await res.json();
-      output.innerHTML = `<span class="stderr">Error: ${err.detail || JSON.stringify(err)}</span>`;
+      output.innerHTML = `<span class="stderr">Error: ${escHtml(err.detail || JSON.stringify(err))}</span>`;
       return;
     }
     let response = '';
@@ -3169,7 +3530,7 @@ async function doImageGen() {
       for (const line of decoder.decode(value).split('\n').filter(Boolean)) {
         try {
           const data = JSON.parse(line);
-          if (data.error) { output.innerHTML = `<span class="stderr">Error: ${data.error}</span>`; return; }
+          if (data.error) { output.innerHTML = `<span class="stderr">Error: ${escHtml(data.error)}</span>`; return; }
           if (data.response) response += data.response;
         } catch {}
       }
@@ -3177,8 +3538,13 @@ async function doImageGen() {
     output.innerHTML = `<div style="white-space:pre-wrap;font-size:13px;line-height:1.6">${escHtml(response)}</div>`;
   } catch (err) {
     output.innerHTML = `<span class="stderr">Error: ${err.message}</span>`;
+  } finally {
+    // The !res.ok / data.error early returns above (e.g. "No vision model
+    // found") used to skip right past this, leaving the button stuck
+    // disabled on "Generating..." forever even though the real error was
+    // already shown in the output area.
+    btn.disabled = false; btn.textContent = 'Generate';
   }
-  btn.disabled = false; btn.textContent = 'Generate';
 }
 
 // ── File Browser ──────────────────────────────────────────────────────────────
@@ -3316,11 +3682,24 @@ async function runAgent() {
 
   let fullText = '';
   const thinkingId = 'agent-thinking-' + Date.now();
+  // Tool rows go inside .agent-turn-text's own bubble (before it, never
+  // after) — same structure the Chat tab uses — so a tool-using turn still
+  // reads as one continuous block, with the running/typed narration always
+  // last (at the bottom) instead of ending up pinned above the tool rows it
+  // was actually based on.
   conv.innerHTML += `
     <div class="message" style="max-width:900px;width:100%;display:flex;gap:12px;animation:fadeIn .2s ease" id="${thinkingId}">
       <div class="avatar ai-av" style="width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0;border:1px solid var(--border);background:var(--surface)">🤖</div>
-      <div class="bubble" style="max-width:calc(100% - 50px)"><div class="thinking"><span></span><span></span><span></span></div></div>
+      <div class="bubble" style="max-width:calc(100% - 50px)"><div class="agent-turn-text"><div class="thinking"><span></span><span></span><span></span></div></div></div>
     </div>`;
+
+  function agentTextEl() {
+    return document.getElementById(thinkingId)?.querySelector('.agent-turn-text') || null;
+  }
+
+  let pendingToolRowId = null;
+  let receivedTerminalEvent = false;
+  let wasAborted = false;
 
   try {
     const res = await fetch(`${API}/api/agent`, {
@@ -3332,7 +3711,6 @@ async function runAgent() {
 
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
-    let toolResults = [];
 
     while (true) {
       const { done, value } = await reader.read();
@@ -3342,45 +3720,47 @@ async function runAgent() {
           const data = JSON.parse(line);
           if (data.type === 'token') {
             fullText += data.content;
-            document.getElementById(thinkingId).querySelector('.bubble').innerHTML = renderMarkdown(fullText);
+            const textEl = agentTextEl();
+            if (textEl) textEl.innerHTML = renderMarkdown(fullText);
             conv.scrollTop = conv.scrollHeight;
           } else if (data.type === 'tool_call') {
-            conv.innerHTML += `
-              <div class="message" style="max-width:900px;width:100%;display:flex;gap:12px;animation:fadeIn .2s ease">
-                <div class="avatar ai-av" style="width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0;border:1px solid var(--border);background:var(--surface)">🔧</div>
-                <div class="bubble" style="max-width:calc(100% - 50px);font-size:13px">
-                  <strong>Using tool:</strong> ${escHtml(data.name)}<br>
-                  <code style="font-size:11px;background:rgba(255,255,255,.1);padding:2px 6px;border-radius:4px">${escHtml(JSON.stringify(data.arguments))}</code>
-                </div>
-              </div>`;
+            fullText = ''; // that much of the response was just the tool-call fence, not real narration
+            const textEl = agentTextEl();
+            if (textEl) {
+              pendingToolRowId = 'agent-tool-row-' + Math.random().toString(36).slice(2);
+              textEl.insertAdjacentHTML('beforebegin', renderToolRow({ name: data.name, arguments: data.arguments }, null, pendingToolRowId));
+              textEl.innerHTML = '<div class="thinking"><span></span><span></span><span></span></div>';
+            }
+            conv.scrollTop = conv.scrollHeight;
           } else if (data.type === 'tool_result') {
-            conv.innerHTML += `
-              <div class="message" style="max-width:900px;width:100%;display:flex;gap:12px;animation:fadeIn .2s ease">
-                <div class="avatar ai-av" style="width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0;border:1px solid var(--border);background:var(--surface)">📋</div>
-                <div class="bubble" style="max-width:calc(100% - 50px);font-size:12px;background:rgba(210,153,34,.1);border-color:rgba(210,153,34,.3)">
-                  <strong>Result of ${escHtml(data.name)}:</strong><br>
-                  <pre style="margin:4px 0 0;font-size:11px;white-space:pre-wrap">${escHtml(data.result.slice(0,500))}</pre>
-                </div>
-              </div>`;
+            const row = pendingToolRowId ? document.getElementById(pendingToolRowId) : null;
+            if (row) {
+              const statusEl = row.querySelector('.tool-row-status');
+              if (statusEl) statusEl.textContent = '';
+              row.querySelector('.tool-row-body')?.insertAdjacentHTML('beforeend',
+                `<div class="tool-row-label">Result</div><pre><code>${escHtml((data.result || '').slice(0, 500))}</code></pre>`);
+            }
+            pendingToolRowId = null;
+            conv.scrollTop = conv.scrollHeight;
           } else if (data.type === 'sudo_required') {
-            conv.innerHTML += `
-              <div class="message" style="max-width:900px;width:100%;display:flex;gap:12px;animation:fadeIn .2s ease">
-                <div class="avatar ai-av" style="width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0;border:1px solid var(--border);background:var(--surface)">🔒</div>
-                <div class="bubble" style="max-width:calc(100% - 50px);font-size:13px">
-                  Waiting for your sudo password to run:<br>
-                  <code style="font-size:11px;background:rgba(255,255,255,.1);padding:2px 6px;border-radius:4px">${escHtml(data.command)}</code>
-                </div>
-              </div>`;
+            const textEl = agentTextEl();
+            if (textEl) textEl.insertAdjacentHTML('beforebegin', `
+              <div class="tool-row" style="padding:6px 10px;display:flex;align-items:center;gap:6px;font-family:'JetBrains Mono','Fira Code',monospace;color:var(--muted)">
+                🔒 Waiting for your sudo password to run: <code>${escHtml(data.command)}</code>
+              </div>`);
             conv.scrollTop = conv.scrollHeight;
             handleSudoRequired(data);
           } else if (data.type === 'done') {
+            receivedTerminalEvent = true;
             fullText = data.content;
             // Adopt the server's authoritative conversation state — it
             // includes every tool call/result from this run, so the next
             // message actually has full context instead of starting blind.
             if (data.conversation) agentMessages = data.conversation;
           } else if (data.type === 'error') {
-            conv.innerHTML += `<div class="message" style="max-width:900px;width:100%;display:flex;gap:12px;animation:fadeIn .2s ease"><div class="bubble" style="color:var(--danger)">Error: ${escHtml(data.content)}</div></div>`;
+            receivedTerminalEvent = true;
+            const textEl = agentTextEl();
+            if (textEl) textEl.innerHTML = 'Error: ' + escHtml(data.content);
             if (data.conversation) agentMessages = data.conversation;
           }
         } catch {}
@@ -3389,15 +3769,24 @@ async function runAgent() {
     }
 
     if (fullText) {
-      const bubble = document.getElementById(thinkingId)?.querySelector('.bubble');
-      if (bubble) {
-        bubble.innerHTML = renderMarkdown(fullText);
-        bubble.querySelectorAll('pre code').forEach(el => hljs.highlightElement(el));
+      const textEl = agentTextEl();
+      if (textEl) {
+        textEl.innerHTML = renderMarkdown(fullText);
+        textEl.querySelectorAll('pre code').forEach(el => hljs.highlightElement(el));
       }
+    } else if (receivedTerminalEvent) {
+      // Turn ended right after a tool call with no further narration — drop
+      // the stale dots instead of leaving them bouncing forever.
+      agentTextEl()?.remove();
     }
   } catch (err) {
-    if (err.name !== 'AbortError') {
-      conv.innerHTML += `<div class="message" style="max-width:900px;width:100%;display:flex;gap:12px;animation:fadeIn .2s ease"><div class="bubble" style="color:var(--danger)">Error: ${escHtml(err.message)}</div></div>`;
+    if (err.name === 'AbortError') {
+      wasAborted = true;
+      const textEl = agentTextEl();
+      if (textEl && !fullText) textEl.textContent = 'Stopped.';
+    } else {
+      const textEl = agentTextEl();
+      if (textEl) textEl.textContent = 'Error: ' + err.message;
     }
   }
 
@@ -3905,6 +4294,34 @@ async function deleteEmailAccount(id) {
   await loadEmailAccounts();
 }
 
+// "Real Name <addr@example.com>" -> {name, addr} — falls back to using the
+// raw header as the name when it isn't in that form (some senders just send
+// a bare address with no display name).
+function parseEmailFrom(from) {
+  const m = (from || '').match(/^\s*"?([^"<]*?)"?\s*<([^>]+)>\s*$/);
+  if (m && m[1].trim()) return { name: m[1].trim(), addr: m[2] };
+  if (m) return { name: m[2], addr: m[2] };
+  return { name: from || '(unknown sender)', addr: from || '' };
+}
+
+// Gmail/Outlook-style relative date: just the time if today, "Mon D" within
+// the current year, otherwise "Mon D, YYYY" — instead of dumping the raw
+// RFC 822 header ("Tue, 14 Jul 2026 07:00:32 +0000 (UTC)") straight to screen.
+function formatEmailDate(raw, withTime) {
+  const d = new Date(raw);
+  if (isNaN(d)) return raw || '';
+  const now = new Date();
+  if (withTime) {
+    const datePart = d.toDateString() === now.toDateString()
+      ? 'Today' : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: d.getFullYear() === now.getFullYear() ? undefined : 'numeric' });
+    return `${datePart} at ${d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}`;
+  }
+  if (d.toDateString() === now.toDateString()) {
+    return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  }
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: d.getFullYear() === now.getFullYear() ? undefined : 'numeric' });
+}
+
 async function loadInbox() {
   const accountId = document.getElementById('email-account-select').value;
   const list = document.getElementById('email-message-list');
@@ -3919,13 +4336,18 @@ async function loadInbox() {
       list.innerHTML = '<div class="runner-placeholder">No messages found.</div>';
       return;
     }
-    list.innerHTML = currentEmailMessages.map((m, i) => `
-      <div class="conv-item" onclick="openEmailMessage(${i})" style="cursor:pointer;white-space:normal;align-items:flex-start;flex-direction:column;gap:2px;padding:8px 10px;height:auto">
-        <span style="font-weight:500;font-size:12px">${escHtml(m.from)}</span>
-        <span style="font-size:12px">${escHtml(m.subject || '(no subject)')}</span>
-        <span style="font-size:11px;color:var(--muted)">${escHtml(m.preview)}</span>
-      </div>
-    `).join('');
+    list.innerHTML = currentEmailMessages.map((m, i) => {
+      const sender = parseEmailFrom(m.from);
+      return `
+      <div class="email-row" id="email-row-${i}" onclick="openEmailMessage(${i})">
+        <div class="email-row-top">
+          <span class="email-row-sender">${escHtml(sender.name)}</span>
+          <span class="email-row-date">${escHtml(formatEmailDate(m.date))}</span>
+        </div>
+        <span class="email-row-subject">${escHtml(m.subject || '(no subject)')}</span>
+        <span class="email-row-preview">${escHtml(m.preview)}</span>
+      </div>`;
+    }).join('');
   } catch (err) {
     list.innerHTML = `<span class="stderr">Error: ${err.message}</span>`;
   }
@@ -3934,21 +4356,68 @@ async function loadInbox() {
 function openEmailMessage(i) {
   const m = currentEmailMessages[i];
   if (!m) return;
+  document.querySelectorAll('.email-row.active').forEach(el => el.classList.remove('active'));
+  document.getElementById(`email-row-${i}`)?.classList.add('active');
+
+  const sender = parseEmailFrom(m.from);
+  const initial = (sender.name || '?').trim().charAt(0).toUpperCase();
   const detail = document.getElementById('email-message-detail');
   detail.innerHTML = `
-    <div style="padding:12px 16px">
-      <div style="font-size:13px;color:var(--muted)">From: ${escHtml(m.from)}</div>
-      <div style="font-size:13px;color:var(--muted)">${escHtml(m.date)}</div>
-      <h3 style="margin:8px 0">${escHtml(m.subject || '(no subject)')}</h3>
-      <div style="white-space:pre-wrap;font-size:13px;line-height:1.6;margin-bottom:16px">${escHtml(m.body)}</div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap">
-        <button class="btn btn-accent btn-sm" onclick="draftEmailReplies(${i})">✉ Draft 3 Replies</button>
-        <button class="btn btn-secondary btn-sm" onclick="scanEmailForEvents(${i})">📅 Scan for Events</button>
+    <div class="email-detail-header">
+      <div class="email-detail-subject">${escHtml(m.subject || '(no subject)')}</div>
+      <div class="email-detail-from-row">
+        <div class="email-avatar">${escHtml(initial)}</div>
+        <div>
+          <div class="email-from-name">${escHtml(sender.name)}</div>
+          <div class="email-from-addr">${escHtml(sender.addr)}</div>
+        </div>
+        <div class="email-detail-date">${escHtml(formatEmailDate(m.date, true))}</div>
       </div>
-      <div id="email-reply-area" style="margin-top:16px"></div>
-      <div id="email-scan-status" style="margin-top:8px;font-size:12px;color:var(--muted)"></div>
     </div>
+    <div class="email-detail-body">${escHtml(m.body)}</div>
+    <div class="email-detail-actions">
+      <button class="btn btn-accent btn-sm" onclick="draftEmailReplies(${i})">✉ Draft 3 Replies</button>
+      <button class="btn btn-secondary btn-sm" onclick="scanEmailForEvents(${i})">📅 Scan for Events</button>
+      <button class="btn btn-secondary btn-sm" onclick="saveEmailMessage(${i})">💾 Save</button>
+      <button class="btn btn-secondary btn-sm" onclick="deleteEmailMessage(${i})">🗑 Delete</button>
+    </div>
+    <div id="email-reply-area" style="padding:0 24px"></div>
+    <div id="email-scan-status" style="padding:0 24px 16px;font-size:12px;color:var(--muted)"></div>
   `;
+}
+
+// Saves a plain-text copy locally — a real browser download, same pattern
+// as "Download Backup" elsewhere in the app — rather than anything on the
+// mail server (no archive-folder/IMAP-move support yet).
+function saveEmailMessage(i) {
+  const m = currentEmailMessages[i];
+  if (!m) return;
+  const content = `From: ${m.from}\nDate: ${m.date}\nSubject: ${m.subject || '(no subject)'}\n\n${m.body}`;
+  const blob = new Blob([content], { type: 'text/plain' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  const safeSubject = (m.subject || 'email').replace(/[^a-z0-9]+/gi, '_').replace(/^_+|_+$/g, '').slice(0, 60);
+  a.download = `${safeSubject || 'email'}.txt`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+async function deleteEmailMessage(i) {
+  const m = currentEmailMessages[i];
+  if (!m) return;
+  if (!confirm(`Delete "${m.subject || '(no subject)'}"? This removes it from the server and can't be undone.`)) return;
+  const accountId = document.getElementById('email-account-select').value;
+  try {
+    const r = await fetch(`${API}/api/email/${accountId}/messages/${encodeURIComponent(m.uid)}`, { method: 'DELETE' });
+    if (!r.ok) { const e = await r.json(); throw new Error(e.detail || 'Failed'); }
+    document.getElementById('email-message-detail').innerHTML = '<div class="runner-placeholder">Select a message to read it.</div>';
+    await loadInbox();
+  } catch (err) {
+    alert('Could not delete: ' + err.message);
+  }
 }
 
 async function draftEmailReplies(i) {
@@ -4035,12 +4504,17 @@ async function initCalendarTab() {
   // it. Google Calendar specifically still can't use this — see the note
   // rendered alongside it — since Google's own servers, not your browser,
   // poll a subscribed URL, and they can't reach a private LAN address at all.
+  let token = '';
+  try {
+    const tr = await fetch(`${API}/api/calendar/feed-token`);
+    token = (await tr.json()).token || '';
+  } catch {}
   try {
     const r = await fetch(`${API}/api/system/lan-ip`);
     const { ip } = await r.json();
-    calendarFeedUrl = `http://${ip}:8081/api/calendar/feed.ics`;
+    calendarFeedUrl = `http://${ip}:8081/api/calendar/feed.ics?token=${token}`;
   } catch {
-    calendarFeedUrl = `${API}/api/calendar/feed.ics`;
+    calendarFeedUrl = `${API}/api/calendar/feed.ics?token=${token}`;
   }
   document.getElementById('calendar-feed-url').textContent = calendarFeedUrl;
   await loadCalendarProviders();

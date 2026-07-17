@@ -219,6 +219,7 @@ class AnalyzeRequest(BaseModel):
     description: str
     reviews: str = ""
     price_target: str = "free with premium"
+    clone_mode: bool = False
 
 class PullRequest(BaseModel):
     model: str
@@ -426,6 +427,11 @@ async def health():
 
 REPO_DIR = Path(__file__).parent.parent
 
+# No formal release process (no GitHub Releases/tags exist for this repo —
+# see the note on /api/update/check below) — bump this by hand alongside the
+# README's own "v0.2" heading whenever a notable batch of changes lands.
+APP_VERSION = "0.2.0"
+
 
 async def _run_git(*args: str) -> tuple[int, str]:
     proc = await asyncio.create_subprocess_exec(
@@ -435,12 +441,25 @@ async def _run_git(*args: str) -> tuple[int, str]:
     out, _ = await proc.communicate()
     return proc.returncode, out.decode(errors="replace").strip()
 
+@app.get("/api/version")
+async def get_version():
+    return {"version": APP_VERSION}
+
+def _no_git_repo_message() -> str:
+    return (
+        "This install has no .git directory (e.g. a Docker build or a "
+        "downloaded ZIP), so it can't check GitHub for updates this way — "
+        "pull the latest source on the host and rebuild/reinstall instead."
+    )
+
 @app.get("/api/update/check")
 async def check_for_update():
     """No GitHub Releases exist for this repo yet (checked: no tags at all),
     so this compares against the remote branch's actual latest commit rather
     than a formal release — functionally the same "is there something newer"
     notification without requiring a release process to be set up first."""
+    if not (REPO_DIR / ".git").exists():
+        return {"update_available": False, "error": _no_git_repo_message()}
     try:
         code, _ = await _run_git("fetch", "origin", "master")
         if code != 0:
@@ -462,6 +481,8 @@ async def check_for_update():
 
 @app.post("/api/update/apply")
 async def apply_update():
+    if not (REPO_DIR / ".git").exists():
+        return {"ok": False, "error": _no_git_repo_message()}
     _, status_out = await _run_git("status", "--porcelain")
     if status_out.strip():
         return {"ok": False, "error": "You have uncommitted local changes in this repo — commit or stash them first, then try updating again. Pulling over dirty local changes risks losing or conflicting with them."}
@@ -498,6 +519,14 @@ async def web_search(req: SearchRequest):
             results.append({"title": title, "url": link, "snippet": snippet})
             if len(results) >= req.max_results:
                 break
+
+        if not results and "anomaly" in r.text.lower():
+            # DuckDuckGo's own bot-detection interstitial (confirmed live: a
+            # burst of requests gets this instead of real results, same 200
+            # status, same URL, no redirect — indistinguishable from a
+            # genuine "no results" without checking for it) — say so plainly
+            # instead of silently reporting zero results either way.
+            return {"results": [], "error": "DuckDuckGo is temporarily rate-limiting automated requests from this machine — wait a minute and try again."}
 
         return {"results": results}
     except Exception as e:
@@ -577,7 +606,8 @@ def _safe_iterdir(path: Path):
 
 NOISE_DIRS = {".git", "node_modules", "venv", ".venv", "__pycache__", "site-packages",
               ".cache", ".npm", ".mypy_cache", ".pytest_cache", ".tox", "dist", "build",
-              ".idea", ".vscode-server"}
+              ".idea", ".vscode-server", ".conda", ".rustup", ".cargo", ".gradle",
+              "flatpak", ".flatpak-builder", "libvirt"}
 
 def _safe_rglob(path: Path):
     """Recursively yields files under `path`, pruning common vendored/noise
@@ -765,14 +795,29 @@ async def build_search_index(req: IndexRequest):
     prefix = str(target.relative_to(base)) if target != base else ""
     index = [e for e in index if not (e["path"] == prefix or e["path"].startswith(prefix + "/"))] if prefix else []
 
+    MAX_INDEX_FILE_BYTES = 512_000  # a stray multi-GB log/dump matching a text extension used to synchronously read()
+    # the whole thing in this async function, freezing the entire single-threaded event loop — every other request
+    # (even in a different tab) for however long that read took. Skipping oversized files avoids that outright.
+    MAX_INDEX_FILES = 3000  # a home-directory-wide scan can otherwise mean hours of one-file-at-a-time embedding calls
+
     files_indexed = 0
     total_chunks = 0
+    skipped_large = 0
     candidates = _safe_rglob(target) if target.is_dir() else [target]
     for entry in candidates:
+        if files_indexed >= MAX_INDEX_FILES:
+            break
         if not entry.is_file() or entry.suffix.lower() not in TEXT_FILE_EXTS:
             continue
+        st = _safe_stat(entry)
+        if st and st.st_size > MAX_INDEX_FILE_BYTES:
+            skipped_large += 1
+            continue
         try:
-            text = entry.read_text(encoding="utf-8", errors="replace")
+            # Off the event loop — even under the size cap, reading is still
+            # a blocking syscall, and thousands of these back-to-back is the
+            # other half of why this used to make the whole app unresponsive.
+            text = await asyncio.to_thread(entry.read_text, encoding="utf-8", errors="replace")
         except Exception:
             continue
         if not text.strip():
@@ -791,7 +836,7 @@ async def build_search_index(req: IndexRequest):
         total_chunks += len(chunks)
 
     _save_json_list(SEARCH_INDEX_FILE, index)
-    return {"indexed_files": files_indexed, "chunks": total_chunks}
+    return {"indexed_files": files_indexed, "chunks": total_chunks, "skipped_large_files": skipped_large}
 
 @app.get("/api/search/index/status")
 async def search_index_status():
@@ -1115,6 +1160,11 @@ async def execute_tool(name: str, args: dict) -> str:
                 results.append(f"- [{title}]({link}): {snippet}")
                 if len(results) >= req.max_results:
                     break
+            if not results and "anomaly" in r.text.lower():
+                # Same DuckDuckGo bot-detection interstitial as /api/search
+                # above — tell the model plainly so it doesn't report "no
+                # results exist" as if that were a real, final answer.
+                return "DuckDuckGo is temporarily rate-limiting automated requests from this machine. Tell the user to wait a minute and try again, rather than reporting this as 'no results found'."
             return "\n".join(results) if results else "No results found."
 
         elif name == "read_file":
@@ -1506,6 +1556,20 @@ async def list_cloud_models():
     return {"models": [f"{p}/{meta['default_model']}" for p, meta in CLOUD_PROVIDERS.items() if keys.get(p)]}
 
 
+def _messages_for_cloud(messages: list) -> list:
+    """None of the three cloud calls below use that provider's native
+    tool-calling schema — like the Ollama/local path, tool calls and results
+    here are just plain-text turns the model itself parses out of its own
+    reply (see _extract_tool_call) — so a {"role": "tool", ...} entry (see
+    _agent_turns, which appends one after every tool result) is remapped to
+    "user" instead of being dropped. Dropping it (the previous behavior)
+    silently erased every tool result from what a cloud model saw on its
+    next turn — it would still be told "Continue with the result above" with
+    the actual result missing, breaking anything past a single tool call."""
+    return [{"role": "user" if m["role"] == "tool" else m["role"], "content": m["content"]}
+            for m in messages if m["role"] in ("user", "assistant", "tool")]
+
+
 async def _call_anthropic(model: str, messages: list, system: str, api_key: str) -> str:
     async with httpx.AsyncClient(timeout=120) as client:
         r = await client.post(
@@ -1513,7 +1577,7 @@ async def _call_anthropic(model: str, messages: list, system: str, api_key: str)
             headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
             json={
                 "model": model, "max_tokens": 4096, "system": system,
-                "messages": [{"role": m["role"], "content": m["content"]} for m in messages if m["role"] in ("user", "assistant")],
+                "messages": _messages_for_cloud(messages),
             },
         )
         if r.status_code != 200:
@@ -1529,8 +1593,7 @@ async def _call_openai(model: str, messages: list, system: str, api_key: str) ->
             headers={"Authorization": f"Bearer {api_key}", "content-type": "application/json"},
             json={
                 "model": model,
-                "messages": [{"role": "system", "content": system}] +
-                            [{"role": m["role"], "content": m["content"]} for m in messages if m["role"] in ("user", "assistant")],
+                "messages": [{"role": "system", "content": system}] + _messages_for_cloud(messages),
             },
         )
         if r.status_code != 200:
@@ -1548,7 +1611,7 @@ async def _call_gemini(model: str, messages: list, system: str, api_key: str) ->
                 "systemInstruction": {"parts": [{"text": system}]},
                 "contents": [
                     {"role": "model" if m["role"] == "assistant" else "user", "parts": [{"text": m["content"]}]}
-                    for m in messages if m["role"] in ("user", "assistant")
+                    for m in _messages_for_cloud(messages)
                 ],
             },
         )
@@ -1576,6 +1639,57 @@ async def _call_cloud_model(model_ref: str, messages: list, system: str) -> str:
     if provider == "google":
         return await _call_gemini(model, messages, system, api_key)
     return f"Unknown cloud provider '{provider}'."
+
+
+def _is_cloud_model(model: str) -> bool:
+    return "/" in model and model.split("/", 1)[0] in CLOUD_PROVIDERS
+
+
+async def _llm_complete(model: str, messages: list, timeout: int = 120) -> str:
+    """One-shot (non-streaming) chat completion, routed to whichever provider
+    `model` actually names — a cloud provider (via _call_cloud_model) when
+    it's a "<provider>/<model>" ref, local Ollama otherwise. Several endpoints
+    below (draft replies, calendar event scanning, skill learning, routine
+    interpretation) used to always POST straight to Ollama regardless of
+    what the caller had selected in the model dropdown — which also lists
+    configured cloud models — so picking one of those there silently failed
+    (Ollama 404s on the unknown name, but still returns valid-looking JSON
+    with no "message" key, so content quietly became ""). Also raises on a
+    real Ollama-side error instead of swallowing it into an empty string, so
+    callers' existing try/except surfaces the actual problem.
+    """
+    if _is_cloud_model(model):
+        system = next((m["content"] for m in messages if m["role"] == "system"), "")
+        convo = [m for m in messages if m["role"] != "system"]
+        return await _call_cloud_model(model, convo, system)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        r = await client.post(f"{OLLAMA}/api/chat", json={"model": model, "messages": messages, "stream": False})
+        r.raise_for_status()
+        return r.json().get("message", {}).get("content", "")
+
+
+async def _stream_chat_ndjson(model: str, messages: list, timeout: int = 600):
+    """Shared streaming body for the two token-by-token drafting endpoints
+    below (App Analyzer, Project Generator). For local Ollama this proxies
+    its own /api/chat stream through unchanged. Cloud providers here are
+    only ever called non-streaming (see _call_cloud_model), so instead this
+    makes one call and yields the whole result as a single chunk in the same
+    {"message": {"content": ...}} shape Ollama's stream uses line-by-line —
+    the frontend's parser already just accumulates that field either way."""
+    if _is_cloud_model(model):
+        system = next((m["content"] for m in messages if m["role"] == "system"), "")
+        convo = [m for m in messages if m["role"] != "system"]
+        text = await _call_cloud_model(model, convo, system)
+        yield (json.dumps({"message": {"content": text}, "done": True}) + "\n").encode()
+        return
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            async with client.stream("POST", f"{OLLAMA}/api/chat",
+                                      json={"model": model, "messages": messages, "stream": True}) as r:
+                async for chunk in r.aiter_bytes():
+                    yield chunk
+    except Exception as e:
+        yield json.dumps({"error": f"Ollama error: {str(e)}"}).encode()
 
 
 # ── Chat with Tool Calling ─────────────────────────────────────────────────────
@@ -1609,6 +1723,52 @@ async def chat(req: ChatRequest):
 
 # ── Agent Mode (autonomous tool use) ───────────────────────────────────────────
 
+def _lenient_json_loads(text: str):
+    """json.loads(), but tolerates literal control characters (raw newlines/
+    tabs/carriage returns) sitting inside string literals — technically
+    invalid JSON, but a very common local-model failure mode: asked to call
+    execute_code/write_file with real multi-line source in the `code`/
+    `content` argument, a lot of local models just paste it in with actual
+    line breaks instead of escaping them as \\n. Left unhandled, that raised
+    JSONDecodeError, _extract_tool_call silently returned (None, None), and
+    the tool call was never recognized or run — the raw tool-call JSON just
+    got shown to the user as if it were the final answer. Walks the text
+    tracking string/escape state (the same technique the brace-matching
+    fallback below already uses) and escapes only control characters that
+    are actually inside a string literal, leaving real JSON structure alone."""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    out = []
+    in_string = False
+    escape = False
+    for ch in text:
+        if in_string:
+            if escape:
+                out.append(ch)
+                escape = False
+            elif ch == '\\':
+                out.append(ch)
+                escape = True
+            elif ch == '"':
+                out.append(ch)
+                in_string = False
+            elif ch == '\n':
+                out.append('\\n')
+            elif ch == '\r':
+                out.append('\\r')
+            elif ch == '\t':
+                out.append('\\t')
+            else:
+                out.append(ch)
+        else:
+            if ch == '"':
+                in_string = True
+            out.append(ch)
+    return json.loads(''.join(out))
+
+
 def _extract_tool_call(response_text: str) -> tuple:
     """Finds the model's intended tool call even if it didn't follow the
     ```tool fence exactly — weaker local models often narrate around the
@@ -1624,7 +1784,7 @@ def _extract_tool_call(response_text: str) -> tuple:
     fenced = re.search(r'```tool\s*\n(.*?)\n```', response_text, re.DOTALL)
     if fenced:
         try:
-            obj = json.loads(fenced.group(1))
+            obj = _lenient_json_loads(fenced.group(1))
             if isinstance(obj, dict) and "name" in obj:
                 return obj, fenced.end()
         except json.JSONDecodeError:
@@ -1662,7 +1822,7 @@ def _extract_tool_call(response_text: str) -> tuple:
                     depth -= 1
                     if depth == 0:
                         try:
-                            obj = json.loads(response_text[start:i + 1])
+                            obj = _lenient_json_loads(response_text[start:i + 1])
                             if isinstance(obj, dict) and "name" in obj and "arguments" in obj:
                                 return obj, i + 1
                         except json.JSONDecodeError:
@@ -1901,7 +2061,55 @@ async def submit_sudo_password(request_id: str, req: SudoPasswordRequest):
 
 @app.post("/api/analyze")
 async def analyze_app(req: AnalyzeRequest):
-    prompt = f"""Analyze this app opportunity and create a full development plan:
+    if req.clone_mode:
+        prompt = f"""The user wants an app that replicates "{req.app_name}" as closely as possible —
+full feature parity with the real thing, NOT a simplified "MVP" and NOT a
+differentiated competitor. Do not propose cutting scope, do not suggest a
+different pricing model, and do not shrink the feature list for a "v1" —
+the goal is an identical clone.
+
+REFERENCE APP: {req.app_name}
+CATEGORY: {req.category}
+ADDITIONAL DESCRIPTION FROM USER: {req.description or "Not provided — rely on your own knowledge of this real app."}
+KNOWN ISSUES (context only, do not use to cut scope): {req.reviews or "Not provided"}
+PLATFORM / PRICING NOTE: {req.price_target}
+
+Provide:
+
+## 1. Complete Feature Inventory
+Exhaustively list EVERY feature/module the real "{req.app_name}" actually
+has, grouped by area (core workflows, reporting, integrations, admin/settings,
+platform-specific extras, etc). Use your own real knowledge of this app.
+Do not omit advanced or niche features for brevity.
+
+## 2. Data Model
+The core entities/tables needed to support that full feature list.
+
+## 3. Technical Architecture
+- Platform recommendation (React Native/Flutter/PWA) and why
+- Key libraries/APIs needed to cover every feature in section 1
+- Backend requirements
+
+## 4. Complete Project Scaffold
+Full file structure and real, working starter code implementing as much of
+the feature list in section 1 as possible — not just a couple of demo
+screens. Use exactly this format per file so it can be parsed and saved
+automatically:
+=== FILE: path/to/filename.ext ===
+[complete file content]
+=== END FILE ===
+
+## 5. Feature List
+Repeat the full feature list from section 1 as a plain checklist, one
+feature per line, inside a fenced code block tagged `features` (this is
+machine-parsed to seed the Project Generator, so keep each line short and
+plain, no numbering/bullets):
+```features
+feature one
+feature two
+```"""
+    else:
+        prompt = f"""Analyze this app opportunity and create a full development plan:
 
 APP: {req.app_name}
 CATEGORY: {req.category}
@@ -1937,26 +2145,11 @@ Include real, working code — not pseudocode.
 - Full description optimized for ASO
 - 5 keyword suggestions"""
 
-    async def stream():
-        try:
-            async with httpx.AsyncClient(timeout=300) as client:
-                async with client.stream(
-                    "POST", f"{OLLAMA}/api/chat",
-                    json={
-                        "model": req.model,
-                        "messages": [
-                            {"role": "system", "content": "You are an expert mobile app developer and ASO specialist. Always provide complete, working code."},
-                            {"role": "user", "content": prompt}
-                        ],
-                        "stream": True
-                    }
-                ) as r:
-                    async for chunk in r.aiter_bytes():
-                        yield chunk
-        except Exception as e:
-            yield json.dumps({"error": f"Ollama error: {str(e)}"}).encode()
-
-    return StreamingResponse(stream(), media_type="application/x-ndjson")
+    messages = [
+        {"role": "system", "content": "You are an expert mobile app developer and ASO specialist. Always provide complete, working code."},
+        {"role": "user", "content": prompt}
+    ]
+    return StreamingResponse(_stream_chat_ndjson(req.model, messages, timeout=300), media_type="application/x-ndjson")
 
 
 # ── Project Generator ──────────────────────────────────────────────────────────
@@ -1984,26 +2177,11 @@ Include:
 
 Write production-quality code, not demos."""
 
-    async def stream():
-        try:
-            async with httpx.AsyncClient(timeout=600) as client:
-                async with client.stream(
-                    "POST", f"{OLLAMA}/api/chat",
-                    json={
-                        "model": req.model,
-                        "messages": [
-                            {"role": "system", "content": UNCENSORED_SYSTEM},
-                            {"role": "user", "content": prompt}
-                        ],
-                        "stream": True
-                    }
-                ) as r:
-                    async for chunk in r.aiter_bytes():
-                        yield chunk
-        except Exception as e:
-            yield json.dumps({"error": f"Ollama error: {str(e)}"}).encode()
-
-    return StreamingResponse(stream(), media_type="application/x-ndjson")
+    messages = [
+        {"role": "system", "content": UNCENSORED_SYSTEM},
+        {"role": "user", "content": prompt}
+    ]
+    return StreamingResponse(_stream_chat_ndjson(req.model, messages, timeout=600), media_type="application/x-ndjson")
 
 
 # ── Conversations ──────────────────────────────────────────────────────────────
@@ -2155,8 +2333,16 @@ def _redact_account(acc: dict) -> dict:
 GOOGLE_OAUTH_FILE = Path(__file__).parent.parent / "google_oauth.json"
 GOOGLE_OAUTH_SCOPES = " ".join([
     "openid", "email",
-    "https://www.googleapis.com/auth/gmail.readonly",
-    "https://www.googleapis.com/auth/gmail.send",
+    # NOT gmail.readonly/gmail.send — those are Gmail REST API scopes, and
+    # this app never calls that API; email access here is imaplib/smtplib
+    # talking directly to imap.gmail.com/smtp.gmail.com via XOAUTH2, which
+    # Google only honors for legacy-protocol access under the separate
+    # mail.google.com scope. Requesting the REST scopes instead produces a
+    # token that refreshes fine but that Gmail's IMAP server still rejects
+    # with a bare "[AUTHENTICATIONFAILED] Invalid credentials" — confirmed
+    # live: a real refreshed access token with gmail.readonly/gmail.send
+    # scope was rejected by imap.gmail.com every time.
+    "https://mail.google.com/",
     "https://www.googleapis.com/auth/calendar",
 ])
 
@@ -2618,6 +2804,24 @@ async def get_email_messages(account_id: str, folder: str = "INBOX", limit: int 
         raise HTTPException(502, f"IMAP error: {e}")
 
 
+def _imap_delete(account: dict, folder: str, uid: str, access_token: str = ""):
+    with imaplib.IMAP4_SSL(account["imap_host"], account.get("imap_port", 993)) as imap:
+        _imap_login(imap, account, access_token)
+        imap.select(folder or "INBOX")
+        imap.store(uid, "+FLAGS", "\\Deleted")
+        imap.expunge()
+
+@app.delete("/api/email/{account_id}/messages/{uid}")
+async def delete_email_message(account_id: str, uid: str, folder: str = "INBOX"):
+    account = _get_email_account(account_id)
+    try:
+        access_token = await _google_access_token(account["google_account_id"]) if account.get("auth") == "oauth" else ""
+        await asyncio.to_thread(_imap_delete, account, folder, uid, access_token)
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(502, f"IMAP error: {e}")
+
+
 def _imap_count_new(account: dict, last_seen_uid, access_token: str = "") -> tuple:
     """Cheap poll: just counts UIDs greater than the last one we saw, no
     fetch of message bodies. Returns (new_count, latest_uid_str)."""
@@ -2675,15 +2879,9 @@ Body:
 Each reply should be a complete, ready-to-send email body (no subject line). Vary the 3 options — e.g. one brief, one detailed, one alternative angle. Respond with ONLY a JSON array of exactly 3 strings."""
 
     try:
-        async with httpx.AsyncClient(timeout=120) as client:
-            r = await client.post(f"{OLLAMA}/api/chat", json={
-                "model": req.model,
-                "messages": [{"role": "user", "content": prompt}],
-                "stream": False,
-            })
-            content = r.json().get("message", {}).get("content", "")
+        content = await _llm_complete(req.model, [{"role": "user", "content": prompt}])
     except Exception as e:
-        raise HTTPException(502, f"Ollama error: {e}")
+        raise HTTPException(502, f"Model error: {e}")
 
     match = re.search(r'\[.*\]', content, re.DOTALL)
     if match:
@@ -2858,15 +3056,9 @@ Body:
 {req.body[:4000]}"""
 
     try:
-        async with httpx.AsyncClient(timeout=120) as client:
-            r = await client.post(f"{OLLAMA}/api/chat", json={
-                "model": req.model,
-                "messages": [{"role": "user", "content": prompt}],
-                "stream": False,
-            })
-            content = r.json().get("message", {}).get("content", "")
+        content = await _llm_complete(req.model, [{"role": "user", "content": prompt}])
     except Exception as e:
-        raise HTTPException(502, f"Ollama error: {e}")
+        raise HTTPException(502, f"Model error: {e}")
 
     match = re.search(r'\[.*\]', content, re.DOTALL)
     extracted = []
@@ -3006,12 +3198,32 @@ async def act_on_event(event_id: str, action: str):
 
 # ── Calendar: universal ICS subscribe feed ────────────────────────────────────
 # Works with any calendar app (Google, Outlook, Apple, Fastmail, Thunderbird...)
-# via "subscribe by URL" — no auth, no per-provider integration needed. This is
-# the only path for providers like Google Calendar that don't accept CalDAV
-# app-password writes.
+# via "subscribe by URL" — no per-provider integration needed. This is the
+# only path for providers like Google Calendar that don't accept CalDAV
+# app-password writes. Since the whole point of this one endpoint is to be
+# reachable by something other than your own browser (another device's
+# calendar app, potentially over the LAN), it can't rely on "only this
+# machine can reach the API" the way every other endpoint now does — so it
+# carries its own per-install random token in the URL instead of being a
+# bare, guessable path.
+
+def _get_ics_feed_token() -> str:
+    cfg = load_config()
+    token = cfg.get("ics_feed_token")
+    if not token:
+        token = uuid.uuid4().hex
+        cfg["ics_feed_token"] = token
+        write_config(cfg)
+    return token
+
+@app.get("/api/calendar/feed-token")
+async def calendar_feed_token():
+    return {"token": _get_ics_feed_token()}
 
 @app.get("/api/calendar/feed.ics")
-async def calendar_feed():
+async def calendar_feed(token: str = ""):
+    if token != _get_ics_feed_token():
+        raise HTTPException(403, "Missing or incorrect feed token.")
     from icalendar import Calendar as ICal, Event as ICalEvent
 
     ical = ICal()
@@ -3147,15 +3359,9 @@ async def learn_skill(req: LearnSkillRequest):
 Content to learn from:
 {req.context[:6000]}"""
     try:
-        async with httpx.AsyncClient(timeout=120) as client:
-            r = await client.post(f"{OLLAMA}/api/chat", json={
-                "model": req.model,
-                "messages": [{"role": "user", "content": prompt}],
-                "stream": False,
-            })
-            content = r.json().get("message", {}).get("content", "")
+        content = await _llm_complete(req.model, [{"role": "user", "content": prompt}])
     except Exception as e:
-        raise HTTPException(502, f"Ollama error: {e}")
+        raise HTTPException(502, f"Model error: {e}")
 
     match = re.search(r'\{.*\}', content, re.DOTALL)
     if match:
@@ -3294,15 +3500,9 @@ async def interpret_routine(req: RoutineInterpretRequest):
 
 User's request: {req.request}"""
     try:
-        async with httpx.AsyncClient(timeout=120) as client:
-            r = await client.post(f"{OLLAMA}/api/chat", json={
-                "model": req.model,
-                "messages": [{"role": "user", "content": prompt}],
-                "stream": False,
-            })
-            content = r.json().get("message", {}).get("content", "")
+        content = await _llm_complete(req.model, [{"role": "user", "content": prompt}])
     except Exception as e:
-        raise HTTPException(502, f"Ollama error: {e}")
+        raise HTTPException(502, f"Model error: {e}")
 
     match = re.search(r'\{.*\}', content, re.DOTALL)
     if match:
@@ -3471,6 +3671,12 @@ async def import_backup(request: Request):
         except OSError:
             pass
         restored.append(name)
+
+    if ROUTINES_FILE.name in restored:
+        # Restoring just overwrites routines.json on disk — without this, a
+        # restored routine shows as "active" in the UI but has no actual
+        # APScheduler job behind it until the next full backend restart.
+        _load_and_schedule_routines()
 
     return {"ok": True, "restored": restored}
 

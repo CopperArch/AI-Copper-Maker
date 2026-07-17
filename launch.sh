@@ -64,7 +64,13 @@ pkill -f "uvicorn main:app" 2>/dev/null && sleep 1
 cd "$SCRIPT_DIR/backend"
 source venv/bin/activate
 echo "Starting LLM Coder backend on http://localhost:8081"
-uvicorn main:app --host 0.0.0.0 --port 8081 --reload &
+# Bound to localhost only — this app has no login/auth of its own, and it
+# exposes full home-directory read/write plus arbitrary code execution
+# (/api/execute, /api/files/write, run_command). 0.0.0.0 would put all of
+# that on the LAN with zero authentication, reachable from any other device
+# on the same network. Change back to 0.0.0.0 only if you specifically want
+# LAN access (e.g. from your phone) and understand that tradeoff.
+uvicorn main:app --host 127.0.0.1 --port 8081 --reload &
 BACKEND_PID=$!
 
 # Wait for backend to start then open browser
