@@ -11,4 +11,5 @@ search_index.json
 contacts.json
 api_keys.json
 google_oauth.json
+release.keystore
 *.pyc

@@ -1,12 +1,19 @@
-# LLM Coder — Uncensored Edition REV 1 (v1.0)
+# LLM Coder — Uncensored Edition REV 1.1 (v1.1)
 
-A completely **uncensored**, locally-run AI coding assistant and agent workspace powered by Ollama. No refusals, no guardrails, no limitations — the model will assist with **any** request without hesitation. Includes a full app builder: analyze/clone an existing app (optionally grounded in a real decompiled `.apk`), generate a complete project from a feature list, run it live in-browser, and export a real installable Android APK — all without leaving the app.
+A completely **uncensored**, locally-run AI coding assistant and agent workspace powered by Ollama. No refusals, no guardrails, no limitations — the model will assist with **any** request without hesitation. Includes a full mobile app development studio: analyze an app concept and plan its feature set (optionally grounded in a real decompiled `.apk` for interoperability/prototyping), generate a complete project from that feature list, run it live in-browser, and build a real, installable Android APK — entirely offline, without leaving the app.
 
 Built by [Browns Entertainment](https://github.com/DgBrown21).
 
 ## License
 
 Licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE) — free to use, modify, and share for any noncommercial purpose. Commercial use (selling it, running it as a paid service, bundling it into a paid product, etc.) requires a separate commercial license — contact [redacted] to arrange one.
+
+---
+
+## REV 1.1 (v1.1) — What's New
+
+### 🔧 Fully offline Android APK builds
+Build Android now offers a **Local (Debug)**, **Local (Release)**, or **EAS Cloud** option. Local builds run entirely on your own machine via the Android SDK + Gradle — no Expo account, no cloud service, nothing leaves your computer. Release builds are signed with an automatically-generated, persistent local keystore, so they're installable straight away. The one-time SDK/JDK setup is auto-detected; the app tells you which build methods are actually available on your machine.
 
 ---
 

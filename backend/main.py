@@ -744,6 +744,199 @@ async def build_apk(req: BuildApkRequest):
     return StreamingResponse(stream(), media_type="application/x-ndjson")
 
 
+def _find_android_sdk() -> Path | None:
+    for candidate in (
+        os.environ.get("ANDROID_HOME"),
+        os.environ.get("ANDROID_SDK_ROOT"),
+        str(Path.home() / "Android" / "Sdk"),
+        str(Path.home() / "Library" / "Android" / "sdk"),
+    ):
+        if candidate and (Path(candidate) / "platform-tools").exists():
+            return Path(candidate)
+    return None
+
+def _find_java_home() -> str | None:
+    """Gradle needs a real JDK, not just a JRE — Android's own build tooling
+    won't run on the stripped-down JRE some systems ship by default. Checked
+    in order: an explicit JAVA_HOME, java already resolvable on PATH, a
+    Homebrew-installed openjdk (how this was set up on this machine, since
+    Bazzite/atomic distros can't just `dnf install` a JDK), then common
+    system install paths."""
+    if os.environ.get("JAVA_HOME"):
+        return os.environ["JAVA_HOME"]
+    if shutil.which("java"):
+        return None  # already resolvable with no override needed
+    brew = shutil.which("brew")
+    if brew:
+        for formula in ("openjdk@17", "openjdk"):
+            try:
+                out = subprocess.run([brew, "--prefix", formula], capture_output=True, text=True, timeout=10)
+                if out.returncode == 0 and out.stdout.strip() and Path(out.stdout.strip()).exists():
+                    return out.stdout.strip()
+            except (subprocess.SubprocessError, OSError):
+                pass
+    for candidate in ("/usr/lib/jvm/java-17-openjdk", "/usr/lib/jvm/default-jdk"):
+        if Path(candidate).exists():
+            return candidate
+    return None
+
+@app.get("/api/project/android-sdk-status")
+async def android_sdk_status():
+    sdk = _find_android_sdk()
+    return {"available": sdk is not None, "path": str(sdk) if sdk else None}
+
+def _fix_kotlin_classpath_version(android_dir: Path) -> bool:
+    """`expo prebuild`'s generated root build.gradle declares its own
+    kotlinVersion ext var (matched to the Compose compiler a given Expo SDK
+    ships), but its kotlin-gradle-plugin classpath entry has no version
+    pinned to it — so Gradle resolves that from React Native's own gradle
+    plugin instead, which routinely lags one Kotlin patch version behind.
+    The Compose compiler then refuses to build over that mismatch (confirmed
+    live: SDK 52 fails exactly this way, every time, until this is patched).
+    Pinning the classpath to the same ext var fixes it at the source."""
+    build_gradle = android_dir / "build.gradle"
+    if not build_gradle.exists():
+        return False
+    text = build_gradle.read_text()
+    unpinned = "classpath('org.jetbrains.kotlin:kotlin-gradle-plugin')"
+    if unpinned not in text:
+        return False
+    build_gradle.write_text(text.replace(
+        unpinned,
+        'classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlinVersion")',
+    ))
+    return True
+
+RELEASE_KEYSTORE_PATH = Path(__file__).parent.parent / "release.keystore"
+RELEASE_KEYSTORE_PASSWORD = "llmcoder-local-build"
+RELEASE_KEYSTORE_ALIAS = "llmcoder"
+
+def _ensure_release_keystore(java_home: str | None) -> tuple[str, str, str, str]:
+    """A single, persistent, self-signed keystore reused across every local
+    release build on this machine — NOT meant for Play Store submission
+    (that needs its own real signing identity you control), just so a
+    "release" build variant is actually installable like debug builds
+    already are out of the box."""
+    if not RELEASE_KEYSTORE_PATH.exists():
+        keytool = f"{java_home}/bin/keytool" if java_home else "keytool"
+        subprocess.run([
+            keytool, "-genkeypair", "-v",
+            "-keystore", str(RELEASE_KEYSTORE_PATH),
+            "-alias", RELEASE_KEYSTORE_ALIAS, "-keyalg", "RSA", "-keysize", "2048", "-validity", "10000",
+            "-storepass", RELEASE_KEYSTORE_PASSWORD, "-keypass", RELEASE_KEYSTORE_PASSWORD,
+            "-dname", "CN=LLM Coder Local Build",
+        ], check=True, capture_output=True)
+    return str(RELEASE_KEYSTORE_PATH), RELEASE_KEYSTORE_PASSWORD, RELEASE_KEYSTORE_ALIAS, RELEASE_KEYSTORE_PASSWORD
+
+class BuildApkLocalRequest(BaseModel):
+    project_dir: str
+    build_type: str = "debug"  # "debug" or "release" — see the gradle_task branch below
+
+@app.post("/api/project/build-apk-local")
+async def build_apk_local(req: BuildApkLocalRequest):
+    """Builds a real, installable .apk entirely on this machine — no Expo
+    account, no cloud service, nothing leaves this computer. Needs a local
+    Android SDK (checked below) and a JDK; both are one-time setup costs but
+    every build after that is fully offline."""
+    cfg = load_config()
+    base = Path(cfg.get("save_dir", DEFAULT_SAVE_DIR)).expanduser().resolve()
+    project_dir = Path(req.project_dir).expanduser().resolve()
+    if not project_dir.is_relative_to(base):
+        raise HTTPException(403, "Path outside allowed directory")
+    if not project_dir.exists():
+        raise HTTPException(404, "Project directory not found — save the project to disk first")
+
+    sdk = _find_android_sdk()
+    if not sdk:
+        raise HTTPException(400, "No local Android SDK found on this machine — use the EAS Cloud build option instead, or ask to have the local Android SDK set up.")
+
+    build_type = req.build_type if req.build_type in ("debug", "release") else "debug"
+    java_home = _find_java_home()
+
+    async def stream():
+        env = {**os.environ, "ANDROID_HOME": str(sdk), "ANDROID_SDK_ROOT": str(sdk)}
+        if java_home:
+            env["JAVA_HOME"] = java_home
+            env["PATH"] = f"{java_home}/bin:" + env.get("PATH", "")
+
+        android_dir = project_dir / "android"
+        if not android_dir.exists():
+            # Expo-managed projects have no native android/ folder until
+            # "prebuilt" — this generates it (a one-time step per project,
+            # cached afterward the same way node_modules is).
+            yield json.dumps({"type": "status", "status": "prebuild"}) + "\n"
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "npx", "--yes", "expo", "prebuild", "--platform", "android", "--non-interactive",
+                    cwd=str(project_dir), env=env,
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+                )
+                async for line in _iter_lines(proc.stdout):
+                    yield json.dumps({"type": "log", "text": line}) + "\n"
+                code = await asyncio.wait_for(proc.wait(), timeout=300)
+            except asyncio.TimeoutError:
+                proc.kill()
+                yield json.dumps({"type": "error", "text": "expo prebuild timed out.\n"}) + "\n"
+                return
+            if code != 0 or not android_dir.exists():
+                yield json.dumps({"type": "error", "text": f"expo prebuild failed (exit code {code}) — this may not be an Expo-managed project.\n"}) + "\n"
+                return
+
+        gradlew = android_dir / "gradlew"
+        if not gradlew.exists():
+            yield json.dumps({"type": "error", "text": "No gradlew found under android/ after prebuild.\n"}) + "\n"
+            return
+        os.chmod(gradlew, 0o755)
+
+        if _fix_kotlin_classpath_version(android_dir):
+            yield json.dumps({"type": "log", "text": "Pinned the Kotlin Gradle plugin version to match the Compose compiler's expectation (confirmed live: expo prebuild's generated build.gradle otherwise resolves a Kotlin version one patch behind what Compose requires, and Gradle refuses to build over that mismatch).\n"}) + "\n"
+
+        gradle_task = "assembleRelease" if build_type == "release" else "assembleDebug"
+        gradle_args = [str(gradlew), gradle_task, "--console=plain"]
+        if build_type == "release":
+            try:
+                keystore, ks_pass, key_alias, key_pass = await asyncio.to_thread(_ensure_release_keystore, java_home)
+            except subprocess.CalledProcessError as e:
+                yield json.dumps({"type": "error", "text": f"Couldn't create a signing keystore: {e}\n"}) + "\n"
+                return
+            gradle_args += [
+                f"-Pandroid.injected.signing.store.file={keystore}",
+                f"-Pandroid.injected.signing.store.password={ks_pass}",
+                f"-Pandroid.injected.signing.key.alias={key_alias}",
+                f"-Pandroid.injected.signing.key.password={key_pass}",
+            ]
+
+        yield json.dumps({"type": "status", "status": "building"}) + "\n"
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *gradle_args, cwd=str(android_dir), env=env,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            )
+            async for line in _iter_lines(proc.stdout):
+                yield json.dumps({"type": "log", "text": line}) + "\n"
+            code = await asyncio.wait_for(proc.wait(), timeout=1200)
+        except asyncio.TimeoutError:
+            proc.kill()
+            yield json.dumps({"type": "error", "text": "Gradle build timed out after 20 minutes.\n"}) + "\n"
+            return
+
+        if code != 0:
+            yield json.dumps({"type": "error", "text": f"Build failed (exit code {code}).\n"}) + "\n"
+            return
+
+        out_dir = android_dir / "app" / "build" / "outputs" / "apk" / build_type
+        apk_files = sorted(out_dir.glob("*.apk")) if out_dir.exists() else []
+        if not apk_files:
+            yield json.dumps({"type": "error", "text": f"Build succeeded but no .apk was found under {out_dir}.\n"}) + "\n"
+            return
+
+        dest = project_dir / f"{project_dir.name}-{build_type}.apk"
+        shutil.copy(apk_files[0], dest)
+        yield json.dumps({"type": "ready", "path": str(dest)}) + "\n"
+
+    return StreamingResponse(stream(), media_type="application/x-ndjson")
+
+
 # ── Health ─────────────────────────────────────────────────────────────────────
 
 @app.get("/api/system/ram")
@@ -805,7 +998,7 @@ REPO_DIR = Path(__file__).parent.parent
 # No formal release process (no GitHub Releases/tags exist for this repo —
 # see the note on /api/update/check below) — bump this by hand alongside the
 # README's own "v0.2" heading whenever a notable batch of changes lands.
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 
 
 async def _run_git(*args: str) -> tuple[int, str]:

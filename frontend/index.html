@@ -950,7 +950,13 @@
             <button class="btn btn-secondary btn-full btn-sm" onclick="copyGenerateOutput()">Copy All Output</button>
             <button class="btn btn-primary btn-full btn-sm" id="save-project-btn" onclick="saveProjectToDisk()" disabled>💾 Save to Disk</button>
             <button class="btn btn-accent btn-full btn-sm" id="run-project-btn" onclick="runGeneratedProject()" disabled>▶ Run Code</button>
-            <button class="btn btn-secondary btn-full btn-sm" id="build-apk-btn" onclick="buildApk()" disabled>📱 Build Android APK</button>
+            <select id="build-apk-method" style="margin-top:2px">
+              <option value="local-debug">📱 Build APK — Local (Debug)</option>
+              <option value="local-release">📱 Build APK — Local (Release)</option>
+              <option value="eas">📱 Build APK — EAS Cloud (needs Expo account)</option>
+            </select>
+            <button class="btn btn-secondary btn-full btn-sm" id="build-apk-btn" onclick="buildApk()" disabled>Build Android APK</button>
+            <div id="build-apk-sdk-note" style="font-size:11px;color:var(--muted)"></div>
           </div>
           <div id="save-project-status" style="font-size:12px;margin-top:6px"></div>
         </div>
@@ -1507,6 +1513,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   await loadConversations();
   loadSaveDirConfig();
   loadCatalog();
+  checkAndroidSdkStatus();
   renderWeeklyTokenUsage();
   document.getElementById('token-usage-menu-btn').addEventListener('click', e => {
     e.stopPropagation();
@@ -3725,9 +3732,28 @@ async function ensureExpoTokenConfigured() {
   return true;
 }
 
+async function checkAndroidSdkStatus() {
+  const note = document.getElementById('build-apk-sdk-note');
+  const select = document.getElementById('build-apk-method');
+  try {
+    const res = await fetch(`${API}/api/project/android-sdk-status`);
+    const data = await res.json();
+    if (data.available) {
+      note.textContent = `✓ Local Android SDK found (${data.path}) — no account needed for local builds.`;
+      select.value = 'local-debug';
+    } else {
+      note.textContent = 'No local Android SDK found on this machine — use EAS Cloud, or ask to have a local SDK set up.';
+      select.value = 'eas';
+    }
+  } catch {
+    note.textContent = '';
+  }
+}
+
 async function buildApk() {
   if (!lastGeneratedContent) return;
-  if (!(await ensureExpoTokenConfigured())) return;
+  const method = document.getElementById('build-apk-method').value;
+  if (method === 'eas' && !(await ensureExpoTokenConfigured())) return;
 
   const buildBtn = document.getElementById('build-apk-btn');
   buildBtn.disabled = true;
@@ -3739,17 +3765,17 @@ async function buildApk() {
   } catch (err) {
     alert('Could not save project before building: ' + err.message);
     buildBtn.disabled = false;
-    buildBtn.textContent = '📱 Build Android APK';
+    buildBtn.textContent = 'Build Android APK';
     return;
   }
 
   buildBtn.disabled = false;
-  buildBtn.textContent = '📱 Build Android APK';
+  buildBtn.textContent = 'Build Android APK';
   switchTab('runner');
-  startApkBuild(projectDir, lastGeneratedAppName);
+  startApkBuild(projectDir, lastGeneratedAppName, method);
 }
 
-async function startApkBuild(projectDir, appName) {
+async function startApkBuild(projectDir, appName, method) {
   const panel = document.getElementById('project-run-panel');
   const title = document.getElementById('project-run-title');
   const status = document.getElementById('project-run-status');
@@ -3757,9 +3783,15 @@ async function startApkBuild(projectDir, appName) {
   const openLink = document.getElementById('project-run-open-link');
   const iframe = document.getElementById('project-run-iframe');
   const stopBtn = document.getElementById('project-run-stop-btn');
+  const isEas = method === 'eas';
+  const endpoint = isEas ? '/api/project/build-apk' : '/api/project/build-apk-local';
+  const body = isEas
+    ? { project_dir: projectDir }
+    : { project_dir: projectDir, build_type: method === 'local-release' ? 'release' : 'debug' };
   const statusLabels = {
     configuring: 'Configuring EAS Build...',
-    building: 'Building on Expo\'s servers (this can take 5-20+ minutes)...',
+    prebuild: 'Generating native Android project (first time only)...',
+    building: isEas ? 'Building on Expo\'s servers (this can take 5-20+ minutes)...' : 'Building locally with Gradle...',
     downloading: 'Downloading .apk...'
   };
 
@@ -3771,14 +3803,14 @@ async function startApkBuild(projectDir, appName) {
   openLink.style.display = 'none';
   iframe.style.display = 'none';
   iframe.src = 'about:blank';
-  stopBtn.disabled = true; // no cancel endpoint for a cloud build — closing/navigating away just stops watching it, the build itself keeps running on Expo's servers
+  stopBtn.disabled = true; // no cancel endpoint for either build path — closing/navigating away just stops watching it, the build itself keeps running
   currentProjectRunId = null;
 
   try {
-    const res = await fetch(`${API}/api/project/build-apk`, {
+    const res = await fetch(`${API}${endpoint}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ project_dir: projectDir })
+      body: JSON.stringify(body)
     });
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
