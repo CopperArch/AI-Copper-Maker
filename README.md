@@ -90,14 +90,35 @@ It is **free to assist with any request, any topic, any task** without limitatio
 
 ## Quick Start
 
+**Linux / macOS:**
+
 ```bash
 ./install.sh   # detects your hardware, sets up Ollama + a fitting model, installs deps
 ./launch.sh    # or install the systemd --user service from install.sh for persistent Routines
 ```
 
+**Windows:**
+
+Download and run `LLM-Coder-Setup.exe` (built from `windows-installer/`, see below) — it installs to your user profile (no admin rights needed), adds Start Menu/Desktop shortcuts, and offers to run first-time setup (installs Ollama, downloads a model, sets up the Python environment) at the end.
+
+Or run the scripts directly from a checkout:
+
+```powershell
+.\install-windows.ps1   # detects your hardware, sets up Ollama + a fitting model, installs deps
+.\launch-windows.ps1    # or register the logon Scheduled Task from install-windows.ps1 for persistent Routines
+```
+
 Then open **http://localhost:8081**
 
-Select a model from the sidebar (e.g. `qwen2.5-coder-32b-uncensored` or `mistral-24b-uncensored` — or whatever `install.sh` recommended for your hardware). For semantic search, also pull an embedding model: `ollama pull nomic-embed-text`.
+Select a model from the sidebar (e.g. `qwen2.5-coder-32b-uncensored` or `mistral-24b-uncensored` — or whatever the installer recommended for your hardware). For semantic search, also pull an embedding model: `ollama pull nomic-embed-text`.
+
+### Building the Windows installer
+
+```bash
+windows-installer/build.sh   # needs makensis (`brew install makensis`); outputs windows-installer/dist/LLM-Coder-Setup.exe
+```
+
+The build stages only `git`-tracked files plus the Windows launcher scripts, so no local config, account credentials, or signing keystore ever end up in the package.
 
 ---
 

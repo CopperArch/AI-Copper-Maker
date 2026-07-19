@@ -13,3 +13,4 @@ api_keys.json
 google_oauth.json
 release.keystore
 *.pyc
+windows-installer/dist/

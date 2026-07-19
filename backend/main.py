@@ -76,7 +76,9 @@ app.add_middleware(
 
 OLLAMA = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 LMSTUDIO = os.environ.get("LMSTUDIO_HOST", "http://localhost:1234")
-LMS_BIN = shutil.which("lms") or str(Path.home() / ".lmstudio" / "bin" / "lms")
+LMS_BIN = shutil.which("lms") or str(
+    Path.home() / ".lmstudio" / "bin" / ("lms.exe" if platform.system() == "Windows" else "lms")
+)
 API_KEYS_FILE = Path(__file__).parent.parent / "api_keys.json"
 CLOUD_PROVIDERS = {
     "anthropic": {"label": "Claude (Anthropic)", "default_model": "claude-sonnet-4-6"},
@@ -311,6 +313,32 @@ BLOCKED_PATTERNS = [
     "eval(", "exec(", "__import__(",
 ]
 
+def _win_exec_args(args: list) -> list:
+    """npm/npx/flutter/eas-cli all ship as a .cmd (or .bat) wrapper on Windows,
+    never a real .exe — Windows' CreateProcess can't launch those directly
+    (no shebang support, not a PE binary), so create_subprocess_exec raises
+    "WinError 193: %1 is not a valid Win32 application" if you pass the bare
+    name the way the Linux/macOS code path does. Routing through cmd.exe /c
+    is the standard fix (same trick used for gradlew.bat). No-op elsewhere."""
+    args = list(args)
+    if HOST_ENV["system"] == "Windows" and args and args[0] in ("npm", "npx", "flutter"):
+        return ["cmd", "/c"] + args
+    return args
+
+
+_PYTHON_CMD_CACHE = None
+
+def _python_cmd() -> str:
+    """The python.org Windows installer (and the Microsoft Store one) ships
+    `python.exe`/`py.exe`, never `python3.exe` — a bare 'python3' hardcode
+    that works on every Linux/macOS box fails outright on Windows even when
+    Python is installed. Prefer python3 where it exists (keeps python2
+    ambiguity off the table on Linux/macOS), else fall back to python."""
+    global _PYTHON_CMD_CACHE
+    if _PYTHON_CMD_CACHE is None:
+        _PYTHON_CMD_CACHE = "python3" if shutil.which("python3") else "python"
+    return _PYTHON_CMD_CACHE
+
 @app.get("/api/runtimes")
 async def check_runtimes():
     available = []
@@ -338,7 +366,7 @@ async def execute_code(req: ExecuteRequest):
             if pat in code:
                 raise HTTPException(422, f"Blocked dangerous pattern: '{pat}'")
 
-    cmd = {"javascript": "node", "python": "python3"}.get(req.language, "node")
+    cmd = {"javascript": "node", "python": _python_cmd()}.get(req.language, "node")
     suffix = {"javascript": ".js", "python": ".py"}.get(req.language, ".js")
 
     if shutil.which(cmd) is None:
@@ -507,7 +535,7 @@ async def run_project(req: ProjectRunRequest):
             log_so_far = ""
             try:
                 proc = await asyncio.create_subprocess_exec(
-                    *install_cmd, cwd=str(project_dir),
+                    *_win_exec_args(install_cmd), cwd=str(project_dir),
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
                 )
                 async for line in _iter_lines(proc.stdout):
@@ -562,7 +590,7 @@ async def run_project(req: ProjectRunRequest):
             ):
                 try:
                     web_deps_proc = await asyncio.create_subprocess_exec(
-                        *web_deps_cmd, cwd=str(project_dir),
+                        *_win_exec_args(web_deps_cmd), cwd=str(project_dir),
                         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
                     )
                     async for line in _iter_lines(web_deps_proc.stdout):
@@ -586,7 +614,7 @@ async def run_project(req: ProjectRunRequest):
 
         yield json.dumps({"type": "status", "status": "starting"}) + "\n"
         server_proc = await asyncio.create_subprocess_exec(
-            *start_cmd, cwd=str(project_dir),
+            *_win_exec_args(start_cmd), cwd=str(project_dir),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
             env={**os.environ, "CI": "1"},
@@ -684,7 +712,7 @@ async def build_apk(req: BuildApkRequest):
             yield json.dumps({"type": "status", "status": "configuring"}) + "\n"
             try:
                 proc = await asyncio.create_subprocess_exec(
-                    "npx", "--yes", "eas-cli", "build:configure", "-p", "android",
+                    *_win_exec_args(["npx", "--yes", "eas-cli", "build:configure", "-p", "android"]),
                     cwd=str(project_dir), env=env,
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
                 )
@@ -699,8 +727,8 @@ async def build_apk(req: BuildApkRequest):
         yield json.dumps({"type": "status", "status": "building"}) + "\n"
         try:
             proc = await asyncio.create_subprocess_exec(
-                "npx", "--yes", "eas-cli", "build", "-p", "android", "-e", "preview",
-                "--non-interactive", "--wait", "--json",
+                *_win_exec_args(["npx", "--yes", "eas-cli", "build", "-p", "android", "-e", "preview",
+                "--non-interactive", "--wait", "--json"]),
                 cwd=str(project_dir), env=env,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
             )
@@ -867,7 +895,7 @@ async def build_apk_local(req: BuildApkLocalRequest):
             yield json.dumps({"type": "status", "status": "prebuild"}) + "\n"
             try:
                 proc = await asyncio.create_subprocess_exec(
-                    "npx", "--yes", "expo", "prebuild", "--platform", "android", "--non-interactive",
+                    *_win_exec_args(["npx", "--yes", "expo", "prebuild", "--platform", "android", "--non-interactive"]),
                     cwd=str(project_dir), env=env,
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
                 )
@@ -882,17 +910,27 @@ async def build_apk_local(req: BuildApkLocalRequest):
                 yield json.dumps({"type": "error", "text": f"expo prebuild failed (exit code {code}) — this may not be an Expo-managed project.\n"}) + "\n"
                 return
 
-        gradlew = android_dir / "gradlew"
+        # The Gradle wrapper always ships both scripts; the Unix `gradlew`
+        # has no shebang Windows' CreateProcess understands, so it must run
+        # `gradlew.bat` there instead — invoking the bare `gradlew` name would
+        # not fail loudly, it would just silently pick the wrong executable
+        # via PATHEXT resolution or error out depending on shell context.
+        gradlew = android_dir / ("gradlew.bat" if HOST_ENV["system"] == "Windows" else "gradlew")
         if not gradlew.exists():
             yield json.dumps({"type": "error", "text": "No gradlew found under android/ after prebuild.\n"}) + "\n"
             return
-        os.chmod(gradlew, 0o755)
+        if HOST_ENV["system"] != "Windows":
+            os.chmod(gradlew, 0o755)
 
         if _fix_kotlin_classpath_version(android_dir):
             yield json.dumps({"type": "log", "text": "Pinned the Kotlin Gradle plugin version to match the Compose compiler's expectation (confirmed live: expo prebuild's generated build.gradle otherwise resolves a Kotlin version one patch behind what Compose requires, and Gradle refuses to build over that mismatch).\n"}) + "\n"
 
         gradle_task = "assembleRelease" if build_type == "release" else "assembleDebug"
-        gradle_args = [str(gradlew), gradle_task, "--console=plain"]
+        # Windows' CreateProcess can't launch a .bat directly without going
+        # through cmd.exe (it isn't a real PE executable) — create_subprocess_exec
+        # with shell=False would fail with WinError 193 otherwise.
+        gradle_args = (["cmd", "/c", str(gradlew)] if HOST_ENV["system"] == "Windows" else [str(gradlew)])
+        gradle_args += [gradle_task, "--console=plain"]
         if build_type == "release":
             try:
                 keystore, ks_pass, key_alias, key_pass = await asyncio.to_thread(_ensure_release_keystore, java_home)
@@ -1687,7 +1725,7 @@ async def execute_tool(name: str, args: dict) -> str:
             req = ExecuteRequest(**args)
             tmp = tempfile.mkdtemp(prefix="tool-exec-")
             try:
-                cmd = {"javascript": "node", "python": "python3"}.get(req.language, "node")
+                cmd = {"javascript": "node", "python": _python_cmd()}.get(req.language, "node")
                 suffix = {"javascript": ".js", "python": ".py"}.get(req.language, ".js")
                 filepath = os.path.join(tmp, f"code{suffix}")
                 with open(filepath, "w") as f:
@@ -2135,7 +2173,7 @@ async def set_expo_key(req: ExpoTokenRequest):
         # "reject a bad key now, don't let it fail silently at build time"
         # reasoning as the LLM provider keys above.
         proc = await asyncio.create_subprocess_exec(
-            "npx", "--yes", "eas-cli", "whoami",
+            *_win_exec_args(["npx", "--yes", "eas-cli", "whoami"]),
             env={**os.environ, "EXPO_TOKEN": token},
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
         )
@@ -3229,12 +3267,37 @@ def _save_json_list(path: Path, data: list):
         pass
 
 def _notify(title: str, body: str):
-    """Best-effort desktop notification via libnotify. No-ops silently if
-    notify-send isn't available (headless/service context, other OS, etc.) —
-    a missing notification should never break the underlying operation."""
+    """Best-effort desktop notification. Linux uses libnotify (notify-send);
+    Windows has no equivalent CLI, so it shells a WinForms balloon tip via
+    powershell instead (no extra module needed — System.Windows.Forms ships
+    with .NET Framework on every Windows install). UNVERIFIED on Windows —
+    written without a Windows machine to test against. No-ops silently if
+    the notifier isn't available (headless/service context, other OS,
+    etc.) — a missing notification should never break the underlying
+    operation."""
     try:
-        subprocess.run(["notify-send", title, body], timeout=5, check=False)
-    except (FileNotFoundError, OSError):
+        if HOST_ENV["system"] == "Windows":
+            # Escape single quotes for embedding into the PowerShell single-quoted strings below.
+            esc_title = title.replace("'", "''")
+            esc_body = body.replace("'", "''")
+            ps = (
+                "Add-Type -AssemblyName System.Windows.Forms; "
+                "$ni = New-Object System.Windows.Forms.NotifyIcon; "
+                "$ni.Icon = [System.Drawing.SystemIcons]::Information; "
+                "$ni.Visible = $true; "
+                f"$ni.BalloonTipTitle = '{esc_title}'; "
+                f"$ni.BalloonTipText = '{esc_body}'; "
+                "$ni.ShowBalloonTip(5000); "
+                "Start-Sleep -Seconds 5; "
+                "$ni.Dispose()"
+            )
+            subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+                timeout=10, check=False,
+            )
+        else:
+            subprocess.run(["notify-send", title, body], timeout=5, check=False)
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
         pass
 
 def _redact_account(acc: dict) -> dict:
