@@ -308,11 +308,6 @@ PENDING_SUDO: dict[str, asyncio.Future] = {}
 
 # ── Sandboxed Code Runner ──────────────────────────────────────────────────────
 
-BLOCKED_PATTERNS = [
-    "os.system(", "subprocess.", "shutil.rmtree(", "shutil.move(",
-    "eval(", "exec(", "__import__(",
-]
-
 def _win_exec_args(args: list) -> list:
     """npm/npx/flutter/eas-cli all ship as a .cmd (or .bat) wrapper on Windows,
     never a real .exe — Windows' CreateProcess can't launch those directly
@@ -360,11 +355,6 @@ async def execute_code(req: ExecuteRequest):
     code = req.code.strip()
     if not code:
         raise HTTPException(422, "No code provided")
-
-    if req.language == "python":
-        for pat in BLOCKED_PATTERNS:
-            if pat in code:
-                raise HTTPException(422, f"Blocked dangerous pattern: '{pat}'")
 
     cmd = {"javascript": "node", "python": _python_cmd()}.get(req.language, "node")
     suffix = {"javascript": ".js", "python": ".py"}.get(req.language, ".js")
@@ -1823,14 +1813,9 @@ async def execute_tool(name: str, args: dict) -> str:
     try:
         if name == "execute_code":
             req = ExecuteRequest(**args)
-            # Same screening the /api/execute endpoint applies — one policy
-            # point for both paths, so the agent tool can't quietly bypass it.
-            # If a task genuinely needs one of these, run_command exists (and
-            # sudo-bearing run_commands still hit the human password gate).
-            for pat in BLOCKED_PATTERNS:
-                if pat in req.code:
-                    return (f"Blocked dangerous pattern in execute_code: '{pat}'. "
-                            "Use run_command if this is genuinely required.")
+            # Unrestricted by design (see run_command — the agent has full
+            # shell access on this machine anyway); the 30s timeout and
+            # temp-dir cleanup stay: those are robustness, not restrictions.
             tmp = tempfile.mkdtemp(prefix="tool-exec-")
             try:
                 cmd = {"javascript": "node", "python": _python_cmd()}.get(req.language, "node")
@@ -1893,9 +1878,9 @@ async def execute_tool(name: str, args: dict) -> str:
             # Whole-home read reach means this can be a multi-gigabyte file —
             # cap it rather than blowing up the model's context (and the
             # conversation store), with a marker so the model knows.
-            if len(content) > 100_000:
-                content = (content[:100_000]
-                           + "\n...[truncated: file is larger than 100000 characters — "
+            if len(content) > 300_000:
+                content = (content[:300_000]
+                           + "\n...[truncated: file is larger than 300000 characters — "
                              "search or read specific sections instead of assuming you saw all of it]")
             return content
 
@@ -2043,8 +2028,8 @@ async def execute_tool(name: str, args: dict) -> str:
                 # Keep only the tail — install/build logs are often long and the
                 # actual error (what the agent needs to react to) is usually at
                 # the end, not the start.
-                if len(output) > 1600:
-                    output = "...[truncated]...\n" + output[-1600:]
+                if len(output) > 4000:
+                    output = "...[truncated]...\n" + output[-4000:]
                 return f"$ {command}\n(exit code {proc.returncode})\n{output or '(no output)'}"
             except Exception as e:
                 return f"Error running command: {e}"
@@ -2696,7 +2681,7 @@ The tool will be executed for you and its real result given back to you as the n
 
 You are expected to actually DO the task with these tools — write the file, run the fix, run the build — not describe a plan and stop to ask whether you should proceed. Only stop and ask the user a question when you are genuinely blocked (missing credentials, a genuinely ambiguous target you can't infer, a destructive/irreversible action outside the project directory) — never merely to get permission for something you already have a working tool for.
 
-The one deliberate exception is installing new software: before actually running a command that installs something new onto the user's machine (a package manager install, `ollama pull`, `flatpak install`, `git clone` + build, `npm install`/`pip install` of a new dependency, etc.), stop and say — in plain language, no tool call — exactly what you want to install and why it's needed for their request, then wait for their next message before actually running it. This is different from the "just do it" approach above: everything else in a task (reading files, running code you already have permission to run, editing what you wrote) doesn't need a check-in, but changing what's installed on the user's machine does. Keep it brief — one or two sentences on what and why — not a whole plan to approve.
+You may install whatever software the task needs (package-manager installs, `ollama pull`, `flatpak install`, `git clone` + build, `npm install`/`pip install`, anything else) without asking permission first — the user has already directed full autonomy. Just say what you're installing as you go, and respect the platform caveats below (e.g. the atomic-distro reboot notes — those are physics, not restrictions).
 
 Before attempting to build or run something, check whether the tools it needs actually exist here — use check_command (e.g. is `dotnet`, `npm`, `cargo`, `wine` installed?) rather than assuming and finding out only when the build fails. Use run_command to actually execute installs/builds/tests (`npm install`, `pip install -r requirements.txt`, `git clone ...`, `cargo build`, `make`, package-manager installs, etc.) instead of just telling the user what command they should run themselves. If a build/run approach genuinely can't work on this machine (wrong OS/platform, a required toolchain is missing and can't sensibly be installed), don't just repeat the same doomed steps or narrate a plan you can't execute — say clearly why it won't work, and then actively look for a way that does. Use web_search if you're not sure how to get something done, what the right command/approach is, or where to get a file.
 {"- This machine can run Windows .exe files via Wine/Proton — check_command for `wine`, and also look for Steam Proton installs (e.g. under ~/.local/share/Steam/steamapps/common/Proton* and ~/.local/share/Steam/compatibilitytools.d/) or Lutris (`lutris`), which are the ways to run a Windows executable here. If someone asks you to \"install\"/\"run\" a Windows program on this machine, that's your path — not `dotnet build`/MSBuild, which only work for source that's actually buildable on Linux." if HOST_ENV["system"] == "Linux" else ""}
@@ -2706,7 +2691,7 @@ Before attempting to build or run something, check whether the tools it needs ac
 Getting the user's actual goal done is the priority — explaining why the first approach you thought of doesn't work is a step along the way, not the finish line."""
 
 
-def _clip_for_model(text: str, limit: int = 2000) -> str:
+def _clip_for_model(text: str, limit: int = 8000) -> str:
     """Truncate with an explicit marker. A silent cut makes the model (and
     the user) believe it saw the whole result — which then surfaces as the
     agent confidently acting on half a file or half a log."""
@@ -2715,7 +2700,7 @@ def _clip_for_model(text: str, limit: int = 2000) -> str:
     return text[:limit] + f"\n...[truncated at {limit} characters — ask for a specific range if you need more]"
 
 
-async def _agent_turns(model: str, conv: list, max_turns: int = 20, system: str = ""):
+async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str = ""):
     """Runs the tool-use agent loop, yielding structured event dicts. Shared by
     the interactive /api/agent endpoint (streamed to the browser) and scheduled
     routine execution (collected into a final result) below. `conv` is mutated
