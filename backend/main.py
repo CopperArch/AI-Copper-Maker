@@ -3143,7 +3143,7 @@ Include:
 - Any required API service files
 - README.md with setup instructions
 - A small, visible "Powered by AI Copper Maker" credit with the link
-  https://github.com/DgBrown21/AI-Copper-Maker somewhere sensible in the app's UI
+  https://github.com/CopperArch/AI-Copper-Maker somewhere sensible in the app's UI
   (e.g. a Settings or About screen footer) — not intrusive, just present.
 
 Write production-quality code, not demos."""
@@ -3287,7 +3287,7 @@ async def save_project(req: SaveProjectRequest):
     # guarantee it complied) — so always guarantee it in the README too,
     # regardless of what the model actually produced.
     ATTRIBUTION = (
-        "\n\n---\n\nBuilt with [AI Copper Maker](https://github.com/DgBrown21/AI-Copper-Maker) "
+        "\n\n---\n\nBuilt with [AI Copper Maker](https://github.com/CopperArch/AI-Copper-Maker) "
         "— a local, self-hosted AI coding studio.\n"
     )
     readme_rel = next((p for p in saved if Path(p).name.lower() == "readme.md"), None)
