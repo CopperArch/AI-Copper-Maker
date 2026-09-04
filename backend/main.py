@@ -538,6 +538,7 @@ async def run_project(req: ProjectRunRequest):
             return
 
         is_flutter = req.platform == "flutter"
+        is_desktop = req.platform == "desktop"
         install_cmd = ["flutter", "pub", "get"] if is_flutter else ["npm", "install"]
         runtime_needed = "flutter" if is_flutter else "npm"
         if shutil.which(runtime_needed) is None:
@@ -582,7 +583,7 @@ async def run_project(req: ProjectRunRequest):
             state["status"] = "error"
             return
 
-        if not is_flutter:
+        if not is_flutter and not is_desktop:
             # Guaranteed regardless of what the model's package.json declared
             # — confirmed live, one at a time: `expo start --web` refuses to
             # start at all without each of these, and generated projects
@@ -614,6 +615,40 @@ async def run_project(req: ProjectRunRequest):
                     await asyncio.wait_for(web_deps_proc.wait(), timeout=120)
                 except asyncio.TimeoutError:
                     web_deps_proc.kill()
+
+        if is_desktop:
+            # Electron apps run as a real desktop window, not a browser URL.
+            # CI=1 keeps npm tooling non-interactive; ELECTRON_OZONE_PLATFORM_HINT
+            # lets Electron pick Wayland or X11 correctly on Wayland sessions.
+            yield json.dumps({"type": "status", "status": "starting"}) + "\n"
+            server_proc = await asyncio.create_subprocess_exec(
+                *_win_exec_args(["npx", "--yes", "electron", "."]),
+                cwd=str(project_dir),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+                env={**os.environ, "CI": "1", "ELECTRON_OZONE_PLATFORM_HINT": "auto"},
+            )
+            state["process"] = server_proc
+            try:
+                server_proc.stdin.close()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            # No URL line to look for — "ready" = still alive after a short
+            # grace period (electron exits immediately on a startup error,
+            # so survival is the signal).
+            await asyncio.sleep(8)
+            if server_proc.returncode is None:
+                state["status"] = "ready"
+                state["url"] = None
+                yield json.dumps({"type": "ready", "url": None, "desktop": True,
+                                  "run_id": run_id,
+                                  "text": "Desktop window launched on your screen.\n"}) + "\n"
+                asyncio.create_task(_drain_running_process(run_id))
+            else:
+                out, _ = await server_proc.communicate()
+                state["status"] = "error"
+                yield json.dumps({"type": "error", "text": "Desktop app exited during startup:\n" + out.decode(errors="replace")[:4000]}) + "\n"
+            return
 
         port = _find_free_port()
         # Ports picked explicitly rather than relying on each tool's own
@@ -3123,6 +3158,28 @@ Only add further packages beyond expo/react/react-native if a required
 feature actually needs one, and only packages you're confident really exist
 on npm — prefer something already bundled with Expo over inventing a new
 dependency you're not sure is real.
+"""
+
+    if req.platform == "desktop":
+        version_guidance = """
+This is a CROSS-PLATFORM DESKTOP app for Linux, Windows and macOS, built
+with Electron. Requirements:
+- package.json: "main": "main.js", scripts: {"start": "electron ."},
+  devDependencies: {"electron": "latest"} — use "latest" for electron so
+  npm resolves a real current version at install time (an invented old
+  pin can miss published builds; the auto-repair loop will catch strays).
+- main.js: app/BrowserWindow (1200x800, webPreferences: contextIsolation
+  true, preload: path.join(__dirname, "preload.js")), app.whenReady(),
+  proper window-all-closed/activate handling for all three OSes.
+- preload.js: minimal contextBridge surface the app needs (no nodeIntegration
+  in the renderer).
+- index.html + assets/ + renderer JS/CSS: the whole app UI as plain HTML/JS
+  (no build step — everything loaded locally, no CDN dependency).
+- README.md: run instructions for all three OSes (identical: npm install &&
+  npx electron .), plus optional packaging notes (electron-builder →
+  .AppImage/.deb on Linux, NSIS .exe on Windows, .dmg on macOS) WITHOUT
+  adding electron-builder to package.json.
+No server, no network requirement — everything works offline after install.
 """
 
     prompt = f"""Generate a complete, ready-to-run {req.platform} project for: {req.app_name}

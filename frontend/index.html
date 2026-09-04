@@ -931,6 +931,9 @@
                 <option value="flutter">Flutter</option>
                 <option value="react-native-cli">React Native CLI</option>
               </optgroup>
+              <optgroup label="🖥️ Desktop (Linux / Windows / macOS)">
+                <option value="desktop">Cross-Platform Desktop App (Electron)</option>
+              </optgroup>
             </select>
           </div>
           <div class="field">
@@ -3890,12 +3893,20 @@ async function startProjectRun(projectDir, platform, appName) {
           log.textContent += data.text;
           log.scrollTop = log.scrollHeight;
         } else if (data.type === 'ready') {
-          status.textContent = '✓ Running';
           status.style.color = 'var(--accent)';
-          openLink.href = data.url;
-          openLink.style.display = '';
-          iframe.src = data.url;
-          iframe.style.display = 'block';
+          if (data.desktop) {
+            status.textContent = '✓ Running — the desktop window is open on your screen';
+            openLink.style.display = 'none';
+            iframe.style.display = 'none';
+          } else if (data.url) {
+            status.textContent = '✓ Running';
+            openLink.href = data.url;
+            openLink.style.display = '';
+            iframe.src = data.url;
+            iframe.style.display = 'block';
+          } else {
+            status.textContent = '✓ Running';
+          }
           currentProjectRunId = data.run_id;
           stopBtn.disabled = false;
         } else if (data.type === 'error') {
