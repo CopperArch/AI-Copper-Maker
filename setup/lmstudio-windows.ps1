@@ -41,8 +41,8 @@ $action = New-ScheduledTaskAction -Execute "powershell.exe" `
 $trigger = New-ScheduledTaskTrigger -AtLogOn
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
 
-Register-ScheduledTask -TaskName "LLM-CODER LM Studio (llmster)" `
+Register-ScheduledTask -TaskName "AI-Copper-Maker LM Studio (llmster)" `
     -Action $action -Trigger $trigger -Settings $settings -Force
 
 Write-Host "Scheduled Task registered — llmster will now start automatically at logon."
-Write-Host "Verify manually with: Start-ScheduledTask -TaskName 'LLM-CODER LM Studio (llmster)'"
+Write-Host "Verify manually with: Start-ScheduledTask -TaskName 'AI-Copper-Maker LM Studio (llmster)'"

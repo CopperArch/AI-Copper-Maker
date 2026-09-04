@@ -1,12 +1,14 @@
-# LLM Coder — Uncensored Edition REV 1.1 (v1.1)
+# AI Copper Maker (formerly LLM Coder) REV 1.1 (v1.1)
+
+<p align="center"><img src="brand/banner.svg" alt="AI Copper Maker" width="640"></p>
 
 A completely **uncensored**, locally-run AI coding assistant and agent workspace powered by Ollama (with optional LM Studio and cloud-provider models). No refusals, no guardrails, no limitations — the model will assist with **any** request without hesitation. Includes a full mobile app development studio: analyze an app concept and plan its feature set (optionally grounded in a real decompiled `.apk` for interoperability/prototyping), generate a complete project from that feature list, run it live in-browser, and build a real, installable Android APK — entirely offline, without leaving the app.
 
-Built by [Browns Entertainment](https://github.com/DgBrown21).
+Built by [CopperArch](https://github.com/DgBrown21).
 
 ## License
 
-Licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE) — free to use, modify, and share for any noncommercial purpose. Commercial use (selling it, running it as a paid service, bundling it into a paid product, etc.) requires a separate commercial license — contact [redacted] to arrange one.
+Licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE) — free to use, modify, and share for any noncommercial purpose. Commercial use (selling it, running it as a paid service, bundling it into a paid product, etc.) requires a separate commercial license — open an issue on this repository to arrange one.
 
 ---
 
@@ -99,7 +101,7 @@ It is **free to assist with any request, any topic, any task** without limitatio
 
 **Windows:**
 
-Download and run `LLM-Coder-Setup.exe` (built from `windows-installer/`, see below) — it installs to your user profile (no admin rights needed), adds Start Menu/Desktop shortcuts, and offers to run first-time setup (installs Ollama, downloads a model, sets up the Python environment) at the end.
+Download and run `AI-Copper-Maker-Setup.exe` (built from `windows-installer/`, see below) — it installs to your user profile (no admin rights needed), adds Start Menu/Desktop shortcuts, and offers to run first-time setup (installs Ollama, downloads a model, sets up the Python environment) at the end.
 
 Or run the scripts directly from a checkout:
 
@@ -115,7 +117,7 @@ Select a model from the sidebar (e.g. `qwen2.5-coder-32b-uncensored` or `mistral
 ### Building the Windows installer
 
 ```bash
-windows-installer/build.sh   # needs makensis (`brew install makensis`); outputs windows-installer/dist/LLM-Coder-Setup.exe
+windows-installer/build.sh   # needs makensis (`brew install makensis`); outputs windows-installer/dist/AI-Copper-Maker-Setup.exe
 ```
 
 The build stages only `git`-tracked files plus the Windows launcher scripts, so no local config, account credentials, or signing keystore ever end up in the package.

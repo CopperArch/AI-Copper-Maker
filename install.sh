@@ -31,7 +31,7 @@ cat <<'EOF'
   ██║     ██║     ██║╚██╔╝██║    ██║     ██║   ██║██║  ██║██╔══╝  ██╔══██╗
   ███████╗███████╗██║ ╚═╝ ██║    ╚██████╗╚██████╔╝██████╔╝███████╗██║  ██║
   ╚══════╝╚══════╝╚═╝     ╚═╝     ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝
-  LLM Coder — Uncensored Edition REV 1.1
+  AI Copper Maker — Uncensored Edition REV 1.1
 EOF
 echo -e "${NC}"
 
@@ -66,7 +66,7 @@ if [ -n "$DOCKER_CMD" ]; then
         }
         echo ""
         echo -e "${GREEN}╔══════════════════════════════════════════════════════╗${NC}"
-        echo -e "${GREEN}║  LLM Coder — Uncensored Edition v0.1.1             ║${NC}"
+        echo -e "${GREEN}║  AI Copper Maker — Uncensored Edition v0.1.1             ║${NC}"
         echo -e "${GREEN}║  Running in Docker!                                 ║${NC}"
         echo -e "${GREEN}║  Open http://localhost:8081                         ║${NC}"
         echo -e "${GREEN}╚══════════════════════════════════════════════════════╝${NC}"
@@ -258,7 +258,7 @@ success "Python dependencies installed"
 # survives logout/login and Routines actually fire on schedule instead of only
 # while a terminal happens to be open.
 echo ""
-read -rp "Install LLM Coder as a systemd user service (auto-start, keeps Routines running)? [y/N]: " install_service
+read -rp "Install AI Copper Maker as a systemd user service (auto-start, keeps Routines running)? [y/N]: " install_service
 if [[ "$install_service" =~ ^[Yy]$ ]]; then
     SERVICE_DIR="$HOME/.config/systemd/user"
     mkdir -p "$SERVICE_DIR"
@@ -292,7 +292,7 @@ fi
 # ── 6. Done ────────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${GREEN}╔══════════════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║  LLM Coder — Uncensored Edition REV 1.1            ║${NC}"
+echo -e "${GREEN}║  AI Copper Maker — Uncensored Edition REV 1.1            ║${NC}"
 echo -e "${GREEN}║  Installation complete!                             ║${NC}"
 echo -e "${GREEN}║  Run: ./launch.sh (or the systemd service, if set up)║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════════════╝${NC}"

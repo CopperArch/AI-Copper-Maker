@@ -1,4 +1,4 @@
-; LLM Coder — Uncensored Edition — Windows installer.
+; AI Copper Maker — Windows installer.
 ;
 ; Built with NSIS (makensis). Not a self-contained app bundle: it copies the
 ; app's source (Python backend + HTML/JS frontend) into a per-user install
@@ -26,8 +26,8 @@
 
 !include "MUI2.nsh"
 
-Name "LLM Coder — Uncensored Edition"
-OutFile "dist\LLM-Coder-Setup.exe"
+Name "AI Copper Maker"
+OutFile "dist\AI-Copper-Maker-Setup.exe"
 Unicode true
 
 ; Per-user install under %LOCALAPPDATA% — no admin rights needed to install
@@ -36,14 +36,14 @@ Unicode true
 ; by the current user without elevation, the same way the Linux/macOS
 ; install (a plain user-owned checkout) works.
 RequestExecutionLevel user
-InstallDir "$LOCALAPPDATA\Programs\LLM-Coder"
+InstallDir "$LOCALAPPDATA\Programs\AI-Copper-Maker"
 InstallDirRegKey HKCU "Software\LLM-Coder" "InstallDir"
 
 VIProductVersion "${APP_VERSION}.0"
 VIAddVersionKey "ProductName" "LLM Coder — Uncensored Edition"
 VIAddVersionKey "FileVersion" "${APP_VERSION}.0"
 VIAddVersionKey "ProductVersion" "${APP_VERSION}.0"
-VIAddVersionKey "LegalCopyright" "Browns Entertainment"
+VIAddVersionKey "LegalCopyright" "CopperArch"
 VIAddVersionKey "FileDescription" "LLM Coder installer"
 
 !define MUI_ABORTWARNING

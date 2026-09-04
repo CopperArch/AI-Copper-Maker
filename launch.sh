@@ -63,14 +63,16 @@ pkill -f "uvicorn main:app" 2>/dev/null && sleep 1
 # Activate Python venv and start backend
 cd "$SCRIPT_DIR/backend"
 source venv/bin/activate
-echo "Starting LLM Coder backend on http://localhost:8081"
+echo "Starting AI Copper Maker backend on http://localhost:8081"
 # Bound to localhost only — this app has no login/auth of its own, and it
 # exposes full home-directory read/write plus arbitrary code execution
 # (/api/execute, /api/files/write, run_command). 0.0.0.0 would put all of
 # that on the LAN with zero authentication, reachable from any other device
 # on the same network. Change back to 0.0.0.0 only if you specifically want
 # LAN access (e.g. from your phone) and understand that tradeoff.
-uvicorn main:app --host 127.0.0.1 --port 8081 --reload &
+# No --reload: this is the product launcher, not a dev loop — the file watcher
+# adds overhead and surprises a running session with spontaneous restarts.
+uvicorn main:app --host 127.0.0.1 --port 8081 &
 BACKEND_PID=$!
 
 # Wait for backend to start then open browser
@@ -81,7 +83,7 @@ fi
 
 echo ""
 echo "╔══════════════════════════════════════════════════════╗"
-echo "║  LLM Coder — Uncensored Edition REV 1.1             ║"
+echo "║  AI Copper Maker — Uncensored Edition REV 1.1        ║"
 echo "║  Running at http://localhost:8081                    ║"
 echo "║  Chat · Agent · Email · Calendar · Skills · Routines ║"
 echo "║  Search (web + semantic) · Files · Code Run · Backup ║"

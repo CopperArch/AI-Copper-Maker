@@ -32,7 +32,6 @@ from androguard.misc import AnalyzeAPK
 from loguru import logger as _apk_logger
 _apk_logger.remove()
 from fastapi import FastAPI, HTTPException, Request, Query
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse, Response, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -65,14 +64,15 @@ async def lifespan(app: FastAPI):
         if proc and proc.returncode is None:
             proc.kill()
 
-app = FastAPI(title="LLM Coder - Uncensored Edition", lifespan=lifespan)
+app = FastAPI(title="AI Copper Maker", lifespan=lifespan)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# No CORS middleware, deliberately: the frontend is served from this same
+# origin so it doesn't need one, and this API has no authentication of its
+# own while it can read/write files, execute code, and read mail. With
+# allow_origins=["*"], any webpage you visit could drive all of it
+# cross-origin from the browser. Same-origin requests need no CORS headers;
+# everything else is denied by the browser by default — which is what we
+# want here.
 
 OLLAMA = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 LMSTUDIO = os.environ.get("LMSTUDIO_HOST", "http://localhost:1234")
@@ -384,7 +384,12 @@ async def execute_code(req: ExecuteRequest):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=tmp,
-                env={"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")},
+                # Deliberately minimal env (it's the sandbox), but without
+                # HOME/TMPDIR, Python's TLS verification fails oddly (no
+                # cert paths) and tempfile resolution degrades.
+                env={"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+                     "HOME": os.environ.get("HOME", str(Path.home())),
+                     "TMPDIR": tempfile.gettempdir()},
             )
 
             async def pipe_lines(stream, label):
@@ -506,8 +511,19 @@ async def run_project(req: ProjectRunRequest):
     if not project_dir.exists():
         raise HTTPException(404, "Project directory not found — save the project to disk first")
 
+    # Sweep runs that ended (errored, or process died) over an hour ago —
+    # errored runs without an explicit Stop were never removed, so this dict
+    # grew without bound across a long session.
+    now = time.time()
+    for stale in [k for k, v in RUNNING_PROJECT_RUNS.items()
+                  if v.get("started_at", 0) and now - v["started_at"] > 3600
+                  and (v.get("status") == "error" or not v.get("process")
+                       or v["process"].returncode is not None)]:
+        RUNNING_PROJECT_RUNS.pop(stale, None)
+
     run_id = uuid.uuid4().hex
-    RUNNING_PROJECT_RUNS[run_id] = {"status": "installing", "process": None, "url": None}
+    RUNNING_PROJECT_RUNS[run_id] = {"status": "installing", "process": None, "url": None,
+                                    "started_at": time.time()}
     state = RUNNING_PROJECT_RUNS[run_id]
 
     async def stream():
@@ -726,16 +742,28 @@ async def build_apk(req: BuildApkRequest):
 
         yield json.dumps({"type": "status", "status": "building"}) + "\n"
         try:
+            # stdout stays pure JSON in --json mode; stderr (warnings,
+            # progress) is drained separately and shown after — merging the
+            # two made full_output.index("[") grab the first "[" in any
+            # warning line, breaking the URL parse on successful builds.
             proc = await asyncio.create_subprocess_exec(
                 *_win_exec_args(["npx", "--yes", "eas-cli", "build", "-p", "android", "-e", "preview",
                 "--non-interactive", "--wait", "--json"]),
                 cwd=str(project_dir), env=env,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
             output_lines = []
+            stderr_lines = []
+            async def _drain_stderr():
+                async for line in _iter_lines(proc.stderr):
+                    stderr_lines.append(line)
+            err_task = asyncio.create_task(_drain_stderr())
             async for line in _iter_lines(proc.stdout):
                 output_lines.append(line)
                 yield json.dumps({"type": "log", "text": line}) + "\n"
+            await err_task
+            for line in stderr_lines:
+                yield json.dumps({"type": "log", "text": "[stderr] " + line}) + "\n"
             code = await asyncio.wait_for(proc.wait(), timeout=1800)
         except asyncio.TimeoutError:
             proc.kill()
@@ -746,12 +774,16 @@ async def build_apk(req: BuildApkRequest):
             yield json.dumps({"type": "error", "text": f"Build failed (exit code {code}).\n"}) + "\n"
             return
 
-        full_output = "".join(output_lines)
+        # --json emits a single JSON array as the LAST thing on stdout —
+        # find the last line that starts a top-level array rather than the
+        # first "[" anywhere.
         try:
-            start = full_output.index("[")
-            build_info = json.loads(full_output[start:])
-            apk_url = build_info[0]["artifacts"]["buildUrl"]
-        except (ValueError, KeyError, IndexError, json.JSONDecodeError):
+            arr_start = next(i for i in range(len(output_lines) - 1, -1, -1)
+                             if output_lines[i].lstrip().startswith("["))
+            build_info = json.loads("".join(output_lines[arr_start:]))
+            entry = build_info[0] if isinstance(build_info, list) else build_info
+            apk_url = entry["artifacts"]["buildUrl"]
+        except (StopIteration, ValueError, KeyError, IndexError, json.JSONDecodeError, TypeError):
             yield json.dumps({"type": "error", "text": "Build finished but the download URL couldn't be found in EAS's output — check the log above, or run `npx eas-cli build:list` in the project folder to find it manually.\n"}) + "\n"
             return
 
@@ -852,7 +884,7 @@ def _ensure_release_keystore(java_home: str | None) -> tuple[str, str, str, str]
             "-keystore", str(RELEASE_KEYSTORE_PATH),
             "-alias", RELEASE_KEYSTORE_ALIAS, "-keyalg", "RSA", "-keysize", "2048", "-validity", "10000",
             "-storepass", RELEASE_KEYSTORE_PASSWORD, "-keypass", RELEASE_KEYSTORE_PASSWORD,
-            "-dname", "CN=LLM Coder Local Build",
+            "-dname", "CN=AI Copper Maker Local Build",
         ], check=True, capture_output=True)
     return str(RELEASE_KEYSTORE_PATH), RELEASE_KEYSTORE_PASSWORD, RELEASE_KEYSTORE_ALIAS, RELEASE_KEYSTORE_PASSWORD
 
@@ -979,12 +1011,39 @@ async def build_apk_local(req: BuildApkLocalRequest):
 
 @app.get("/api/system/ram")
 async def system_ram():
+    # This ships as a Windows app too — a bare open("/proc/meminfo") would
+    # 500 this endpoint (and the RAM badge in the frontend) there.
+    if platform.system() == "Windows":
+        import ctypes
+
+        class _MemStatus(ctypes.Structure):
+            _fields_ = [("dwLength", ctypes.c_ulong),
+                        ("dwMemoryLoad", ctypes.c_ulong),
+                        ("ullTotalPhys", ctypes.c_ulonglong),
+                        ("ullAvailPhys", ctypes.c_ulonglong),
+                        ("ullTotalPageFile", ctypes.c_ulonglong),
+                        ("ullAvailPageFile", ctypes.c_ulonglong),
+                        ("ullTotalVirtual", ctypes.c_ulonglong),
+                        ("ullAvailVirtual", ctypes.c_ulonglong),
+                        ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+
+        stat = _MemStatus()
+        stat.dwLength = ctypes.sizeof(_MemStatus)
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+            return {"available_gb": None, "total_gb": None, "error": "memory status unavailable"}
+        return {
+            "available_gb": round(stat.ullAvailPhys / 1e9, 1),
+            "total_gb": round(stat.ullTotalPhys / 1e9, 1),
+        }
     info = {}
-    with open("/proc/meminfo") as f:
-        for line in f:
-            parts = line.split(":")
-            if len(parts) == 2:
-                info[parts[0].strip()] = int(parts[1].strip().split()[0])
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                parts = line.split(":")
+                if len(parts) == 2:
+                    info[parts[0].strip()] = int(parts[1].strip().split()[0])
+    except OSError:
+        return {"available_gb": None, "total_gb": None, "error": "memory info unavailable on this platform"}
     return {
         "available_gb": round(info.get("MemAvailable", 0) / 1024 / 1024, 1),
         "total_gb": round(info.get("MemTotal", 0) / 1024 / 1024, 1),
@@ -1149,9 +1208,15 @@ async def generate_image(req: ImageGenRequest):
         async with httpx.AsyncClient(timeout=5) as client:
             try:
                 r = await client.get(f"{OLLAMA}/api/tags")
-                models = [m["name"] for m in r.json().get("models", [])
-                         if any(kw in m["name"].lower() for kw in ["llava", "minicpm", "moondream", "vision"])]
-                model = models[0] if models else ""
+                # Prefer models that actually generate images; vision-
+                # describers (llava/minicpm/moondream) are a fallback — with
+                # those, "generate" returns a text description, not an image.
+                names = [m["name"] for m in r.json().get("models", [])]
+                gen = [x for x in names if any(k in x.lower() for k in
+                        ["flux", "sdxl", "stable-diffusion", "stablediffusion", "imagine"])]
+                vision = [x for x in names if any(k in x.lower() for k in
+                        ["llava", "minicpm", "moondream", "vision"])]
+                model = (gen or vision or [""])[0]
             except Exception:
                 model = ""
 
@@ -1723,6 +1788,14 @@ async def execute_tool(name: str, args: dict) -> str:
     try:
         if name == "execute_code":
             req = ExecuteRequest(**args)
+            # Same screening the /api/execute endpoint applies — one policy
+            # point for both paths, so the agent tool can't quietly bypass it.
+            # If a task genuinely needs one of these, run_command exists (and
+            # sudo-bearing run_commands still hit the human password gate).
+            for pat in BLOCKED_PATTERNS:
+                if pat in req.code:
+                    return (f"Blocked dangerous pattern in execute_code: '{pat}'. "
+                            "Use run_command if this is genuinely required.")
             tmp = tempfile.mkdtemp(prefix="tool-exec-")
             try:
                 cmd = {"javascript": "node", "python": _python_cmd()}.get(req.language, "node")
@@ -1781,7 +1854,15 @@ async def execute_tool(name: str, args: dict) -> str:
                 return "Error: Access denied"
             if not target.is_file():
                 return f"File not found: {req.path}"
-            return target.read_text(encoding="utf-8", errors="replace")
+            content = target.read_text(encoding="utf-8", errors="replace")
+            # Whole-home read reach means this can be a multi-gigabyte file —
+            # cap it rather than blowing up the model's context (and the
+            # conversation store), with a marker so the model knows.
+            if len(content) > 100_000:
+                content = (content[:100_000]
+                           + "\n...[truncated: file is larger than 100000 characters — "
+                             "search or read specific sections instead of assuming you saw all of it]")
+            return content
 
         elif name == "write_file":
             req = FileWriteRequest(**args)
@@ -1814,9 +1895,14 @@ async def execute_tool(name: str, args: dict) -> str:
             async with httpx.AsyncClient(timeout=5) as client:
                 try:
                     r = await client.get(f"{OLLAMA}/api/tags")
-                    models = [m["name"] for m in r.json().get("models", [])
-                             if any(kw in m["name"].lower() for kw in ["llava", "minicpm", "moondream", "vision"])]
-                    model = models[0] if models else ""
+                    # Same preference as /api/generate-image: generation-
+                    # capable models first, vision-describers as fallback.
+                    names = [m["name"] for m in r.json().get("models", [])]
+                    gen = [x for x in names if any(k in x.lower() for k in
+                            ["flux", "sdxl", "stable-diffusion", "stablediffusion", "imagine"])]
+                    vision = [x for x in names if any(k in x.lower() for k in
+                            ["llava", "minicpm", "moondream", "vision"])]
+                    model = (gen or vision or [""])[0]
                 except Exception:
                     model = ""
             if not model:
@@ -2585,6 +2671,15 @@ Before attempting to build or run something, check whether the tools it needs ac
 Getting the user's actual goal done is the priority — explaining why the first approach you thought of doesn't work is a step along the way, not the finish line."""
 
 
+def _clip_for_model(text: str, limit: int = 2000) -> str:
+    """Truncate with an explicit marker. A silent cut makes the model (and
+    the user) believe it saw the whole result — which then surfaces as the
+    agent confidently acting on half a file or half a log."""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"\n...[truncated at {limit} characters — ask for a specific range if you need more]"
+
+
 async def _agent_turns(model: str, conv: list, max_turns: int = 20, system: str = ""):
     """Runs the tool-use agent loop, yielding structured event dicts. Shared by
     the interactive /api/agent endpoint (streamed to the browser) and scheduled
@@ -2651,7 +2746,13 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 20, system: str 
 
         yield {"type": "tool_call", "name": tool_name, "arguments": tool_args}
 
-        if tool_name == "run_command" and re.match(r'^\s*sudo\s+', tool_args.get("command", "")):
+        # Any sudo ANYWHERE in the line goes through the human gate, not just
+        # commands that start with it — `sh -c 'id; sudo dnf …'` would
+        # otherwise skip the password prompt entirely and reach a (possibly
+        # NOPASSWD) sudo with no human in the loop. Over-triggering on the
+        # word "sudo" appearing in some echoed string is fine: the worst case
+        # is an unnecessary prompt, which is the safe direction to err.
+        if tool_name == "run_command" and re.search(r'\bsudo\b', tool_args.get("command", "")):
             # Root needs a human. Pause here — yield a request id the browser
             # turns into a password prompt, then block (with a timeout) on the
             # future that /api/sudo/{id} resolves. The stream just goes quiet
@@ -2682,7 +2783,7 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 20, system: str 
                 password = None  # drop the reference now that we're done with it
         else:
             result = await execute_tool(tool_name, tool_args)
-        yield {"type": "tool_result", "name": tool_name, "result": result[:2000]}
+        yield {"type": "tool_result", "name": tool_name, "result": _clip_for_model(result)}
 
         # Truncate to just the matched call — a weaker model sometimes crams a
         # second, unexecuted tool call onto the end of the same response; only
@@ -2690,7 +2791,7 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 20, system: str 
         # the model will "see" its own unexecuted call in history next turn
         # and fabricate a result for it instead of actually issuing it.
         conv.append({"role": "assistant", "content": response_text[:cut_at]})
-        conv.append({"role": "tool", "content": f"Result of {tool_name}: {result[:2000]}"})
+        conv.append({"role": "tool", "content": f"Result of {tool_name}: {_clip_for_model(result)}"})
 
     # Fell through every turn without the model ever giving a plain (no
     # tool-call) response — max_turns is exhausted. response_text here is
@@ -3041,8 +3142,8 @@ Include:
 - Navigation setup
 - Any required API service files
 - README.md with setup instructions
-- A small, visible "Powered by LLM CODER" credit with the link
-  https://github.com/DgBrown21/LLM-CODER somewhere sensible in the app's UI
+- A small, visible "Powered by AI Copper Maker" credit with the link
+  https://github.com/DgBrown21/AI-Copper-Maker somewhere sensible in the app's UI
   (e.g. a Settings or About screen footer) — not intrusive, just present.
 
 Write production-quality code, not demos."""
@@ -3107,9 +3208,21 @@ async def set_config(cfg: dict):
 @app.post("/api/save-project")
 async def save_project(req: SaveProjectRequest):
     cfg = load_config()
-    base = Path(req.save_dir or cfg.get("save_dir", DEFAULT_SAVE_DIR)).expanduser().resolve()
+    configured = Path(cfg.get("save_dir", DEFAULT_SAVE_DIR)).expanduser().resolve()
+    base = Path(req.save_dir or str(configured)).expanduser().resolve()
+    # The request's save_dir must be at (or inside) the configured workspace.
+    # An unvalidated client-chosen root would let any local process — or any
+    # webpage, since this API serves the browser — write arbitrary files
+    # anywhere the user can write (~/.bashrc, systemd user units, etc.).
+    if not base.is_relative_to(configured):
+        raise HTTPException(403, "Save directory must be the configured workspace (or inside it)")
 
     folder_name = re.sub(r'[^\w\s-]', '', req.app_name).strip().replace(' ', '-')
+    if not folder_name:
+        # An empty app name sanitizes to "" and project_dir collapses to the
+        # workspace root itself — every "project file" would then be written
+        # straight into the save dir's top level.
+        raise HTTPException(422, "App name is empty — refusing to write into the workspace root")
     project_dir = (base / folder_name).resolve()
 
     file_pattern = re.compile(
@@ -3157,21 +3270,25 @@ async def save_project(req: SaveProjectRequest):
         raise HTTPException(status_code=422, detail="No parseable file blocks found in output")
 
     saved = []
+    refused = []
     for rel_path, content in matches:
         target = (project_dir / rel_path.strip()).resolve()
         if not target.is_relative_to(project_dir):
+            # say so rather than dropping it silently — a "successful" save
+            # that quietly skipped files is worse than an honest refusal.
+            refused.append(rel_path.strip())
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content.strip() + "\n")
         saved.append(str(target.relative_to(project_dir)))
 
-    # The prompt asks the model to credit LLM CODER somewhere in the app's own
+    # The prompt asks the model to credit AI Copper Maker somewhere in the app's own
     # UI, but that's only ever best-effort (freeform generated code, no
     # guarantee it complied) — so always guarantee it in the README too,
     # regardless of what the model actually produced.
     ATTRIBUTION = (
-        "\n\n---\n\nBuilt with [LLM CODER](https://github.com/DgBrown21/LLM-CODER) "
-        "— a local, self-hosted AI coding assistant.\n"
+        "\n\n---\n\nBuilt with [AI Copper Maker](https://github.com/DgBrown21/AI-Copper-Maker) "
+        "— a local, self-hosted AI coding studio.\n"
     )
     readme_rel = next((p for p in saved if Path(p).name.lower() == "readme.md"), None)
     if readme_rel:
@@ -3182,7 +3299,8 @@ async def save_project(req: SaveProjectRequest):
         readme_path.write_text(f"# {req.app_name}\n{ATTRIBUTION}")
         saved.append("README.md")
 
-    return {"saved": saved, "project_dir": str(project_dir), "file_count": len(saved)}
+    return {"saved": saved, "project_dir": str(project_dir), "file_count": len(saved),
+            "refused": refused}
 
 
 # ── Load Saved Project (Generate Project's "Load" button) ──────────────────────
@@ -3337,6 +3455,15 @@ GOOGLE_OAUTH_SCOPES = " ".join([
 _OAUTH_STATE: dict[str, dict] = {}      # state token -> {created}, CSRF guard for /login -> /callback
 _OAUTH_PENDING: dict[str, dict] = {}    # pending id -> discovered account, awaiting user confirmation
 
+def _sweep_oauth_temp(max_age: int = 900):
+    """Drop states/pending sign-ins older than max_age so abandoned flows
+    can't accumulate forever — nothing else ever expires them."""
+    cutoff = time.time() - max_age
+    for k in [k for k, v in _OAUTH_STATE.items() if v.get("created", 0) < cutoff]:
+        _OAUTH_STATE.pop(k, None)
+    for k in [k for k, v in _OAUTH_PENDING.items() if v.get("created", 0) < cutoff]:
+        _OAUTH_PENDING.pop(k, None)
+
 def _load_google_oauth() -> dict:
     if GOOGLE_OAUTH_FILE.exists():
         try:
@@ -3385,6 +3512,7 @@ async def google_oauth_login(request: Request):
         # own pre-check) would otherwise strand the user on a raw JSON error
         # page with no way back in, unlike every other error path in this app.
         return RedirectResponse("/?google_oauth_error=not_configured")
+    _sweep_oauth_temp()
     state = uuid.uuid4().hex
     _OAUTH_STATE[state] = {"created": time.time()}
     params = {
@@ -3441,6 +3569,7 @@ async def google_oauth_callback(request: Request, code: str = "", state: str = "
 
 @app.get("/api/oauth/google/pending/{pending_id}")
 async def google_oauth_pending(pending_id: str):
+    _sweep_oauth_temp()
     p = _OAUTH_PENDING.get(pending_id)
     if not p:
         raise HTTPException(404, "That sign-in has expired — try again.")
@@ -3600,7 +3729,7 @@ async def email_autoconfig(email: str):
     raise HTTPException(404, f"Couldn't auto-detect mail settings for {domain} — enter them manually.")
 
 CALENDAR_PROVIDERS = {
-    "google":    {"label": "Google Calendar",           "caldav_url": "", "caldav_supported": False, "note": "Google's CalDAV endpoint requires OAuth, not an app password — direct write-back isn't supported here. Subscribe to your LLM-CODER ICS feed URL instead (Google Calendar > Other calendars > From URL) — approved events show up there automatically."},
+    "google":    {"label": "Google Calendar",           "caldav_url": "", "caldav_supported": False, "note": "Google's CalDAV endpoint requires OAuth, not an app password — direct write-back isn't supported here. Subscribe to your AI Copper Maker ICS feed URL instead (Google Calendar > Other calendars > From URL) — approved events show up there automatically."},
     "icloud":    {"label": "iCloud Calendar",            "caldav_url": "https://caldav.icloud.com",          "caldav_supported": True,  "note": "Use an app-specific password from appleid.apple.com."},
     "fastmail":  {"label": "Fastmail",                   "caldav_url": "https://caldav.fastmail.com/dav/",   "caldav_supported": True,  "note": "Use an app password from Fastmail Settings."},
     "zoho":      {"label": "Zoho Calendar",              "caldav_url": "https://calendar.zoho.com/caldav/",  "caldav_supported": True,  "note": "Use an app-specific password."},
@@ -4100,7 +4229,7 @@ def _push_to_caldav(account: dict, event: dict):
     cal = calendars[0]
 
     ical = ICal()
-    ical.add("prodid", "-//LLM Coder//Uncensored Edition//EN")
+    ical.add("prodid", "-//AI Copper Maker//EN")
     ical.add("version", "2.0")
     vevent = ICalEvent()
     vevent.add("summary", event["title"])
@@ -4213,9 +4342,9 @@ async def calendar_feed(token: str = ""):
     from icalendar import Calendar as ICal, Event as ICalEvent
 
     ical = ICal()
-    ical.add("prodid", "-//LLM Coder//Uncensored Edition//EN")
+    ical.add("prodid", "-//AI Copper Maker//EN")
     ical.add("version", "2.0")
-    ical.add("x-wr-calname", "LLM Coder")
+    ical.add("x-wr-calname", "AI Copper Maker")
 
     for event in _load_json_list(CALENDAR_EVENTS_FILE):
         if event.get("status") != "approved":

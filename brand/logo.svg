@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-label="AI Copper Maker">
+  <defs>
+    <linearGradient id="copper" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#F3C99A"/>
+      <stop offset="45%" stop-color="#D98A4B"/>
+      <stop offset="100%" stop-color="#A85C28"/>
+    </linearGradient>
+    <linearGradient id="tile" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#241C16"/>
+      <stop offset="100%" stop-color="#171310"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="52" fill="url(#tile)" stroke="#A85C28" stroke-opacity="0.35" stroke-width="2"/>
+  <!-- the maker's C: a copper arc, open on the right -->
+  <path d="M176 74 A 66 66 0 1 0 176 182"
+        fill="none" stroke="url(#copper)" stroke-width="22" stroke-linecap="round"/>
+  <!-- what the C makes: three copper pixels trailing out of the opening -->
+  <rect x="182" y="120" width="20" height="20" rx="5" fill="url(#copper)"/>
+  <rect x="212" y="102" width="13" height="13" rx="3.5" fill="#D98A4B"/>
+  <rect x="214" y="136" width="9" height="9" rx="2.5" fill="#F3C99A"/>
+  <!-- the spark -->
+  <path d="M70 56 L76 72 L92 78 L76 84 L70 100 L64 84 L48 78 L64 72 Z" fill="#F3C99A" opacity="0.9"/>
+</svg>
