@@ -341,6 +341,11 @@ async def check_runtimes():
         (["node", "--version"], "node"),
         (["python3", "--version"], "python3"),
         ([ "python", "--version"], "python"),
+        (["gcc", "--version"], "gcc"),
+        (["g++", "--version"], "g++"),
+        (["rustc", "--version"], "rustc"),
+        (["go", "version"], "go"),
+        (["dotnet", "--version"], "dotnet"),
     ]:
         try:
             r = subprocess.run(cmds, capture_output=True, text=True, timeout=5)
@@ -350,66 +355,206 @@ async def check_runtimes():
             pass
     return {"runtimes": available}
 
+
+# A minimal SDK-style .csproj so `dotnet run --project <tmp>` builds+runs a
+# single Program.cs with no other setup — dotnet has no bare "run one file"
+# mode the way node/python do, so this is the smallest project that gets us
+# the same one-shot experience for C#.
+_CSPROJ_TEMPLATE = """<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+</Project>
+"""
+
+# Runs arbitrary SQL against a scratch in-memory SQLite database and prints
+# SELECT results as tab-separated rows — sqlite3 ships in the Python stdlib,
+# so "run some SQL" works with no extra system package regardless of platform.
+# sqlite3.complete_statement() (the same statement-splitting logic sqlite3's
+# own CLI uses) finds statement boundaries so multi-statement scripts with
+# semicolons inside string literals still split correctly.
+_SQL_HARNESS = """import sqlite3, sys
+sql = open(sys.argv[1]).read()
+conn = sqlite3.connect(":memory:")
+cur = conn.cursor()
+buf = ""
+had_error = False
+for line in sql.splitlines(keepends=True):
+    buf += line
+    if not sqlite3.complete_statement(buf):
+        continue
+    stmt, buf = buf.strip(), ""
+    if not stmt:
+        continue
+    try:
+        cur.execute(stmt)
+        if cur.description:
+            cols = [d[0] for d in cur.description]
+            print("\\t".join(cols))
+            for row in cur.fetchall():
+                print("\\t".join("" if v is None else str(v) for v in row))
+        else:
+            print(f"OK ({cur.rowcount} row(s) affected)" if cur.rowcount != -1 else "OK")
+    except sqlite3.Error as e:
+        print(f"SQL error: {e}", file=sys.stderr)
+        had_error = True
+conn.commit()
+sys.exit(1 if had_error else 0)
+"""
+
+
+def _lang_plan(language: str, tmp: str) -> dict | None:
+    """Maps a Code Runner / execute_code language to a concrete build+run
+    plan: the source filename to write `code` into, an optional compile argv
+    (None for languages that need no separate build step), the argv that
+    actually runs the program, and any extra scaffold files it needs
+    alongside the source (e.g. C#'s .csproj). Shared by the streaming
+    /api/execute endpoint and the agent's execute_code tool so compiled-
+    language handling only has to be right in one place. Returns None for an
+    unrecognized language."""
+    bin_path = os.path.join(tmp, "prog")
+    if language == "javascript":
+        f = os.path.join(tmp, "code.js")
+        return {"file": f, "compile": None, "run": ["node", f]}
+    if language == "python":
+        f = os.path.join(tmp, "code.py")
+        return {"file": f, "compile": None, "run": [_python_cmd(), f]}
+    if language == "c":
+        f = os.path.join(tmp, "code.c")
+        return {"file": f, "compile": ["gcc", f, "-O2", "-o", bin_path, "-lm"], "run": [bin_path]}
+    if language == "cpp":
+        f = os.path.join(tmp, "code.cpp")
+        return {"file": f, "compile": ["g++", f, "-O2", "-std=c++17", "-o", bin_path], "run": [bin_path]}
+    if language == "rust":
+        f = os.path.join(tmp, "code.rs")
+        return {"file": f, "compile": ["rustc", "-O", f, "-o", bin_path], "run": [bin_path]}
+    if language == "go":
+        f = os.path.join(tmp, "code.go")
+        return {"file": f, "compile": None, "run": ["go", "run", f]}
+    if language == "csharp":
+        f = os.path.join(tmp, "Program.cs")
+        return {
+            "file": f, "compile": None, "run": ["dotnet", "run", "--project", tmp,
+                                                 "--verbosity", "quiet"],
+            "extra_files": {os.path.join(tmp, "code.csproj"): _CSPROJ_TEMPLATE},
+        }
+    if language == "sql":
+        f = os.path.join(tmp, "code.sql")
+        harness = os.path.join(tmp, "_sql_harness.py")
+        return {
+            "file": f, "compile": None, "run": [_python_cmd(), harness, f],
+            "extra_files": {harness: _SQL_HARNESS},
+        }
+    return None
+
+
+async def _execute_code_stream(language: str, code: str, timeout: int = 30):
+    """Writes `code` per _lang_plan, compiles it if the language needs a
+    build step, then runs it — yielding (kind, text) tuples ("stdout",
+    "stderr", or "error") as output arrives, always ending with exactly one
+    ("exit", returncode). A missing compiler/runtime ends the same way the
+    old single-command version did: one "error" event naming the missing
+    command, then an exit."""
+    tmp = tempfile.mkdtemp(prefix="llm-coder-")
+    try:
+        plan = _lang_plan(language, tmp)
+        if plan is None:
+            yield ("error", f"Unsupported language: {language}\n")
+            yield ("exit", 1)
+            return
+
+        with open(plan["file"], "w") as fh:
+            fh.write(code)
+        for path, content in plan.get("extra_files", {}).items():
+            with open(path, "w") as fh:
+                fh.write(content)
+
+        run_env = {"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+                   "HOME": os.environ.get("HOME", str(Path.home())),
+                   "TMPDIR": tempfile.gettempdir()}
+
+        compile_argv = plan.get("compile")
+        if compile_argv:
+            if shutil.which(compile_argv[0]) is None:
+                yield ("error", f"Runtime '{compile_argv[0]}' not found on this system\n")
+                yield ("exit", 1)
+                return
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *compile_argv, stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE, cwd=tmp, env=run_env,
+                )
+                out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            except asyncio.TimeoutError:
+                proc.kill()
+                yield ("error", f"Compilation timed out ({timeout}s)\n")
+                yield ("exit", 1)
+                return
+            if out:
+                yield ("stdout", out.decode(errors="replace"))
+            if err:
+                yield ("stderr", err.decode(errors="replace"))
+            if proc.returncode != 0:
+                yield ("exit", proc.returncode)
+                return
+
+        run_argv = plan["run"]
+        if shutil.which(run_argv[0]) is None:
+            yield ("error", f"Runtime '{run_argv[0]}' not found on this system\n")
+            yield ("exit", 1)
+            return
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *run_argv, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE, cwd=tmp, env=run_env,
+            )
+        except FileNotFoundError:
+            yield ("error", f"Runtime '{run_argv[0]}' not found\n")
+            yield ("exit", 1)
+            return
+
+        async def pipe_lines(stream, label):
+            while True:
+                line = await stream.readline()
+                if not line:
+                    break
+                yield (label, line.decode(errors="replace"))
+
+        try:
+            async for item in pipe_lines(proc.stdout, "stdout"):
+                yield item
+            async for item in pipe_lines(proc.stderr, "stderr"):
+                yield item
+            await asyncio.wait_for(proc.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            yield ("error", f"Execution timed out ({timeout}s)\n")
+            return
+        yield ("exit", proc.returncode)
+    except Exception as e:
+        yield ("error", f"{e}\n")
+        yield ("exit", 1)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
 @app.post("/api/execute")
 async def execute_code(req: ExecuteRequest):
     code = req.code.strip()
     if not code:
         raise HTTPException(422, "No code provided")
 
-    cmd = {"javascript": "node", "python": _python_cmd()}.get(req.language, "node")
-    suffix = {"javascript": ".js", "python": ".py"}.get(req.language, ".js")
-
-    if shutil.which(cmd) is None:
-        raise HTTPException(400, f"Runtime '{cmd}' not found on this system")
-
     async def stream():
-        tmp = tempfile.mkdtemp(prefix="llm-coder-")
-        try:
-            filepath = os.path.join(tmp, f"code{suffix}")
-            with open(filepath, "w") as f:
-                f.write(code)
-
-            proc = await asyncio.create_subprocess_exec(
-                cmd, filepath,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=tmp,
-                # Deliberately minimal env (it's the sandbox), but without
-                # HOME/TMPDIR, Python's TLS verification fails oddly (no
-                # cert paths) and tempfile resolution degrades.
-                env={"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-                     "HOME": os.environ.get("HOME", str(Path.home())),
-                     "TMPDIR": tempfile.gettempdir()},
-            )
-
-            async def pipe_lines(stream, label):
-                while True:
-                    line = await stream.readline()
-                    if not line:
-                        break
-                    yield json.dumps({"type": label, "text": line.decode(errors="replace")}) + "\n"
-
-            async for line in pipe_lines(proc.stdout, "stdout"):
-                yield line
-            async for line in pipe_lines(proc.stderr, "stderr"):
-                yield line
-
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=30)
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
-                yield json.dumps({"type": "error", "text": "Execution timed out (30s)\n"}) + "\n"
-                return
-
-            yield json.dumps({"type": "exit", "code": proc.returncode}) + "\n"
-
-        except FileNotFoundError:
-            yield json.dumps({"type": "error", "text": f"Runtime '{cmd}' not found\n"}) + "\n"
-        except Exception as e:
-            yield json.dumps({"type": "error", "text": f"{e}\n"}) + "\n"
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
+        async for kind, text in _execute_code_stream(req.language, code, timeout=30):
+            if kind == "exit":
+                yield json.dumps({"type": "exit", "code": text}) + "\n"
+            else:
+                yield json.dumps({"type": kind, "text": text}) + "\n"
 
     return StreamingResponse(stream(), media_type="application/x-ndjson")
 
@@ -1566,11 +1711,11 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "execute_code",
-            "description": "Execute Python or JavaScript code in a sandbox and return the output",
+            "description": "Execute a short script or program in a sandbox and return its output. C/C++/Rust/Go/C# are compiled (or built) first; SQL runs against a fresh in-memory SQLite database and prints SELECT results as tab-separated rows.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "language": {"type": "string", "enum": ["python", "javascript"]},
+                    "language": {"type": "string", "enum": ["python", "javascript", "c", "cpp", "rust", "go", "csharp", "sql"]},
                     "code": {"type": "string", "description": "The code to execute"}
                 },
                 "required": ["language", "code"]
@@ -1773,6 +1918,27 @@ async def _run_privileged_windows(cmd: str, cwd: Path, timeout: int) -> str:
     return f"$ (elevated) {cmd}\n{output or '(no output)'}"
 
 
+_KILL_CMD_RE = re.compile(r'\b(?:kill|pkill|killall|fuser\s+-k)\b')
+
+def _would_kill_own_server(command: str) -> bool:
+    """Guards against the agent "fixing" a port collision by killing whatever
+    process holds the port — confirmed live: asked to run a React Native app
+    (which defaults to port 8081, same as this app's own backend), the agent
+    ran `lsof -i :8081`, found this app's own PID listening there, and ran
+    `sudo kill -9 <pid>` on it — killing the very server it was running
+    inside of, mid-task, with no result ever recorded. Refuse any kill-like
+    command that names either our own PID or the port we always bind (8081 —
+    see launch.sh / the coppermaker systemd unit) so this can't repeat itself,
+    whether or not it goes through sudo."""
+    if not _KILL_CMD_RE.search(command):
+        return False
+    if re.search(rf'(?<!\d){os.getpid()}(?!\d)', command):
+        return True
+    if re.search(r'\b8081\b', command):
+        return True
+    return False
+
+
 async def _run_privileged_command(command: str, cwd: Path, password: str, timeout: int = 180) -> str:
     """Runs a `sudo ...` command the agent asked for. On Linux/macOS, uses a
     password the human just typed into a browser prompt (see PENDING_SUDO /
@@ -1816,28 +1982,18 @@ async def execute_tool(name: str, args: dict) -> str:
             # Unrestricted by design (see run_command — the agent has full
             # shell access on this machine anyway); the 30s timeout and
             # temp-dir cleanup stay: those are robustness, not restrictions.
-            tmp = tempfile.mkdtemp(prefix="tool-exec-")
-            try:
-                cmd = {"javascript": "node", "python": _python_cmd()}.get(req.language, "node")
-                suffix = {"javascript": ".js", "python": ".py"}.get(req.language, ".js")
-                filepath = os.path.join(tmp, f"code{suffix}")
-                with open(filepath, "w") as f:
-                    f.write(req.code)
-                proc = await asyncio.create_subprocess_exec(
-                    cmd, filepath, stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE, cwd=tmp
-                )
-                try:
-                    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-                except asyncio.TimeoutError:
-                    proc.kill()
-                    return "Execution timed out (30s)"
-                output = ""
-                if stdout: output += stdout.decode(errors="replace")
-                if stderr: output += "\n[STDERR]\n" + stderr.decode(errors="replace")
-                return output or "(no output)"
-            finally:
-                shutil.rmtree(tmp, ignore_errors=True)
+            # _execute_code_stream handles compiled languages (C/C++/Rust/
+            # C#/Go need a build step; SQL runs through a stdlib sqlite3
+            # harness) the same way the streaming /api/execute endpoint does.
+            output = ""
+            async for kind, text in _execute_code_stream(req.language, req.code, timeout=30):
+                if kind == "stdout":
+                    output += text
+                elif kind == "stderr":
+                    output += "\n[STDERR]\n" + text
+                elif kind == "error":
+                    output += "\n[ERROR]\n" + text
+            return output or "(no output)"
 
         elif name == "web_search":
             req = SearchRequest(**args)
@@ -2003,6 +2159,15 @@ async def execute_tool(name: str, args: dict) -> str:
             command = args.get("command", "").strip()
             if not command:
                 return "Error: no command given"
+            if _would_kill_own_server(command):
+                return (
+                    "Refused: this command would kill AI Copper Maker's own backend "
+                    "process (this app always listens on port 8081) — that crashes the "
+                    "app you're running inside of instead of fixing anything. If another "
+                    "tool also wants port 8081, don't kill anything — just start it on a "
+                    "different port instead, e.g. `npx expo start --port 8082` or "
+                    "`--web-port 8082`."
+                )
             base = Path(BASE_PROJECTS).resolve()
             cwd_arg = args.get("path", "") or ""
             target = (base / cwd_arg).resolve() if cwd_arg else base
@@ -2700,6 +2865,55 @@ def _clip_for_model(text: str, limit: int = 8000) -> str:
     return text[:limit] + f"\n...[truncated at {limit} characters — ask for a specific range if you need more]"
 
 
+async def _auto_distill_skill(model: str, conv: list):
+    """Fire-and-forget: after an agent session that actually searched the web
+    or ran code, asks the model whether it learned anything reusable — a fix
+    for a non-obvious bug, a working command/approach worth remembering —
+    and if so saves it straight to skills.json so future sessions start with
+    it already available. Unlike the manual "Draft Skill" flow (learn_skill,
+    below) there is no human review queue here: the user asked for skills to
+    build up automatically from what the agent learns while searching/coding,
+    not to approve each one. Every failure mode (model says no, bad JSON, a
+    near-duplicate name) just quietly does nothing — this must never surface
+    an error to the user or interrupt the real conversation it's watching."""
+    try:
+        transcript = "\n".join(
+            f"{m['role']}: {str(m.get('content', ''))[:1500]}" for m in conv[-14:] if m.get("content")
+        )
+        prompt = f"""Below is a transcript of an AI agent session (tool calls/results included).
+
+{transcript}
+
+Did this session involve solving a real problem, fixing a non-obvious bug, or discovering a technique/command/fact that would genuinely help with similar future tasks? If yes, respond with ONLY a JSON object (no other text, no markdown fences): {{"name": string (short, 2-6 words), "description": string (one sentence — used to decide when this applies), "instructions": string (step-by-step, specific enough to actually follow again)}}. If nothing reusable was learned (trivial request, no real problem-solving, or this is just general knowledge the model already has), respond with exactly: NONE"""
+        content = (await _llm_complete(model, [{"role": "user", "content": prompt}], timeout=90)).strip()
+        if content.upper().startswith("NONE"):
+            return
+        match = re.search(r'\{.*\}', content, re.DOTALL)
+        if not match:
+            return
+        draft = json.loads(match.group(0))
+        name = str(draft.get("name", "")).strip()[:100]
+        description = str(draft.get("description", "")).strip()[:300]
+        instructions = str(draft.get("instructions", "")).strip()
+        if not (name and description and instructions):
+            return
+        skills = _load_json_list(SKILLS_FILE)
+        # Don't pile up near-duplicates every time a similar task recurs.
+        if any(s.get("name", "").strip().lower() == name.lower() for s in skills):
+            return
+        skills.append({
+            "id": uuid.uuid4().hex[:12],
+            "name": name,
+            "description": description,
+            "instructions": instructions,
+            "source": "auto",
+            "created_at": datetime.now().isoformat(),
+        })
+        _save_json_list(SKILLS_FILE, skills)
+    except Exception:
+        pass
+
+
 async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str = ""):
     """Runs the tool-use agent loop, yielding structured event dicts. Shared by
     the interactive /api/agent endpoint (streamed to the browser) and scheduled
@@ -2707,6 +2921,10 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
     in place and included in terminal events so the caller can persist the
     full history (including tool calls/results) for the next turn."""
     response_text = ""
+    # Set the moment a search or code tool actually runs — gates the
+    # end-of-session auto-skill distillation below so a plain Q&A turn (no
+    # tool use at all) never fires an extra LLM call for nothing.
+    used_learnable_tool = False
     for turn in range(max_turns):
         system_msg = {"role": "system", "content": build_system_prompt(system or UNCENSORED_SYSTEM) + "\n\n" + _agent_tool_instructions()}
         messages = [system_msg] + conv
@@ -2758,11 +2976,15 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
         tool_spec, cut_at = _extract_tool_call(response_text)
         if not tool_spec:
             conv.append({"role": "assistant", "content": response_text})
+            if used_learnable_tool:
+                asyncio.create_task(_auto_distill_skill(model, conv))
             yield {"type": "done", "content": response_text, "conversation": conv, "usage": usage}
             return
 
         tool_name = tool_spec["name"]
         tool_args = tool_spec.get("arguments", {}) or {}
+        if tool_name in ("execute_code", "run_command", "web_search"):
+            used_learnable_tool = True
 
         yield {"type": "tool_call", "name": tool_name, "arguments": tool_args}
 
@@ -2772,7 +2994,17 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
         # NOPASSWD) sudo with no human in the loop. Over-triggering on the
         # word "sudo" appearing in some echoed string is fine: the worst case
         # is an unnecessary prompt, which is the safe direction to err.
-        if tool_name == "run_command" and re.search(r'\bsudo\b', tool_args.get("command", "")):
+        if tool_name == "run_command" and _would_kill_own_server(tool_args.get("command", "")):
+            result = (
+                "Refused: this command would kill AI Copper Maker's own backend process "
+                "(this app always listens on port 8081) — that crashes the app you're "
+                "running inside of instead of fixing anything, and the request itself "
+                "never gets a result once the server is dead. If another tool (Expo/Metro/"
+                "React Native, a dev server, etc.) also wants port 8081, don't kill "
+                "anything — just start it on a different port instead, e.g. "
+                "`npx expo start --port 8082` or `--web-port 8082`."
+            )
+        elif tool_name == "run_command" and re.search(r'\bsudo\b', tool_args.get("command", "")):
             # Root needs a human. Pause here — yield a request id the browser
             # turns into a password prompt, then block (with a timeout) on the
             # future that /api/sudo/{id} resolves. The stream just goes quiet
@@ -2825,6 +3057,8 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
         f"rather than treat my last, unexecuted step as a real answer:\n\n{response_text}"
     )
     conv.append({"role": "assistant", "content": honest_text})
+    if used_learnable_tool:
+        asyncio.create_task(_auto_distill_skill(model, conv))
     yield {"type": "done", "content": honest_text, "conversation": conv, "usage": usage}
 
 
@@ -3247,6 +3481,55 @@ async def set_config(cfg: dict):
 
 # ── Save Project ───────────────────────────────────────────────────────────────
 
+def _parse_file_blocks(content: str) -> list[tuple[str, str]]:
+    """Extracts (path, content) pairs from a model's freeform response, tried
+    in order from strictest to loosest — used by both /api/save-project and
+    the Projects tab's "Apply changes" action so multi-file rewrites only
+    have to be parsed correctly in one place."""
+    file_pattern = re.compile(
+        r'===\s*FILE:\s*(.+?)\s*===\n(.*?)===\s*END FILE\s*===',
+        re.DOTALL
+    )
+    matches = file_pattern.findall(content)
+
+    if not matches:
+        # Some local models wrap the primary === FILE: === convention in
+        # their own markdown heading/bold decoration instead of following it
+        # literally — e.g. "#### **FILE: path/to/file.ext ===**" — confirmed
+        # live (llm-coder-uncensored:14b does this routinely). Tried right
+        # after the exact-format pattern above and before the two looser
+        # heuristics below: those aren't anchored to an actual "FILE:"
+        # marker, so against this exact shape they silently matched unrelated
+        # markdown (a fence-to-fence span landing on "### **END FILE**", the
+        # "# Credits" heading) and wrote garbage filenames with the wrong
+        # content — confirmed live, this produced a save that looked
+        # successful but silently dropped every real file.
+        decorated_file_pattern = re.compile(
+            r'FILE:\s*\**`?([^\n`*]+?)`?\**\s*(?:===)?\s*\**\s*\n+`{3,}[a-zA-Z0-9_+-]*\s*\n(.*?)`{3,}',
+            re.DOTALL
+        )
+        matches = decorated_file_pattern.findall(content)
+
+    if not matches:
+        fence_pattern = re.compile(
+            r'(?:#+\s*)?`{3,}(?:\w+)?\s*\n(?://|#|<!--)\s*(.+?)\s*(?:-->)?\n(.*?)`{3,}',
+            re.DOTALL
+        )
+        matches = fence_pattern.findall(content)
+
+    if not matches:
+        # Another common model output shape: a markdown heading naming the
+        # file, immediately followed by a fenced code block (filename is
+        # NOT repeated as a comment inside the fence, unlike the pattern above).
+        heading_pattern = re.compile(
+            r'#{1,6}\s+\**`?([^\n`*]+\.\w+)`?\**\s*\n+`{3,}[a-zA-Z0-9_+-]*\s*\n(.*?)`{3,}',
+            re.DOTALL
+        )
+        matches = heading_pattern.findall(content)
+
+    return matches
+
+
 @app.post("/api/save-project")
 async def save_project(req: SaveProjectRequest):
     cfg = load_config()
@@ -3267,47 +3550,7 @@ async def save_project(req: SaveProjectRequest):
         raise HTTPException(422, "App name is empty — refusing to write into the workspace root")
     project_dir = (base / folder_name).resolve()
 
-    file_pattern = re.compile(
-        r'===\s*FILE:\s*(.+?)\s*===\n(.*?)===\s*END FILE\s*===',
-        re.DOTALL
-    )
-    matches = file_pattern.findall(req.content)
-
-    if not matches:
-        # Some local models wrap the primary === FILE: === convention in
-        # their own markdown heading/bold decoration instead of following it
-        # literally — e.g. "#### **FILE: path/to/file.ext ===**" — confirmed
-        # live (llm-coder-uncensored:14b does this routinely). Tried right
-        # after the exact-format pattern above and before the two looser
-        # heuristics below: those aren't anchored to an actual "FILE:"
-        # marker, so against this exact shape they silently matched unrelated
-        # markdown (a fence-to-fence span landing on "### **END FILE**", the
-        # "# Credits" heading) and wrote garbage filenames with the wrong
-        # content — confirmed live, this produced a save that looked
-        # successful but silently dropped every real file.
-        decorated_file_pattern = re.compile(
-            r'FILE:\s*\**`?([^\n`*]+?)`?\**\s*(?:===)?\s*\**\s*\n+`{3,}[a-zA-Z0-9_+-]*\s*\n(.*?)`{3,}',
-            re.DOTALL
-        )
-        matches = decorated_file_pattern.findall(req.content)
-
-    if not matches:
-        fence_pattern = re.compile(
-            r'(?:#+\s*)?`{3,}(?:\w+)?\s*\n(?://|#|<!--)\s*(.+?)\s*(?:-->)?\n(.*?)`{3,}',
-            re.DOTALL
-        )
-        matches = fence_pattern.findall(req.content)
-
-    if not matches:
-        # Another common model output shape: a markdown heading naming the
-        # file, immediately followed by a fenced code block (filename is
-        # NOT repeated as a comment inside the fence, unlike the pattern above).
-        heading_pattern = re.compile(
-            r'#{1,6}\s+\**`?([^\n`*]+\.\w+)`?\**\s*\n+`{3,}[a-zA-Z0-9_+-]*\s*\n(.*?)`{3,}',
-            re.DOTALL
-        )
-        matches = heading_pattern.findall(req.content)
-
+    matches = _parse_file_blocks(req.content)
     if not matches:
         raise HTTPException(status_code=422, detail="No parseable file blocks found in output")
 
@@ -3343,6 +3586,193 @@ async def save_project(req: SaveProjectRequest):
 
     return {"saved": saved, "project_dir": str(project_dir), "file_count": len(saved),
             "refused": refused}
+
+
+# ── Code Projects (Chat's "Projects" tab) ───────────────────────────────────────
+# Distinct from Generate Project's on-disk "Load Saved Project" above (which
+# lists real folders under the configured save_dir) — these are code
+# snippets/scaffolds that came out of a Chat conversation, tracked in their
+# own JSON file exactly like skills.json/lessons.json, and kept until the
+# user deletes them (not tied to any workspace folder). One project per
+# source conversation: each new assistant code block in that chat updates
+# the same project rather than creating a new one.
+
+CODE_PROJECTS_FILE = Path(__file__).parent.parent / "code_projects.json"
+
+class CodeProjectFile(BaseModel):
+    path: str
+    content: str
+
+class CodeProject(BaseModel):
+    id: str = ""
+    name: str
+    language: str = ""
+    files: list[CodeProjectFile] = []
+    source_conversation_id: str = ""
+
+class CaptureCodeProjectRequest(BaseModel):
+    conversation_id: str = ""
+    name: str
+    language: str = ""
+    files: list[CodeProjectFile]
+
+class ProjectAnalyzeRequest(BaseModel):
+    model: str
+    action: str  # "bugs" | "improve" | "features" | "suggest"
+    instruction: str = ""
+
+class ApplyProjectFilesRequest(BaseModel):
+    content: str
+
+@app.get("/api/code-projects")
+async def list_code_projects():
+    return {"projects": _load_json_list(CODE_PROJECTS_FILE)}
+
+@app.post("/api/code-projects/capture")
+async def capture_code_project(req: CaptureCodeProjectRequest):
+    """Called by the Chat tab right after each assistant turn that contains
+    code — upserts by source_conversation_id so an evolving back-and-forth
+    in one chat keeps updating a single project instead of spawning a new
+    one per message."""
+    projects = _load_json_list(CODE_PROJECTS_FILE)
+    now = datetime.now().isoformat()
+    files = [f.model_dump() for f in req.files]
+    existing = next(
+        (p for p in projects if req.conversation_id and p.get("source_conversation_id") == req.conversation_id),
+        None,
+    )
+    if existing:
+        existing["files"] = files
+        existing["language"] = req.language or existing.get("language", "")
+        existing["name"] = req.name or existing.get("name", "")
+        existing["updated_at"] = now
+        _save_json_list(CODE_PROJECTS_FILE, projects)
+        return {"ok": True, "project": existing}
+
+    data = {
+        "id": uuid.uuid4().hex[:12],
+        "name": req.name,
+        "language": req.language,
+        "files": files,
+        "source_conversation_id": req.conversation_id,
+        "created_at": now,
+        "updated_at": now,
+    }
+    projects.append(data)
+    _save_json_list(CODE_PROJECTS_FILE, projects)
+    return {"ok": True, "project": data}
+
+@app.put("/api/code-projects/{project_id}")
+async def update_code_project(project_id: str, req: CodeProject):
+    projects = _load_json_list(CODE_PROJECTS_FILE)
+    for i, p in enumerate(projects):
+        if p.get("id") == project_id:
+            data = req.model_dump()
+            data["id"] = project_id
+            data["created_at"] = p.get("created_at", datetime.now().isoformat())
+            data["updated_at"] = datetime.now().isoformat()
+            data["source_conversation_id"] = p.get("source_conversation_id", "")
+            projects[i] = data
+            _save_json_list(CODE_PROJECTS_FILE, projects)
+            return {"ok": True, "project": data}
+    raise HTTPException(404, "Project not found")
+
+@app.delete("/api/code-projects/{project_id}")
+async def delete_code_project(project_id: str):
+    projects = [p for p in _load_json_list(CODE_PROJECTS_FILE) if p.get("id") != project_id]
+    _save_json_list(CODE_PROJECTS_FILE, projects)
+    return {"ok": True}
+
+def _get_code_project_or_404(project_id: str) -> dict:
+    proj = next((p for p in _load_json_list(CODE_PROJECTS_FILE) if p.get("id") == project_id), None)
+    if not proj:
+        raise HTTPException(404, "Project not found")
+    return proj
+
+@app.post("/api/code-projects/{project_id}/execute")
+async def execute_code_project(project_id: str):
+    """Runs the project's primary file the same way the Code Runner tab
+    does — reuses _execute_code_stream so C/C++/Rust/Go/C#/SQL all work here
+    too, with no separate execution path to keep in sync."""
+    proj = _get_code_project_or_404(project_id)
+    files = proj.get("files") or []
+    if not files:
+        raise HTTPException(422, "Project has no files")
+    code = files[0]["content"]
+    language = proj.get("language") or "python"
+
+    async def stream():
+        async for kind, text in _execute_code_stream(language, code, timeout=30):
+            if kind == "exit":
+                yield json.dumps({"type": "exit", "code": text}) + "\n"
+            else:
+                yield json.dumps({"type": kind, "text": text}) + "\n"
+
+    return StreamingResponse(stream(), media_type="application/x-ndjson")
+
+def _project_code_blob(proj: dict) -> str:
+    return "\n\n".join(
+        f"=== FILE: {f['path']} ===\n{f['content']}\n=== END FILE ==="
+        for f in proj.get("files", [])
+    )
+
+@app.post("/api/code-projects/{project_id}/analyze")
+async def analyze_code_project(project_id: str, req: ProjectAnalyzeRequest):
+    proj = _get_code_project_or_404(project_id)
+    blob = _project_code_blob(proj)
+    lang = proj.get("language") or "the project's language"
+    rewrite_format = (
+        "Respond with the complete rewritten file(s) (including any unchanged "
+        "files) using exactly this format so it can be parsed and applied "
+        "automatically:\n=== FILE: path/to/filename.ext ===\n[complete file "
+        "content]\n=== END FILE ==="
+    )
+
+    if req.action == "bugs":
+        prompt = (f"Review the following {lang} project for bugs, correctness issues, "
+                   f"and edge cases it doesn't handle. List each issue you find with a "
+                   f"short explanation and, where useful, the fix. Be specific and "
+                   f"reference the actual code — don't give generic advice.\n\n{blob}")
+    elif req.action == "suggest":
+        prompt = (f"Suggest additional features or improvements that would make this "
+                   f"{lang} project more complete, useful, or polished. List them as a "
+                   f"short bullet list, each with a one-line rationale — don't write "
+                   f"code, just ideas.\n\n{blob}")
+    elif req.action == "improve":
+        prompt = (f"Improve the following {lang} project — fix bugs, improve "
+                   f"readability/performance/correctness — without changing its "
+                   f"overall purpose. {rewrite_format}\n\n{blob}")
+    elif req.action == "features":
+        if not req.instruction.strip():
+            raise HTTPException(422, "Describe the feature(s) to add")
+        prompt = (f"Add the following feature(s) to this {lang} project: "
+                   f"{req.instruction}\n\n{rewrite_format}\n\n{blob}")
+    else:
+        raise HTTPException(422, f"Unknown action: {req.action}")
+
+    messages = [
+        {"role": "system", "content": "You are an expert software engineer reviewing and improving real code."},
+        {"role": "user", "content": prompt},
+    ]
+    return StreamingResponse(_stream_chat_ndjson(req.model, messages, timeout=300), media_type="application/x-ndjson")
+
+@app.post("/api/code-projects/{project_id}/apply")
+async def apply_code_project_files(project_id: str, req: ApplyProjectFilesRequest):
+    """Parses an Improve/Add Feature result's === FILE: === blocks (same
+    parser /api/save-project uses) and overwrites the project's files with
+    them — the explicit action a user takes after reviewing the diff-free
+    rewrite, never automatic."""
+    projects = _load_json_list(CODE_PROJECTS_FILE)
+    proj = next((p for p in projects if p.get("id") == project_id), None)
+    if not proj:
+        raise HTTPException(404, "Project not found")
+    matches = _parse_file_blocks(req.content)
+    if not matches:
+        raise HTTPException(422, "No parseable file blocks found in output")
+    proj["files"] = [{"path": path.strip(), "content": content.strip() + "\n"} for path, content in matches]
+    proj["updated_at"] = datetime.now().isoformat()
+    _save_json_list(CODE_PROJECTS_FILE, projects)
+    return {"ok": True, "project": proj}
 
 
 # ── Load Saved Project (Generate Project's "Load" button) ──────────────────────
@@ -4766,7 +5196,7 @@ async def run_routine_now(routine_id: str):
 # used elsewhere) — a backup zip is the kind of thing that ends up on a USB
 # stick or cloud drive, so it shouldn't carry app passwords in the clear.
 
-BACKUP_FILES = ["conversations.json", "skills.json", "routines.json", "calendar_events.json", "contacts.json", "config.json"]
+BACKUP_FILES = ["conversations.json", "skills.json", "code_projects.json", "routines.json", "calendar_events.json", "contacts.json", "config.json"]
 BACKUP_ACCOUNT_FILES = ["email_accounts.json", "calendar_accounts.json"]
 
 @app.get("/api/backup/export")

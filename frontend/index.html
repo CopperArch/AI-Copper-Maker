@@ -761,6 +761,7 @@
       <button class="tabs-arrow" onclick="scrollTabs(-1)" title="Scroll left">‹</button>
       <div class="tabs" id="tabs-scroller">
         <div class="tab active" onclick="switchTab('chat')">💬 Chat</div>
+        <div class="tab" onclick="switchTab('codeprojects')">🗂️ Projects</div>
         <div class="tab" onclick="switchTab('analyze')">🔍 App Analyzer</div>
         <div class="tab" onclick="switchTab('generate')">⚡ Generate Project</div>
         <div class="tab" onclick="switchTab('runner')">▶ Run Code</div>
@@ -813,6 +814,39 @@
           <textarea id="chat-input" placeholder="Ask the AI to build something... (Shift+Enter for new line)" rows="1"></textarea>
           <button class="btn btn-primary" id="send-btn" onclick="sendMessage()">Send</button>
           <button class="btn btn-secondary" id="stop-btn" onclick="stopStreaming()" style="display:none">■ Stop</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Projects Tab -->
+    <div class="tab-panel" id="tab-codeprojects">
+      <div class="runner-layout">
+        <div class="runner-panel">
+          <div class="runner-toolbar">
+            <h2>🗂️ Projects</h2>
+            <span style="font-size:12px;color:var(--muted)">Code written in Chat is saved here automatically — one project per conversation. Execute it, find bugs, improve it, add features, or save it to disk.</span>
+          </div>
+
+          <div id="code-projects-list" class="runner-output" style="flex:0 0 auto;max-height:220px;overflow-y:auto">
+            <div class="runner-placeholder">No projects yet — write some code in Chat and it'll show up here.</div>
+          </div>
+
+          <div id="code-project-detail" style="display:none;flex:1;flex-direction:column;gap:10px;min-height:0">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+              <h3 id="cp-detail-name" style="font-size:14px;margin:0"></h3>
+              <div style="display:flex;gap:6px;flex-wrap:wrap">
+                <button class="btn btn-accent btn-sm" onclick="cpExecute()">▶ Execute</button>
+                <button class="btn btn-secondary btn-sm" onclick="cpAnalyze('bugs')">🐛 Find Bugs</button>
+                <button class="btn btn-secondary btn-sm" onclick="cpAnalyze('improve')">✨ Improve Code</button>
+                <button class="btn btn-secondary btn-sm" onclick="cpAddFeaturePrompt()">➕ Add Feature</button>
+                <button class="btn btn-secondary btn-sm" onclick="cpAnalyze('suggest')">💡 Suggest Features</button>
+                <button class="btn btn-secondary btn-sm" onclick="cpSaveToDisk()">💾 Save to Disk</button>
+              </div>
+            </div>
+            <div id="cp-file-tabs" style="display:flex;gap:6px;flex-wrap:wrap"></div>
+            <pre id="cp-code-view" style="flex:0 0 auto;max-height:240px;overflow:auto;background:#0d1117;border:1px solid var(--border);border-radius:6px;padding:10px;font-size:12px;white-space:pre-wrap"></pre>
+            <div id="cp-result-area" class="runner-output" style="flex:1;overflow-y:auto"></div>
+          </div>
         </div>
       </div>
     </div>
@@ -998,6 +1032,12 @@
             <select id="runner-lang">
               <option value="javascript">JavaScript (Node.js)</option>
               <option value="python">Python 3</option>
+              <option value="c">C (gcc)</option>
+              <option value="cpp">C++ (g++)</option>
+              <option value="rust">Rust (rustc)</option>
+              <option value="go">Go</option>
+              <option value="csharp">C# (.NET)</option>
+              <option value="sql">SQL (SQLite)</option>
             </select>
           </div>
           <textarea id="runner-code" placeholder="Paste or write code here..."></textarea>
@@ -1566,6 +1606,22 @@ document.addEventListener('DOMContentLoaded', async () => {
     } else {
       loadConversation(item.dataset.cid);
     }
+  });
+
+  // Event delegation for the Projects list and its file tabs
+  document.getElementById('code-projects-list').addEventListener('click', e => {
+    const item = e.target.closest('.conv-item');
+    if (!item) return;
+    if (e.target.classList.contains('conv-menu-btn')) {
+      e.stopPropagation();
+      toggleCodeProjectMenu(e.target.dataset.pid, e.target);
+    } else {
+      openCodeProjectDetail(item.dataset.pid);
+    }
+  });
+  document.getElementById('cp-file-tabs').addEventListener('click', e => {
+    const btn = e.target.closest('.cp-file-tab');
+    if (btn) cpShowFile(btn.dataset.path);
   });
 });
 
@@ -2577,6 +2633,10 @@ async function runNextTurn(convId) {
   // Final render with syntax highlighting (done once, not on every chunk)
   if (streamState.fullText) {
     conv.messages.push({ role: 'assistant', content: streamState.fullText });
+    const extractedProject = extractProjectFilesFromText(streamState.fullText);
+    if (extractedProject) {
+      captureCodeProject(convId, conv.title, extractedProject.language, extractedProject.files);
+    }
     const bubbleEl = bubbleIfViewing();
     const textEl = textElIfViewing();
     if (bubbleEl && textEl) {
@@ -3441,12 +3501,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
 function switchTab(name) {
   document.querySelectorAll('.tab').forEach((t, i) => {
-    const names = ['chat', 'analyze', 'generate', 'runner', 'agent', 'files', 'search', 'imagegen', 'models', 'email', 'calendar', 'skills', 'lessons', 'routines'];
+    const names = ['chat', 'codeprojects', 'analyze', 'generate', 'runner', 'agent', 'files', 'search', 'imagegen', 'models', 'email', 'calendar', 'skills', 'lessons', 'routines'];
     t.classList.toggle('active', names[i] === name);
   });
   document.querySelectorAll('.tab-panel').forEach(p => {
     p.classList.toggle('active', p.id === 'tab-' + name);
   });
+  if (name === 'codeprojects') loadCodeProjects();
   if (name === 'files' && !filesLoadedOnce) { filesLoadedOnce = true; loadFileList(''); }
   if (name === 'email' && !emailInitedOnce) { emailInitedOnce = true; initEmailTab(); }
   if (name === 'calendar' && !calendarInitedOnce) { calendarInitedOnce = true; initCalendarTab(); }
@@ -3517,6 +3578,334 @@ async function runCode() {
 
   btn.disabled = false;
   btn.textContent = '▶ Run';
+}
+
+// ── Code Projects (Chat → Projects tab) ──────────────────────────────────────────
+// Auto-capture: every assistant turn in Chat that contains code gets parsed
+// and upserted into a project keyed by the conversation it came from, so an
+// evolving back-and-forth keeps updating one project instead of spawning a
+// new one per message. Manual actions (execute/bugs/improve/features/
+// suggest/save/delete) all live in the Projects tab itself.
+
+const CP_LANG_MAP = {
+  python: 'python', py: 'python',
+  javascript: 'javascript', js: 'javascript',
+  c: 'c',
+  cpp: 'cpp', 'c++': 'cpp',
+  rust: 'rust', rs: 'rust',
+  go: 'go', golang: 'go',
+  csharp: 'csharp', 'c#': 'csharp', cs: 'csharp',
+  sql: 'sql',
+};
+const CP_EXT_MAP = {
+  python: 'py', javascript: 'js', c: 'c', cpp: 'cpp', rust: 'rs', go: 'go',
+  csharp: 'cs', sql: 'sql', java: 'java', kotlin: 'kt', html: 'html',
+  css: 'css', typescript: 'ts', ts: 'ts', jsx: 'jsx', tsx: 'tsx',
+  bash: 'sh', sh: 'sh', json: 'json',
+};
+
+// Pulls files out of an assistant reply: prefers the === FILE: === scaffold
+// format (full multi-file outputs), else falls back to plain fenced code
+// blocks. Returns null if nothing worth tracking as a project was found —
+// a stray one-line shell example shouldn't create a project entry.
+function extractProjectFilesFromText(text) {
+  const fileBlockRe = /===\s*FILE:\s*(.+?)\s*===\n([\s\S]*?)===\s*END FILE\s*===/g;
+  let m, files = [];
+  while ((m = fileBlockRe.exec(text))) {
+    files.push({ path: m[1].trim(), content: m[2].trim() + '\n' });
+  }
+  if (files.length) return { files, language: 'multi' };
+
+  const fenceRe = /```([a-zA-Z0-9+#]*)\n([\s\S]*?)```/g;
+  const blocks = [];
+  while ((m = fenceRe.exec(text))) {
+    const lang = (m[1] || '').toLowerCase();
+    const code = m[2];
+    if (code.trim().split('\n').length < 2 && code.trim().length < 40) continue; // skip trivial one-liners
+    blocks.push({ lang, code });
+  }
+  if (!blocks.length) return null;
+
+  files = blocks.map((b, i) => {
+    const norm = CP_LANG_MAP[b.lang] || b.lang;
+    const ext = CP_EXT_MAP[norm] || CP_EXT_MAP[b.lang] || 'txt';
+    return { path: blocks.length > 1 ? `file${i + 1}.${ext}` : `main.${ext}`, content: b.code.trim() + '\n' };
+  });
+  const language = CP_LANG_MAP[blocks[0].lang] || blocks[0].lang || '';
+  return { files, language };
+}
+
+// Best-effort — losing an auto-capture shouldn't interrupt the chat it came from.
+async function captureCodeProject(conversationId, name, language, files) {
+  try {
+    await fetch(`${API}/api/code-projects/capture`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ conversation_id: conversationId, name, language, files }),
+    });
+    if (document.getElementById('tab-codeprojects')?.classList.contains('active')) {
+      loadCodeProjects();
+    }
+  } catch {}
+}
+
+let codeProjects = [];
+let currentCodeProjectId = null;
+let cpActiveFilePath = null;
+
+async function loadCodeProjects() {
+  const list = document.getElementById('code-projects-list');
+  try {
+    const r = await fetch(`${API}/api/code-projects`);
+    const d = await r.json();
+    codeProjects = d.projects || [];
+  } catch {
+    list.innerHTML = '<div class="runner-placeholder">Could not load projects.</div>';
+    return;
+  }
+  renderCodeProjectsList();
+}
+
+function renderCodeProjectsList() {
+  const list = document.getElementById('code-projects-list');
+  if (!codeProjects.length) {
+    list.innerHTML = '<div class="runner-placeholder">No projects yet — write some code in Chat and it\'ll show up here.</div>';
+    return;
+  }
+  const sorted = codeProjects.slice().sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''));
+  list.innerHTML = sorted.map(p => `
+    <div class="conv-item ${p.id === currentCodeProjectId ? 'active' : ''}" data-pid="${p.id}" style="cursor:pointer">
+      <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">📄 ${escHtml(p.name)} <span class="model-badge">${escHtml(p.language || '')}</span></span>
+      <button class="conv-menu-btn" data-pid="${p.id}" title="More">⋮</button>
+    </div>
+  `).join('');
+}
+
+function openCodeProjectDetail(id) {
+  currentCodeProjectId = id;
+  renderCodeProjectsList();
+  const proj = codeProjects.find(p => p.id === id);
+  if (!proj) return;
+  document.getElementById('code-project-detail').style.display = 'flex';
+  document.getElementById('cp-detail-name').textContent = proj.name;
+  document.getElementById('cp-result-area').innerHTML = '';
+  cpActiveFilePath = proj.files[0]?.path || null;
+  renderCpFileTabs(proj);
+  cpShowFile(cpActiveFilePath);
+}
+
+function renderCpFileTabs(proj) {
+  const tabsEl = document.getElementById('cp-file-tabs');
+  tabsEl.innerHTML = proj.files.map(f => `
+    <button class="btn btn-secondary btn-sm cp-file-tab" data-path="${escHtml(f.path)}" style="${f.path === cpActiveFilePath ? 'border-color:var(--accent)' : ''}">${escHtml(f.path)}</button>
+  `).join('');
+}
+
+function cpShowFile(path) {
+  const proj = codeProjects.find(p => p.id === currentCodeProjectId);
+  if (!proj) return;
+  cpActiveFilePath = path;
+  const file = proj.files.find(f => f.path === path);
+  document.getElementById('cp-code-view').textContent = file ? file.content : '';
+  renderCpFileTabs(proj);
+}
+
+let openCodeProjectMenuEl = null;
+function closeCodeProjectMenu() {
+  if (openCodeProjectMenuEl) { openCodeProjectMenuEl.remove(); openCodeProjectMenuEl = null; }
+  document.removeEventListener('click', closeCodeProjectMenu);
+}
+function toggleCodeProjectMenu(id, btnEl) {
+  if (openCodeProjectMenuEl) { closeCodeProjectMenu(); return; }
+  const rect = btnEl.getBoundingClientRect();
+  const menu = document.createElement('div');
+  menu.className = 'conv-menu';
+  menu.style.top = `${rect.bottom + 4}px`;
+  menu.style.left = `${Math.max(4, rect.right - 140)}px`;
+  menu.innerHTML = `
+    <button data-action="rename">✏ Rename</button>
+    <button data-action="delete" class="danger">🗑 Delete</button>
+  `;
+  menu.addEventListener('click', e => {
+    e.stopPropagation();
+    const action = e.target.closest('button')?.dataset.action;
+    if (action === 'rename') renameCodeProject(id);
+    else if (action === 'delete') deleteCodeProject(id);
+    closeCodeProjectMenu();
+  });
+  document.body.appendChild(menu);
+  openCodeProjectMenuEl = menu;
+  setTimeout(() => document.addEventListener('click', closeCodeProjectMenu), 0);
+}
+
+async function deleteCodeProject(id) {
+  const proj = codeProjects.find(p => p.id === id);
+  if (proj && !confirm(`Delete project "${proj.name}"? This can't be undone.`)) return;
+  await fetch(`${API}/api/code-projects/${id}`, { method: 'DELETE' });
+  if (currentCodeProjectId === id) {
+    currentCodeProjectId = null;
+    document.getElementById('code-project-detail').style.display = 'none';
+  }
+  await loadCodeProjects();
+}
+
+async function renameCodeProject(id) {
+  const proj = codeProjects.find(p => p.id === id);
+  if (!proj) return;
+  const name = prompt('Project name:', proj.name);
+  if (!name || name === proj.name) return;
+  await fetch(`${API}/api/code-projects/${id}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, language: proj.language, files: proj.files }),
+  });
+  await loadCodeProjects();
+}
+
+async function cpExecute() {
+  const proj = codeProjects.find(p => p.id === currentCodeProjectId);
+  if (!proj) return;
+  const area = document.getElementById('cp-result-area');
+  area.innerHTML = '<div class="runner-placeholder">Running…</div>';
+  try {
+    const res = await fetch(`${API}/api/code-projects/${proj.id}/execute`, { method: 'POST' });
+    if (!res.ok) {
+      const e = await res.json();
+      area.innerHTML = `<span class="stderr">Error: ${escHtml(e.detail || 'Request failed')}</span>`;
+      return;
+    }
+    area.innerHTML = '';
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      for (const line of decoder.decode(value).split('\n').filter(Boolean)) {
+        try {
+          const data = JSON.parse(line);
+          if (data.type === 'stdout') area.innerHTML += `<span class="stdout">${escHtml(data.text)}</span>`;
+          else if (data.type === 'stderr') area.innerHTML += `<span class="stderr">${escHtml(data.text)}</span>`;
+          else if (data.type === 'exit') area.innerHTML += `<div class="exit">⏹ Process exited with code ${data.code}</div>`;
+          else if (data.type === 'error') area.innerHTML += `<span class="stderr">${escHtml(data.text)}</span>`;
+        } catch {}
+      }
+      area.scrollTop = area.scrollHeight;
+    }
+  } catch (err) {
+    area.innerHTML = `<span class="stderr">Connection error: ${escHtml(err.message)}</span>`;
+  }
+}
+
+async function cpAddFeaturePrompt() {
+  const instruction = prompt('Describe the feature(s) to add:');
+  if (!instruction) return;
+  cpAnalyze('features', instruction);
+}
+
+async function cpAnalyze(action, instruction = '') {
+  const proj = codeProjects.find(p => p.id === currentCodeProjectId);
+  if (!proj) return;
+  const model = document.getElementById('model-select').value;
+  if (!model) { alert('Select a model first (top-left)'); return; }
+  const area = document.getElementById('cp-result-area');
+  const labels = { bugs: 'Finding bugs', improve: 'Improving code', features: 'Adding feature(s)', suggest: 'Suggesting features' };
+  area.innerHTML = `<div class="runner-placeholder">${labels[action] || 'Working'}…</div>`;
+  let fullText = '';
+  try {
+    const res = await fetch(`${API}/api/code-projects/${proj.id}/analyze`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, action, instruction }),
+    });
+    if (!res.ok) {
+      const e = await res.json();
+      area.innerHTML = `<span class="stderr">Error: ${escHtml(e.detail || 'Request failed')}</span>`;
+      return;
+    }
+    area.innerHTML = '';
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      for (const line of decoder.decode(value).split('\n').filter(Boolean)) {
+        try {
+          const data = JSON.parse(line);
+          const chunk = data.message?.content;
+          if (chunk) {
+            fullText += chunk;
+            area.innerHTML = renderMarkdown(fullText);
+            area.scrollTop = area.scrollHeight;
+          }
+        } catch {}
+      }
+    }
+    if ((action === 'improve' || action === 'features') && /===\s*FILE:/.test(fullText)) {
+      const applyBtn = document.createElement('button');
+      applyBtn.className = 'btn btn-accent btn-sm';
+      applyBtn.textContent = '✓ Apply changes to project';
+      applyBtn.style.marginTop = '8px';
+      applyBtn.onclick = () => cpApply(fullText);
+      area.appendChild(applyBtn);
+    }
+  } catch (err) {
+    area.innerHTML = `<span class="stderr">Connection error: ${escHtml(err.message)}</span>`;
+  }
+}
+
+async function cpApply(content) {
+  const proj = codeProjects.find(p => p.id === currentCodeProjectId);
+  if (!proj) return;
+  try {
+    const r = await fetch(`${API}/api/code-projects/${proj.id}/apply`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content }),
+    });
+    if (!r.ok) { const e = await r.json(); throw new Error(e.detail || 'Failed'); }
+    await loadCodeProjects();
+    openCodeProjectDetail(proj.id);
+    alert('Changes applied.');
+  } catch (err) {
+    alert('Error applying changes: ' + err.message);
+  }
+}
+
+// showDirectoryPicker (Chromium, secure contexts incl. http://localhost) is
+// the real native "file manager comes up, pick where to save" experience —
+// writes go straight to the chosen folder client-side, no backend round
+// trip and no restriction to the configured workspace dir. Browsers without
+// it (Firefox) fall back to individual downloads.
+async function cpSaveToDisk() {
+  const proj = codeProjects.find(p => p.id === currentCodeProjectId);
+  if (!proj) return;
+  if (window.showDirectoryPicker) {
+    try {
+      const dirHandle = await window.showDirectoryPicker();
+      for (const f of proj.files) {
+        const parts = f.path.split('/').filter(Boolean);
+        let dir = dirHandle;
+        for (let i = 0; i < parts.length - 1; i++) {
+          dir = await dir.getDirectoryHandle(parts[i], { create: true });
+        }
+        const fileHandle = await dir.getFileHandle(parts[parts.length - 1], { create: true });
+        const writable = await fileHandle.createWritable();
+        await writable.write(f.content);
+        await writable.close();
+      }
+      alert(`Saved ${proj.files.length} file(s) to disk.`);
+    } catch (err) {
+      if (err.name !== 'AbortError') alert('Save failed: ' + err.message);
+    }
+  } else {
+    proj.files.forEach(f => {
+      const blob = new Blob([f.content], { type: 'text/plain' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = f.path.split('/').pop();
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    });
+  }
 }
 
 function toggleSystemPrompt() {
@@ -5219,7 +5608,7 @@ async function loadSkills() {
       <div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:8px">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
           <div style="font-weight:500;font-size:13px">${escHtml(s.name)}</div>
-          <span class="model-badge">${s.source === 'learned' ? 'learned' : 'manual'}</span>
+          <span class="model-badge">${s.source === 'auto' ? '🪄 auto-learned' : s.source === 'learned' ? 'learned' : 'manual'}</span>
         </div>
         <div style="font-size:12px;color:var(--muted);margin:4px 0">${escHtml(s.description)}</div>
         <pre style="white-space:pre-wrap;font-size:12px;background:#0d1117;border:1px solid var(--border);border-radius:6px;padding:8px;margin:6px 0">${escHtml(s.instructions)}</pre>
