@@ -81,10 +81,34 @@ LMS_BIN = shutil.which("lms") or str(
 )
 API_KEYS_FILE = Path(__file__).parent.parent / "api_keys.json"
 CLOUD_PROVIDERS = {
-    "anthropic": {"label": "Claude (Anthropic)", "default_model": "claude-sonnet-4-6"},
-    "openai": {"label": "ChatGPT (OpenAI)", "default_model": "gpt-4o"},
-    "google": {"label": "Gemini (Google)", "default_model": "gemini-2.0-flash"},
+    "anthropic":  {"label": "Claude (Anthropic)",  "default_model": "claude-sonnet-4-6"},
+    "openai":     {"label": "ChatGPT (OpenAI)",     "default_model": "gpt-4o"},
+    "google":     {"label": "Gemini (Google)",      "default_model": "gemini-2.0-flash"},
+    "xai":        {"label": "Grok (xAI)",           "default_model": "grok-4"},
+    "deepseek":   {"label": "DeepSeek",             "default_model": "deepseek-chat"},
+    # Not one fixed model like the five above — one key here unlocks
+    # hundreds of other paid models (Llama, Mistral, Qwen, Grok, and the
+    # big-name ones above too) through a single OpenAI-compatible endpoint.
+    # See OPENROUTER_FEATURED_MODELS below for what actually lands in the
+    # model dropdown.
+    "openrouter": {"label": "OpenRouter (100s of paid models, 1 key)", "default_model": "openai/gpt-4o"},
 }
+
+# A small, diverse hand-picked slice of OpenRouter's full catalog (hundreds
+# of models) — enough to cover every major paid family through the one
+# OpenRouter key without turning the model dropdown into an unbrowsable
+# wall of options. Model slugs are OpenRouter's own naming (provider/model),
+# nested under this app's own "openrouter/" prefix in the dropdown.
+OPENROUTER_FEATURED_MODELS = [
+    "openai/gpt-4o",
+    "anthropic/claude-3.7-sonnet",
+    "google/gemini-2.0-flash-001",
+    "x-ai/grok-2-1212",
+    "deepseek/deepseek-chat",
+    "meta-llama/llama-3.3-70b-instruct",
+    "mistralai/mistral-large",
+    "qwen/qwen-2.5-72b-instruct",
+]
 
 
 def _load_api_keys() -> dict:
@@ -1327,45 +1351,11 @@ async def apply_update():
     return {"ok": True, "output": output, "restart_required": True}
 
 
-# ── Web Search ─────────────────────────────────────────────────────────────────
-
-@app.post("/api/search")
-async def web_search(req: SearchRequest):
-    try:
-        import urllib.parse
-        encoded = urllib.parse.quote(req.query)
-        url = f"https://html.duckduckgo.com/html/?q={encoded}"
-
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-            client.headers.update({
-                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
-            })
-            r = await client.get(url)
-
-        results = []
-        for match in re.finditer(
-            r'<a rel="nofollow" class="result__a" href="(.*?)".*?>(.*?)</a>.*?'
-            r'<a class="result__snippet".*?>(.*?)</a>',
-            r.text, re.DOTALL
-        ):
-            link = match.group(1)
-            title = re.sub(r'<[^>]+>', '', match.group(2)).strip()
-            snippet = re.sub(r'<[^>]+>', '', match.group(3)).strip()
-            results.append({"title": title, "url": link, "snippet": snippet})
-            if len(results) >= req.max_results:
-                break
-
-        if not results and "anomaly" in r.text.lower():
-            # DuckDuckGo's own bot-detection interstitial (confirmed live: a
-            # burst of requests gets this instead of real results, same 200
-            # status, same URL, no redirect — indistinguishable from a
-            # genuine "no results" without checking for it) — say so plainly
-            # instead of silently reporting zero results either way.
-            return {"results": [], "error": "DuckDuckGo is temporarily rate-limiting automated requests from this machine — wait a minute and try again."}
-
-        return {"results": results}
-    except Exception as e:
-        return {"results": [], "error": str(e)}
+# The standalone /api/search (plain web search) endpoint was removed — it
+# backed the frontend's now-removed web-search UI, which only duplicated the
+# agent's own "web_search" tool (see execute_tool below) with none of the
+# model's synthesis on top. SearchRequest is kept: the tool handler still
+# builds one from the model's tool-call arguments.
 
 
 # ── Image Generation ───────────────────────────────────────────────────────────
@@ -2403,6 +2393,14 @@ async def _test_cloud_key(provider: str, key: str) -> None:
                                   headers={"Authorization": f"Bearer {key}"})
         elif provider == "google":
             r = await client.get("https://generativelanguage.googleapis.com/v1beta/models", params={"key": key})
+        elif provider == "xai":
+            r = await client.get("https://api.x.ai/v1/models", headers={"Authorization": f"Bearer {key}"})
+        elif provider == "deepseek":
+            r = await client.get("https://api.deepseek.com/v1/models", headers={"Authorization": f"Bearer {key}"})
+        elif provider == "openrouter":
+            # /auth/key (not /models, which is public and unauthenticated)
+            # so an actually-invalid key still fails validation here.
+            r = await client.get("https://openrouter.ai/api/v1/auth/key", headers={"Authorization": f"Bearer {key}"})
         else:
             return
     if r.status_code != 200:
@@ -2461,10 +2459,22 @@ async def set_expo_key(req: ExpoTokenRequest):
 
 @app.get("/api/models/cloud")
 async def list_cloud_models():
-    """Only lists a provider's model as usable once a key is actually
-    configured for it — no point offering a model the app can't call."""
+    """Only lists a provider's model(s) as usable once a key is actually
+    configured for it — no point offering a model the app can't call.
+    OpenRouter is the one exception to "one model per provider": it fans
+    out to OPENROUTER_FEATURED_MODELS instead of a single default_model,
+    since the whole point of adding it is access to many paid models
+    through one key, not just one more fixed option."""
     keys = _load_api_keys()
-    return {"models": [f"{p}/{meta['default_model']}" for p, meta in CLOUD_PROVIDERS.items() if keys.get(p)]}
+    models = []
+    for p, meta in CLOUD_PROVIDERS.items():
+        if not keys.get(p):
+            continue
+        if p == "openrouter":
+            models.extend(f"openrouter/{m}" for m in OPENROUTER_FEATURED_MODELS)
+        else:
+            models.append(f"{p}/{meta['default_model']}")
+    return {"models": models}
 
 
 def _messages_for_cloud(messages: list) -> list:
@@ -2497,20 +2507,53 @@ async def _call_anthropic(model: str, messages: list, system: str, api_key: str)
         return "".join(b.get("text", "") for b in data.get("content", []))
 
 
-async def _call_openai(model: str, messages: list, system: str, api_key: str) -> str:
+async def _call_openai_compatible(url: str, model: str, messages: list, system: str, api_key: str,
+                                   label: str, extra_headers: dict | None = None) -> str:
+    """Shared implementation for every provider whose API mirrors OpenAI's
+    /chat/completions request/response shape — which by design is OpenAI
+    itself plus xAI, DeepSeek, and OpenRouter below (all three publish
+    their API as "OpenAI-compatible" specifically so existing OpenAI-SDK
+    code, and helpers exactly like this one, need only a different base URL
+    and key)."""
+    headers = {"Authorization": f"Bearer {api_key}", "content-type": "application/json"}
+    if extra_headers:
+        headers.update(extra_headers)
     async with httpx.AsyncClient(timeout=120) as client:
         r = await client.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "content-type": "application/json"},
+            url, headers=headers,
             json={
                 "model": model,
                 "messages": [{"role": "system", "content": system}] + _messages_for_cloud(messages),
             },
         )
         if r.status_code != 200:
-            return f"OpenAI API error ({r.status_code}): {r.text[:500]}"
+            return f"{label} API error ({r.status_code}): {r.text[:500]}"
         data = r.json()
         return data["choices"][0]["message"]["content"] or ""
+
+
+async def _call_openai(model: str, messages: list, system: str, api_key: str) -> str:
+    return await _call_openai_compatible(
+        "https://api.openai.com/v1/chat/completions", model, messages, system, api_key, "OpenAI")
+
+
+async def _call_xai(model: str, messages: list, system: str, api_key: str) -> str:
+    return await _call_openai_compatible(
+        "https://api.x.ai/v1/chat/completions", model, messages, system, api_key, "xAI")
+
+
+async def _call_deepseek(model: str, messages: list, system: str, api_key: str) -> str:
+    return await _call_openai_compatible(
+        "https://api.deepseek.com/v1/chat/completions", model, messages, system, api_key, "DeepSeek")
+
+
+async def _call_openrouter(model: str, messages: list, system: str, api_key: str) -> str:
+    # HTTP-Referer/X-Title are OpenRouter's optional app-attribution headers
+    # (surfaced on openrouter.ai/rankings) — harmless to include, not
+    # required for the call to work.
+    return await _call_openai_compatible(
+        "https://openrouter.ai/api/v1/chat/completions", model, messages, system, api_key, "OpenRouter",
+        extra_headers={"HTTP-Referer": "https://github.com/CopperArch/AI-Copper-Maker", "X-Title": "AI Copper Maker"})
 
 
 async def _call_gemini(model: str, messages: list, system: str, api_key: str) -> str:
@@ -2549,6 +2592,12 @@ async def _call_cloud_model(model_ref: str, messages: list, system: str) -> str:
         return await _call_openai(model, messages, system, api_key)
     if provider == "google":
         return await _call_gemini(model, messages, system, api_key)
+    if provider == "xai":
+        return await _call_xai(model, messages, system, api_key)
+    if provider == "deepseek":
+        return await _call_deepseek(model, messages, system, api_key)
+    if provider == "openrouter":
+        return await _call_openrouter(model, messages, system, api_key)
     return f"Unknown cloud provider '{provider}'."
 
 
@@ -2914,6 +2963,108 @@ Did this session involve solving a real problem, fixing a non-obvious bug, or di
         pass
 
 
+_MODEL_CONTEXT_LENGTH_CACHE: dict[str, int] = {}
+DEFAULT_CONTEXT_TOKENS = 8192  # conservative fallback when Ollama doesn't report context_length
+
+
+async def _get_model_context_length(model: str) -> int:
+    """Best-effort lookup of the model's real context window, cached per
+    model name for the process lifetime — this is checked every agent turn
+    (see _compact_conversation_if_needed) and the value never changes
+    mid-run, so there's no reason to re-hit Ollama's API on every turn."""
+    if model in _MODEL_CONTEXT_LENGTH_CACHE:
+        return _MODEL_CONTEXT_LENGTH_CACHE[model]
+    if _is_cloud_model(model):
+        # Cloud context windows are documented and comfortably large; not
+        # worth a provider-specific lookup just to feed a compaction budget.
+        _MODEL_CONTEXT_LENGTH_CACHE[model] = 32000
+        return 32000
+    result = DEFAULT_CONTEXT_TOKENS
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            r = await client.get(f"{OLLAMA}/api/tags")
+            data = r.json()
+            for m in data.get("models", []):
+                if m.get("name") == model:
+                    ctx = (m.get("details") or {}).get("context_length")
+                    if isinstance(ctx, int) and ctx > 0:
+                        result = ctx
+                    break
+    except Exception:
+        pass
+    _MODEL_CONTEXT_LENGTH_CACHE[model] = result
+    return result
+
+
+async def _summarize_dropped_turns(model: str, turns: list) -> str:
+    """One cheap extra model call to compress history that's about to be
+    dropped — trading a bit more compute for keeping the gist of what
+    happened instead of losing it outright. This is the same trade
+    context-extending tools like Plandex make: break a big task into more,
+    smaller model calls instead of one call that no longer fits. Falls back
+    to a naive truncated transcript if the summarization call itself fails,
+    so compaction never hard-fails the user's actual turn."""
+    transcript = "\n".join(f"{t.get('role', '?')}: {(t.get('content') or '')[:500]}" for t in turns)
+    prompt = (
+        "Summarize the following AI agent conversation history in a few dense "
+        "sentences. Keep concrete facts, decisions, file paths, and results the "
+        "model will still need to correctly continue the task — this replaces "
+        "the full history from here on, not a preview of it:\n\n" + transcript[:20000]
+    )
+    try:
+        summary = (await _llm_complete(model, [{"role": "user", "content": prompt}], timeout=60)).strip()
+        if summary:
+            return summary
+    except Exception:
+        pass
+    return _clip_for_model(transcript, 2000)
+
+
+async def _compact_conversation_if_needed(conv: list, model: str, system_prompt_chars: int) -> list:
+    """Keeps a long agent run (or a long saved conversation resumed from
+    before) from silently overflowing the model's context window. Ollama
+    doesn't error when a request overflows num_ctx — it just quietly drops
+    earlier context, which reads to the user as the model "forgetting" the
+    task partway through a long multi-tool run. Instead of losing that
+    history for free, fold whatever would be dropped into one compact
+    summary turn first — replaces the old MAX_HISTORY_MESSAGES blind slice
+    (frontend/index.html), which only ever dropped history outright with
+    nothing kept in its place.
+
+    Budgets on character count (~4 chars/token, the standard estimator used
+    when a real tokenizer isn't available) rather than an exact token count —
+    good enough to trigger compaction comfortably before the real limit,
+    which is all a safety margin needs to do.
+    """
+    context_tokens = await _get_model_context_length(model)
+    # Compact at 60% of the window, not 90%+, so there's still headroom left
+    # for one big tool result (a large file read, a long command's output)
+    # on the very next turn without immediately tipping over again.
+    budget_chars = int(context_tokens * 4 * 0.6) - system_prompt_chars
+    total_chars = sum(len(m.get("content", "") or "") for m in conv)
+    if budget_chars <= 0 or total_chars <= budget_chars:
+        return conv
+
+    # Walk backward keeping the most recent messages verbatim — what the
+    # model actually needs to continue the current step — reserving at most
+    # half the budget for them so there's always real room left for the
+    # summary plus this turn's own reply.
+    keep_chars = budget_chars // 2
+    split_idx = len(conv)
+    running = 0
+    for i in range(len(conv) - 1, -1, -1):
+        running += len(conv[i].get("content", "") or "")
+        if running > keep_chars:
+            break
+        split_idx = i
+    if split_idx <= 0:
+        return conv  # everything is "recent" — nothing old enough to fold away
+
+    old, recent = conv[:split_idx], conv[split_idx:]
+    summary = await _summarize_dropped_turns(model, old)
+    return [{"role": "user", "content": f"[Summary of earlier turns, compacted to stay within context: {summary}]"}] + recent
+
+
 async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str = ""):
     """Runs the tool-use agent loop, yielding structured event dicts. Shared by
     the interactive /api/agent endpoint (streamed to the browser) and scheduled
@@ -2927,6 +3078,11 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
     used_learnable_tool = False
     for turn in range(max_turns):
         system_msg = {"role": "system", "content": build_system_prompt(system or UNCENSORED_SYSTEM) + "\n\n" + _agent_tool_instructions()}
+        # Mutates conv in place (per this function's own docstring/contract)
+        # so the caller's reference stays valid either way — folds anything
+        # that would overflow the model's context window into one summary
+        # turn instead of the model silently losing it.
+        conv[:] = await _compact_conversation_if_needed(conv, model, len(system_msg["content"]))
         messages = [system_msg] + conv
 
         # turn 0's user message is already the last entry in `conv` (the caller
@@ -4128,6 +4284,12 @@ EMAIL_PROVIDERS = {
     "zoho":     {"label": "Zoho Mail",                  "imap_host": "imap.zoho.com",         "imap_port": 993, "smtp_host": "smtp.zoho.com",       "smtp_port": 587, "smtp_ssl": False, "note": "Generate an app-specific password in Zoho Account Security."},
     "aol":      {"label": "AOL Mail",                   "imap_host": "imap.aol.com",          "imap_port": 993, "smtp_host": "smtp.aol.com",        "smtp_port": 587, "smtp_ssl": False, "note": "Generate an app password in AOL Account Security."},
     "gmx":      {"label": "GMX Mail",                   "imap_host": "imap.gmx.com",          "imap_port": 993, "smtp_host": "smtp.gmx.com",        "smtp_port": 587, "smtp_ssl": False, "note": ""},
+    # Proton doesn't expose real IMAP/SMTP on its own servers at all (mail
+    # stays end-to-end encrypted there) — Proton Mail Bridge, a small app
+    # Proton ships, runs on this same machine and re-exposes it locally.
+    # Host/port/password all come from Bridge's own UI, not proton.me — the
+    # defaults below are Bridge's standard local ports, not a live endpoint.
+    "protonmail": {"label": "Proton Mail",              "imap_host": "127.0.0.1",             "imap_port": 1143, "smtp_host": "127.0.0.1",           "smtp_port": 1025, "smtp_ssl": False, "note": "Requires Proton Mail Bridge running on this machine (proton.me/mail/bridge) — use the host, port, and password Bridge itself displays, not your real Proton password."},
     "custom":   {"label": "Custom / Other (IMAP+SMTP)", "imap_host": "",                      "imap_port": 993, "smtp_host": "",                    "smtp_port": 587, "smtp_ssl": False, "note": "Works with any standards-compliant IMAP/SMTP server — enter your provider's host/port."},
 }
 
@@ -4142,6 +4304,7 @@ _EMAIL_DOMAIN_MAP = {
     "zoho.com": "zoho",
     "aol.com": "aol",
     "gmx.com": "gmx", "gmx.net": "gmx",
+    "protonmail.com": "protonmail", "proton.me": "protonmail", "pm.me": "protonmail",
 }
 
 def _parse_autoconfig_xml(xml_text: str) -> dict | None:
@@ -4238,6 +4401,11 @@ class DraftRepliesRequest(BaseModel):
     body: str
     instructions: str = ""
 
+class ComposeEmailRequest(BaseModel):
+    model: str
+    to: str = ""
+    instructions: str
+
 class SendEmailRequest(BaseModel):
     account_id: str
     to: str
@@ -4321,6 +4489,34 @@ def _decode_mime(value: str) -> str:
         out += text.decode(enc or "utf-8", errors="replace") if isinstance(text, bytes) else text
     return out
 
+def _decode_imap_utf7(name: str) -> str:
+    """IMAP folder names are encoded in RFC 3501's modified UTF-7 ('&' where
+    standard UTF-7 uses '+', ',' where it uses '/', no padding, '&-' as a
+    literal ampersand). Real folder names (INBOX, Sent, Drafts...) are plain
+    ASCII and never hit this path — falls back to the raw name on anything
+    unexpected rather than failing the whole folder list over one oddly
+    named folder."""
+    if "&" not in name:
+        return name
+    try:
+        result, i = [], 0
+        while i < len(name):
+            if name[i] == "&":
+                j = name.index("-", i)
+                chunk = name[i + 1:j]
+                if not chunk:
+                    result.append("&")
+                else:
+                    b64 = (chunk.replace(",", "/") + "=" * (-len(chunk) % 4)).encode("ascii")
+                    result.append(base64.b64decode(b64).decode("utf-16-be"))
+                i = j + 1
+            else:
+                result.append(name[i])
+                i += 1
+        return "".join(result)
+    except Exception:
+        return name
+
 def _extract_body(msg) -> str:
     if msg.is_multipart():
         for part in msg.walk():
@@ -4364,10 +4560,16 @@ def _imap_fetch(account: dict, folder: str, limit: int, access_token: str = "") 
             return []
         ids = data[0].split()[-limit:]
         for uid_ in reversed(ids):
-            status, msg_data = imap.fetch(uid_, "(RFC822)")
+            # FLAGS alongside RFC822 in one round trip — msg_data[0] stays the
+            # same (meta-line, raw-bytes) tuple imaplib always returns for a
+            # single fetched item, just with the FLAGS list folded into the
+            # meta line instead of a second server round trip per message.
+            status, msg_data = imap.fetch(uid_, "(FLAGS RFC822)")
             if status != "OK" or not msg_data or not msg_data[0]:
                 continue
-            msg = message_from_bytes(msg_data[0][1])
+            meta, raw = msg_data[0]
+            unread = b"\\Seen" not in (meta or b"")
+            msg = message_from_bytes(raw)
             body = _extract_body(msg)
             messages.append({
                 "uid": uid_.decode(),
@@ -4376,8 +4578,57 @@ def _imap_fetch(account: dict, folder: str, limit: int, access_token: str = "") 
                 "date": msg.get("Date", ""),
                 "preview": body.strip()[:200],
                 "body": body.strip()[:20000],
+                "unread": unread,
             })
     return messages
+
+def _imap_list_folders(account: dict, access_token: str = "") -> list:
+    with imaplib.IMAP4_SSL(account["imap_host"], account.get("imap_port", 993)) as imap:
+        _imap_login(imap, account, access_token)
+        status, data = imap.list()
+        if status != "OK" or not data:
+            return [{"name": "INBOX", "unread": 0}]
+        raw_names = []
+        for entry in data:
+            if not entry:
+                continue
+            # A LIST response line looks like: (\HasNoChildren) "/" "INBOX"
+            # — the folder name is always the last quoted (or bare) token.
+            decoded = entry.decode(errors="replace")
+            match = re.search(r'"([^"]*)"\s*$', decoded)
+            raw_names.append(match.group(1) if match else decoded.rsplit(" ", 1)[-1])
+
+        folders = []
+        for raw_name in raw_names:
+            # One STATUS round trip per folder for its unread count (Outlook's
+            # "Inbox 11" badges) — quoted since names with spaces ("Sent
+            # Mail") are otherwise invalid IMAP syntax. Wrapped per-folder so
+            # one folder a server won't report STATUS for (seen on some
+            # [Gmail]/... container folders) doesn't blank out every count.
+            unread = 0
+            try:
+                st, st_data = imap.status(f'"{raw_name}"', "(UNSEEN)")
+                if st == "OK" and st_data and st_data[0]:
+                    m = re.search(rb"UNSEEN\s+(\d+)", st_data[0])
+                    if m:
+                        unread = int(m.group(1))
+            except Exception:
+                pass
+            folders.append({"name": _decode_imap_utf7(raw_name), "unread": unread})
+
+        # INBOX first, then alphabetical — the order every real mail client uses.
+        folders.sort(key=lambda f: (f["name"].upper() != "INBOX", f["name"].lower()))
+        return folders or [{"name": "INBOX", "unread": 0}]
+
+@app.get("/api/email/{account_id}/folders")
+async def get_email_folders(account_id: str):
+    account = _get_email_account(account_id)
+    try:
+        access_token = await _google_access_token(account["google_account_id"]) if account.get("auth") == "oauth" else ""
+        folders = await asyncio.to_thread(_imap_list_folders, account, access_token)
+        return {"folders": folders}
+    except Exception as e:
+        raise HTTPException(502, f"IMAP error: {e}")
 
 @app.get("/api/email/{account_id}/messages")
 async def get_email_messages(account_id: str, folder: str = "INBOX", limit: int = 25):
@@ -4397,6 +4648,97 @@ def _imap_delete(account: dict, folder: str, uid: str, access_token: str = ""):
         imap.select(folder or "INBOX")
         imap.store(uid, "+FLAGS", "\\Deleted")
         imap.expunge()
+
+def _imap_mark_read(account: dict, folder: str, uid: str, access_token: str = ""):
+    with imaplib.IMAP4_SSL(account["imap_host"], account.get("imap_port", 993)) as imap:
+        _imap_login(imap, account, access_token)
+        imap.select(folder or "INBOX")
+        imap.store(uid, "+FLAGS", "\\Seen")
+
+@app.post("/api/email/{account_id}/messages/{uid}/read")
+async def mark_email_read(account_id: str, uid: str, folder: str = "INBOX"):
+    account = _get_email_account(account_id)
+    try:
+        access_token = await _google_access_token(account["google_account_id"]) if account.get("auth") == "oauth" else ""
+        await asyncio.to_thread(_imap_mark_read, account, folder, uid, access_token)
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(502, f"IMAP error: {e}")
+
+
+def _imap_archive(account: dict, folder: str, uid: str, access_token: str = "") -> str:
+    """Moves a message to this account's archive-equivalent folder — swipe-
+    to-archive in the frontend. Returns the folder it moved to. Gmail has no
+    real "Archive" folder (archiving there just means removing it from
+    INBOX; the message stays visible under [Gmail]/All Mail, which is what
+    that IMAP folder actually is), so Gmail accounts target that folder
+    specifically; everything else looks for a folder literally named
+    "Archive". Raises ValueError (→ 400, a real "can't do this" answer) when
+    neither exists, rather than silently picking an unrelated folder."""
+    existing = _imap_list_folders(account, access_token)
+    target = None
+    if account.get("provider") == "gmail":
+        target = next((f["name"] for f in existing if f["name"] == "[Gmail]/All Mail"), None)
+    if not target:
+        target = next((f["name"] for f in existing if f["name"].lower() == "archive"), None)
+    if not target:
+        raise ValueError("No Archive folder found on this account — create one (Gmail accounts use [Gmail]/All Mail automatically and don't need one).")
+
+    with imaplib.IMAP4_SSL(account["imap_host"], account.get("imap_port", 993)) as imap:
+        _imap_login(imap, account, access_token)
+        imap.select(folder or "INBOX")
+        # IMAP MOVE (RFC 6851) first — one round trip, supported by Gmail and
+        # every mainstream provider this app lists. COPY + mark-deleted +
+        # EXPUNGE is the fallback for a server that predates it.
+        typ, _ = imap.uid("MOVE", uid, f'"{target}"')
+        if typ != "OK":
+            typ, _ = imap.uid("COPY", uid, f'"{target}"')
+            if typ != "OK":
+                raise ValueError(f"Could not move this message to {target}")
+            imap.uid("STORE", uid, "+FLAGS", "(\\Deleted)")
+            imap.expunge()
+    return target
+
+@app.post("/api/email/{account_id}/messages/{uid}/archive")
+async def archive_email_message(account_id: str, uid: str, folder: str = "INBOX"):
+    account = _get_email_account(account_id)
+    try:
+        access_token = await _google_access_token(account["google_account_id"]) if account.get("auth") == "oauth" else ""
+        target = await asyncio.to_thread(_imap_archive, account, folder, uid, access_token)
+        return {"ok": True, "archived_to": target}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(502, f"IMAP error: {e}")
+
+
+def _imap_empty_folder(account: dict, folder: str, access_token: str = "") -> int:
+    """Permanently deletes every message in `folder` — the "Empty Trash/
+    Spam/Junk" action real mail clients offer for exactly those folders.
+    Returns how many were removed. `folder` takes a query param, not a path
+    segment, since real folder names contain "/" (e.g. "[Gmail]/Bin")."""
+    with imaplib.IMAP4_SSL(account["imap_host"], account.get("imap_port", 993)) as imap:
+        _imap_login(imap, account, access_token)
+        imap.select(folder or "INBOX")
+        status, data = imap.search(None, "ALL")
+        if status != "OK" or not data or not data[0]:
+            return 0
+        ids = data[0].split()
+        if not ids:
+            return 0
+        imap.store(b",".join(ids), "+FLAGS", "\\Deleted")
+        imap.expunge()
+        return len(ids)
+
+@app.post("/api/email/{account_id}/folders/empty")
+async def empty_email_folder(account_id: str, folder: str):
+    account = _get_email_account(account_id)
+    try:
+        access_token = await _google_access_token(account["google_account_id"]) if account.get("auth") == "oauth" else ""
+        count = await asyncio.to_thread(_imap_empty_folder, account, folder, access_token)
+        return {"ok": True, "deleted": count}
+    except Exception as e:
+        raise HTTPException(502, f"IMAP error: {e}")
 
 @app.delete("/api/email/{account_id}/messages/{uid}")
 async def delete_email_message(account_id: str, uid: str, folder: str = "INBOX"):
@@ -4479,6 +4821,34 @@ Each reply should be a complete, ready-to-send email body (no subject line). Var
         except json.JSONDecodeError:
             pass
     return {"replies": [content.strip()] if content.strip() else ["(No draft generated — try again.)"]}
+
+
+@app.post("/api/email/compose")
+async def compose_email(req: ComposeEmailRequest):
+    """Drafts a brand-new email (subject + body) from a short instruction —
+    the "Copper AI" compose path, distinct from draft_replies above which
+    always answers an existing message. Same JSON-extraction-with-fallback
+    shape as draft_replies for consistency."""
+    prompt = f"""Draft a new email from scratch based on the instructions below. Respond with ONLY a JSON object (no other text, no markdown fences): {{"subject": string, "body": string}}.
+
+{"Recipient: " + req.to if req.to else ""}
+Instructions: {req.instructions}
+
+The body should be a complete, ready-to-send email — no placeholder brackets like [Your Name] unless the instructions specifically ask for a signature placeholder."""
+    try:
+        content = await _llm_complete(req.model, [{"role": "user", "content": prompt}])
+    except Exception as e:
+        raise HTTPException(502, f"Model error: {e}")
+
+    match = re.search(r'\{.*\}', content, re.DOTALL)
+    if match:
+        try:
+            draft = json.loads(match.group(0))
+            if isinstance(draft, dict) and draft.get("body"):
+                return {"subject": str(draft.get("subject", "")), "body": str(draft.get("body", ""))}
+        except json.JSONDecodeError:
+            pass
+    return {"subject": "", "body": content.strip()}
 
 
 @app.post("/api/email/send")
