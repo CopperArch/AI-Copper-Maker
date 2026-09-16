@@ -643,9 +643,23 @@
     position: relative;
   }
   .email-row:hover { background: rgba(255,255,255,.04); }
-  .email-row.active { background: rgba(31,111,235,.15); border-color: var(--accent2); }
-  .email-row.unread { border-left: 3px solid var(--accent2); }
+  .email-row.read { background: rgba(34,197,94,.08); }
+  .email-row.unread { background: rgba(239,68,68,.10); border-left: 3px solid var(--danger); }
   .email-row.unread .email-row-sender, .email-row.unread .email-row-subject { font-weight: 700; }
+  /* Pinned wins over read/unread tinting (amber, regardless of read state) —
+     comes after them in source so equal-specificity cascade favors it. */
+  .email-row.pinned { background: rgba(217,119,6,.16); border-left: 3px solid #d97706; }
+  /* Selection must stay visually distinct no matter what read/unread/pinned
+     tint is under it — the one deliberate !important in this file. */
+  .email-row.active { background: rgba(31,111,235,.18) !important; border-color: var(--accent2); }
+  .email-row-pin {
+    position: absolute; top: 6px; right: 8px; display: none;
+    background: none; border: none; cursor: pointer; font-size: 12px; opacity: .6;
+    padding: 2px 4px; border-radius: 4px; line-height: 1;
+  }
+  .email-row:hover .email-row-pin, .email-row.pinned .email-row-pin { display: inline-block; }
+  .email-row.pinned .email-row-pin { opacity: 1; }
+  .email-row-pin:hover { background: rgba(255,255,255,.12); opacity: 1; }
   .email-row-top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
   .email-row-sender { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .email-row-date { font-size: 11px; color: var(--muted); flex-shrink: 0; }
@@ -5815,6 +5829,32 @@ function formatEmailDate(raw, withTime) {
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: d.getFullYear() === now.getFullYear() ? undefined : 'numeric' });
 }
 
+// Pin state lives in localStorage, not the message object — IMAP has no
+// native "pinned" concept, and currentEmailMessages is rebuilt from scratch
+// on every loadInbox() call, so anything not persisted separately would
+// reset on every refresh. Keyed by account+folder+uid since a UID is only
+// unique within one folder of one account.
+function _emailPinKey(accountId, folder, uid) {
+  return `${accountId}::${folder}::${uid}`;
+}
+function _loadPinnedEmailKeys() {
+  try { return new Set(JSON.parse(localStorage.getItem('pinnedEmails') || '[]')); }
+  catch { return new Set(); }
+}
+function _savePinnedEmailKeys(set) {
+  localStorage.setItem('pinnedEmails', JSON.stringify([...set]));
+}
+function toggleEmailPin(i) {
+  const m = currentEmailMessages[i];
+  if (!m) return;
+  const accountId = document.getElementById('email-account-select').value;
+  const key = _emailPinKey(accountId, currentEmailFolder, m.uid);
+  const pinned = _loadPinnedEmailKeys();
+  if (pinned.has(key)) pinned.delete(key); else pinned.add(key);
+  _savePinnedEmailKeys(pinned);
+  renderEmailMessageList();
+}
+
 async function loadInbox() {
   const accountId = document.getElementById('email-account-select').value;
   const list = document.getElementById('email-message-list');
@@ -5825,14 +5865,37 @@ async function loadInbox() {
     if (!r.ok) { const e = await r.json(); throw new Error(e.detail || 'Failed'); }
     const d = await r.json();
     currentEmailMessages = d.messages || [];
-    if (!currentEmailMessages.length) {
-      list.innerHTML = '<div class="runner-placeholder">No messages found.</div>';
-      return;
-    }
-    list.innerHTML = currentEmailMessages.map((m, i) => {
-      const sender = parseEmailFrom(m.from);
-      return `
-      <div class="email-row ${m.unread ? 'unread' : ''}" id="email-row-${i}" onclick="openEmailMessage(${i})">
+    renderEmailMessageList();
+  } catch (err) {
+    list.innerHTML = `<span class="stderr">Error: ${err.message}</span>`;
+  }
+}
+
+// Split from loadInbox() so pin/unpin can re-render (re-sort included)
+// without an extra IMAP fetch.
+function renderEmailMessageList() {
+  const list = document.getElementById('email-message-list');
+  if (!currentEmailMessages.length) {
+    list.innerHTML = '<div class="runner-placeholder">No messages found.</div>';
+    return;
+  }
+  const accountId = document.getElementById('email-account-select').value;
+  const pinnedKeys = _loadPinnedEmailKeys();
+  // Pinned-to-top, stable otherwise (Array.sort is stable in every current
+  // JS engine) — preserves the server's own newest-first order within each
+  // of the two groups.
+  const withPinFlag = currentEmailMessages.map(m => ({
+    m, pinned: pinnedKeys.has(_emailPinKey(accountId, currentEmailFolder, m.uid)),
+  }));
+  withPinFlag.sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0));
+
+  list.innerHTML = withPinFlag.map(({ m, pinned }) => {
+    const i = currentEmailMessages.indexOf(m);
+    const sender = parseEmailFrom(m.from);
+    const stateClass = pinned ? 'pinned' : (m.unread ? 'unread' : 'read');
+    return `
+      <div class="email-row ${stateClass}" id="email-row-${i}" onclick="openEmailMessage(${i})">
+        <button class="email-row-pin" onclick="event.stopPropagation(); toggleEmailPin(${i})" title="${pinned ? 'Unpin' : 'Pin to top'}">📌</button>
         <div class="email-row-top">
           <span class="email-row-sender">${escHtml(sender.name)}</span>
           <span class="email-row-date">${escHtml(formatEmailDate(m.date))}</span>
@@ -5840,10 +5903,7 @@ async function loadInbox() {
         <span class="email-row-subject">${escHtml(m.subject || '(no subject)')}</span>
         <span class="email-row-preview">${escHtml(m.preview)}</span>
       </div>`;
-    }).join('');
-  } catch (err) {
-    list.innerHTML = `<span class="stderr">Error: ${err.message}</span>`;
-  }
+  }).join('');
 }
 
 function openEmailMessage(i) {
@@ -5859,7 +5919,12 @@ function openEmailMessage(i) {
   // failed mark-read shouldn't block reading the message you already opened.
   if (m.unread) {
     m.unread = false;
-    row?.classList.remove('unread');
+    // Swap the color state, but leave a pinned row's amber alone — pinned
+    // overrides read/unread tinting regardless of read state (see CSS).
+    if (row && !row.classList.contains('pinned')) {
+      row.classList.remove('unread');
+      row.classList.add('read');
+    }
     const accountId = document.getElementById('email-account-select').value;
     fetch(`${API}/api/email/${accountId}/messages/${encodeURIComponent(m.uid)}/read?folder=${encodeURIComponent(currentEmailFolder)}`, { method: 'POST' }).catch(() => {});
   }
