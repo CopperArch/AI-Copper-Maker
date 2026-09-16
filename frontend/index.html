@@ -1445,6 +1445,7 @@
             <button class="btn btn-secondary btn-sm" onclick="loadInbox()">↻ Refresh</button>
             <button class="btn btn-secondary btn-sm" onclick="toggleEmailSetup()">⚙ Accounts</button>
             <button class="btn btn-secondary btn-sm" onclick="toggleContacts()">👥 Contacts</button>
+            <button class="btn btn-danger btn-sm" id="email-empty-folder-btn" onclick="emptyCurrentEmailFolder()" style="display:none">🗑 Empty Folder</button>
             <span style="margin-left:auto;font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px">
               <span id="email-swipe-label"></span>
               <button class="icon-btn" onclick="toggleEmailSwipeDirection()" title="Swap swipe directions">⇄</button>
@@ -5867,6 +5868,37 @@ function renderEmailFolderRail() {
       ${f.unread ? `<span class="folder-unread-count">${f.unread}</span>` : ''}
     </div>
   `).join('');
+  updateEmptyFolderButtonVisibility();
+}
+
+// Bin/Trash/Spam/Junk are the folders every real mail client offers an
+// "Empty Folder" action for — matched on the last path segment so it still
+// works for Gmail's "[Gmail]/Bin"/"[Gmail]/Spam" alongside a plain "Trash".
+const EMAIL_EMPTYABLE_FOLDERS = new Set(['TRASH', 'BIN', 'DELETED', 'DELETED ITEMS', 'SPAM', 'JUNK', 'JUNK EMAIL']);
+function updateEmptyFolderButtonVisibility() {
+  const btn = document.getElementById('email-empty-folder-btn');
+  if (!btn) return;
+  const key = currentEmailFolder.split('/').pop().toUpperCase();
+  btn.style.display = EMAIL_EMPTYABLE_FOLDERS.has(key) ? '' : 'none';
+}
+
+async function emptyCurrentEmailFolder() {
+  const accountId = document.getElementById('email-account-select').value;
+  if (!accountId) return;
+  const label = emailFolderLabel(currentEmailFolder);
+  if (!confirm(`Permanently delete every message in "${label}"? This can't be undone.`)) return;
+  const btn = document.getElementById('email-empty-folder-btn');
+  btn.disabled = true;
+  try {
+    const r = await fetch(`${API}/api/email/${accountId}/folders/empty?folder=${encodeURIComponent(currentEmailFolder)}`, { method: 'POST' });
+    if (!r.ok) { const e = await r.json(); throw new Error(e.detail || 'Failed'); }
+    document.getElementById('email-message-detail').innerHTML = '<div class="runner-placeholder">Select a message to read it.</div>';
+    await loadEmailFolders();
+  } catch (err) {
+    alert('Could not empty folder: ' + err.message);
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 document.addEventListener('DOMContentLoaded', () => {

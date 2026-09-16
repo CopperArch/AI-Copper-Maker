@@ -4711,6 +4711,35 @@ async def archive_email_message(account_id: str, uid: str, folder: str = "INBOX"
     except Exception as e:
         raise HTTPException(502, f"IMAP error: {e}")
 
+
+def _imap_empty_folder(account: dict, folder: str, access_token: str = "") -> int:
+    """Permanently deletes every message in `folder` — the "Empty Trash/
+    Spam/Junk" action real mail clients offer for exactly those folders.
+    Returns how many were removed. `folder` takes a query param, not a path
+    segment, since real folder names contain "/" (e.g. "[Gmail]/Bin")."""
+    with imaplib.IMAP4_SSL(account["imap_host"], account.get("imap_port", 993)) as imap:
+        _imap_login(imap, account, access_token)
+        imap.select(folder or "INBOX")
+        status, data = imap.search(None, "ALL")
+        if status != "OK" or not data or not data[0]:
+            return 0
+        ids = data[0].split()
+        if not ids:
+            return 0
+        imap.store(b",".join(ids), "+FLAGS", "\\Deleted")
+        imap.expunge()
+        return len(ids)
+
+@app.post("/api/email/{account_id}/folders/empty")
+async def empty_email_folder(account_id: str, folder: str):
+    account = _get_email_account(account_id)
+    try:
+        access_token = await _google_access_token(account["google_account_id"]) if account.get("auth") == "oauth" else ""
+        count = await asyncio.to_thread(_imap_empty_folder, account, folder, access_token)
+        return {"ok": True, "deleted": count}
+    except Exception as e:
+        raise HTTPException(502, f"IMAP error: {e}")
+
 @app.delete("/api/email/{account_id}/messages/{uid}")
 async def delete_email_message(account_id: str, uid: str, folder: str = "INBOX"):
     account = _get_email_account(account_id)
