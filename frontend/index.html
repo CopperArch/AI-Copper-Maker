@@ -34,6 +34,11 @@
     --muted:    #7d8590;
     --user-bg:  #1c2128;
     --ai-bg:    #161b22;
+    /* Brand mark only (logo + the word "Copper" in the header) — kept
+       separate from --accent, which still drives buttons/links/active
+       states everywhere else in the UI. Same value in both themes on
+       purpose: a brand color should stay recognizable regardless of theme. */
+    --copper:   #B87333;
     --danger:   #da3633;
     --warn:     #d29922;
   }
@@ -77,7 +82,7 @@
     flex-shrink: 0;
   }
   header h1 { font-size: 16px; font-weight: 600; line-height: 1.2; }
-  header h1 span { color: var(--accent); }
+  header h1 span { color: var(--copper); }
   header h1 .byline { display: block; font-size: 10px; font-weight: 400; color: var(--muted); letter-spacing: .3px; }
   .header-right { margin-left: auto; display: flex; align-items: center; gap: 18px; }
   .status-group { display: flex; align-items: center; gap: 8px; }
@@ -781,7 +786,7 @@
 <header>
   <button class="icon-btn sidebar-toggle-btn" onclick="toggleSidebar()" title="Toggle sidebar" aria-label="Toggle sidebar">☰</button>
   <svg width="24" height="24" viewBox="0 0 24 24" fill="none" onclick="showAboutModal()" style="cursor:pointer" title="About AI Copper Maker">
-    <rect width="24" height="24" rx="6" fill="#238636"/>
+    <rect width="24" height="24" rx="6" fill="var(--copper)"/>
     <path d="M7 8h10M7 12h6M7 16h8" stroke="white" stroke-width="1.8" stroke-linecap="round"/>
   </svg>
   <h1>AI <span>Copper</span> Maker<span class="byline">A local AI coding studio — by CopperArch</span></h1>
@@ -1910,7 +1915,7 @@ function showAboutModal() {
     <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:24px;max-width:420px;width:90%;box-shadow:0 8px 30px rgba(0,0,0,.4)">
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
         <svg width="28" height="28" viewBox="0 0 24 24" fill="none">
-          <rect width="24" height="24" rx="6" fill="#238636"/>
+          <rect width="24" height="24" rx="6" fill="var(--copper)"/>
           <path d="M7 8h10M7 12h6M7 16h8" stroke="white" stroke-width="1.8" stroke-linecap="round"/>
         </svg>
         <div style="font-weight:600;font-size:16px">AI Copper Maker</div>
