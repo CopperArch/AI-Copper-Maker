@@ -2914,6 +2914,108 @@ Did this session involve solving a real problem, fixing a non-obvious bug, or di
         pass
 
 
+_MODEL_CONTEXT_LENGTH_CACHE: dict[str, int] = {}
+DEFAULT_CONTEXT_TOKENS = 8192  # conservative fallback when Ollama doesn't report context_length
+
+
+async def _get_model_context_length(model: str) -> int:
+    """Best-effort lookup of the model's real context window, cached per
+    model name for the process lifetime — this is checked every agent turn
+    (see _compact_conversation_if_needed) and the value never changes
+    mid-run, so there's no reason to re-hit Ollama's API on every turn."""
+    if model in _MODEL_CONTEXT_LENGTH_CACHE:
+        return _MODEL_CONTEXT_LENGTH_CACHE[model]
+    if _is_cloud_model(model):
+        # Cloud context windows are documented and comfortably large; not
+        # worth a provider-specific lookup just to feed a compaction budget.
+        _MODEL_CONTEXT_LENGTH_CACHE[model] = 32000
+        return 32000
+    result = DEFAULT_CONTEXT_TOKENS
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            r = await client.get(f"{OLLAMA}/api/tags")
+            data = r.json()
+            for m in data.get("models", []):
+                if m.get("name") == model:
+                    ctx = (m.get("details") or {}).get("context_length")
+                    if isinstance(ctx, int) and ctx > 0:
+                        result = ctx
+                    break
+    except Exception:
+        pass
+    _MODEL_CONTEXT_LENGTH_CACHE[model] = result
+    return result
+
+
+async def _summarize_dropped_turns(model: str, turns: list) -> str:
+    """One cheap extra model call to compress history that's about to be
+    dropped — trading a bit more compute for keeping the gist of what
+    happened instead of losing it outright. This is the same trade
+    context-extending tools like Plandex make: break a big task into more,
+    smaller model calls instead of one call that no longer fits. Falls back
+    to a naive truncated transcript if the summarization call itself fails,
+    so compaction never hard-fails the user's actual turn."""
+    transcript = "\n".join(f"{t.get('role', '?')}: {(t.get('content') or '')[:500]}" for t in turns)
+    prompt = (
+        "Summarize the following AI agent conversation history in a few dense "
+        "sentences. Keep concrete facts, decisions, file paths, and results the "
+        "model will still need to correctly continue the task — this replaces "
+        "the full history from here on, not a preview of it:\n\n" + transcript[:20000]
+    )
+    try:
+        summary = (await _llm_complete(model, [{"role": "user", "content": prompt}], timeout=60)).strip()
+        if summary:
+            return summary
+    except Exception:
+        pass
+    return _clip_for_model(transcript, 2000)
+
+
+async def _compact_conversation_if_needed(conv: list, model: str, system_prompt_chars: int) -> list:
+    """Keeps a long agent run (or a long saved conversation resumed from
+    before) from silently overflowing the model's context window. Ollama
+    doesn't error when a request overflows num_ctx — it just quietly drops
+    earlier context, which reads to the user as the model "forgetting" the
+    task partway through a long multi-tool run. Instead of losing that
+    history for free, fold whatever would be dropped into one compact
+    summary turn first — replaces the old MAX_HISTORY_MESSAGES blind slice
+    (frontend/index.html), which only ever dropped history outright with
+    nothing kept in its place.
+
+    Budgets on character count (~4 chars/token, the standard estimator used
+    when a real tokenizer isn't available) rather than an exact token count —
+    good enough to trigger compaction comfortably before the real limit,
+    which is all a safety margin needs to do.
+    """
+    context_tokens = await _get_model_context_length(model)
+    # Compact at 60% of the window, not 90%+, so there's still headroom left
+    # for one big tool result (a large file read, a long command's output)
+    # on the very next turn without immediately tipping over again.
+    budget_chars = int(context_tokens * 4 * 0.6) - system_prompt_chars
+    total_chars = sum(len(m.get("content", "") or "") for m in conv)
+    if budget_chars <= 0 or total_chars <= budget_chars:
+        return conv
+
+    # Walk backward keeping the most recent messages verbatim — what the
+    # model actually needs to continue the current step — reserving at most
+    # half the budget for them so there's always real room left for the
+    # summary plus this turn's own reply.
+    keep_chars = budget_chars // 2
+    split_idx = len(conv)
+    running = 0
+    for i in range(len(conv) - 1, -1, -1):
+        running += len(conv[i].get("content", "") or "")
+        if running > keep_chars:
+            break
+        split_idx = i
+    if split_idx <= 0:
+        return conv  # everything is "recent" — nothing old enough to fold away
+
+    old, recent = conv[:split_idx], conv[split_idx:]
+    summary = await _summarize_dropped_turns(model, old)
+    return [{"role": "user", "content": f"[Summary of earlier turns, compacted to stay within context: {summary}]"}] + recent
+
+
 async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str = ""):
     """Runs the tool-use agent loop, yielding structured event dicts. Shared by
     the interactive /api/agent endpoint (streamed to the browser) and scheduled
@@ -2927,6 +3029,11 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
     used_learnable_tool = False
     for turn in range(max_turns):
         system_msg = {"role": "system", "content": build_system_prompt(system or UNCENSORED_SYSTEM) + "\n\n" + _agent_tool_instructions()}
+        # Mutates conv in place (per this function's own docstring/contract)
+        # so the caller's reference stays valid either way — folds anything
+        # that would overflow the model's context window into one summary
+        # turn instead of the model silently losing it.
+        conv[:] = await _compact_conversation_if_needed(conv, model, len(system_msg["content"]))
         messages = [system_msg] + conv
 
         # turn 0's user message is already the last entry in `conv` (the caller
