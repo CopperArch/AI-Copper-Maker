@@ -582,19 +582,39 @@
   .runner-output .exit { color: var(--muted); font-size: 11px; margin-top: 8px; border-top: 1px solid var(--border); padding-top: 8px; }
   .runner-placeholder { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--muted); font-size: 13px; text-align: center; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
 
-  /* ── Email: Outlook/Gmail-style inbox list + reading pane ── */
-  .email-list, .email-detail {
-    background: var(--surface);
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  /* ── Email: Outlook-style ribbon + folder rail + list + reading pane ── */
+  .email-app-font { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  .email-ribbon {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--surface); flex-shrink: 0;
   }
+  .email-ribbon select { width: auto; min-width: 180px; }
+  .email-3pane { flex: 1; display: flex; overflow: hidden; min-height: 0; }
+
+  .email-folder-rail {
+    width: 170px; flex-shrink: 0; overflow-y: auto; padding: 10px 6px;
+    border-right: 1px solid var(--border); background: var(--surface);
+  }
+  .email-folder-item {
+    display: flex; align-items: center; gap: 8px;
+    padding: 7px 10px; border-radius: 6px; cursor: pointer; font-size: 13px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .email-folder-item:hover { background: rgba(255,255,255,.05); }
+  .email-folder-item.active { background: rgba(31,111,235,.15); color: var(--accent2); font-weight: 600; }
+
+  .email-list, .email-detail { background: var(--surface); }
   .email-row {
     display: flex; flex-direction: column; gap: 3px;
     padding: 10px 14px; margin: 6px 8px;
     border: 1px solid var(--border); border-radius: 10px;
     cursor: pointer; transition: background .1s ease, border-color .1s ease;
+    position: relative;
   }
   .email-row:hover { background: rgba(255,255,255,.04); }
   .email-row.active { background: rgba(31,111,235,.15); border-color: var(--accent2); }
+  .email-row.unread { border-left: 3px solid var(--accent2); }
+  .email-row.unread .email-row-sender, .email-row.unread .email-row-subject { font-weight: 700; }
   .email-row-top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
   .email-row-sender { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .email-row-date { font-size: 11px; color: var(--muted); flex-shrink: 0; }
@@ -613,9 +633,53 @@
   .email-detail-date { font-size: 12px; color: var(--muted); margin-left: auto; white-space: nowrap; }
   .email-detail-body {
     padding: 20px 24px; font-size: 14px; line-height: 1.7; white-space: pre-wrap;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   }
   .email-detail-actions { padding: 0 24px 20px; display: flex; gap: 8px; flex-wrap: wrap; }
+
+  /* "Copper AI" — the app's answer to Copilot in Outlook. Uses --copper (not
+     --accent2, which everything else in Email uses) so the AI-assist actions
+     read as a distinct, branded capability rather than another generic
+     button. */
+  .btn-copper {
+    background: var(--copper); color: #fff;
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 7px 14px; border-radius: 6px; border: none;
+    cursor: pointer; font-size: 13px; font-weight: 600;
+    transition: opacity .15s;
+  }
+  .btn-copper:hover { opacity: .85; }
+  .btn-copper.btn-sm { padding: 4px 10px; font-size: 12px; }
+
+  /* ── Compose modal ── */
+  .compose-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,.55);
+    display: flex; align-items: center; justify-content: center; z-index: 3000;
+  }
+  .compose-box {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    width: 92%; max-width: 640px; max-height: 85vh; display: flex; flex-direction: column;
+    box-shadow: 0 12px 40px rgba(0,0,0,.4); overflow: hidden;
+  }
+  .compose-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 18px; border-bottom: 1px solid var(--border); font-weight: 600; font-size: 14px;
+  }
+  .compose-body { padding: 14px 18px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+  .compose-body input { font-size: 13px; }
+  .compose-body textarea {
+    width: 100%; min-height: 220px; resize: vertical; font-family: inherit; font-size: 13px;
+    background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    border-radius: 6px; padding: 8px 10px;
+  }
+  .compose-ai-row {
+    display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+    padding: 10px; border: 1px dashed var(--copper); border-radius: 8px; background: rgba(184,115,51,.06);
+  }
+  .compose-ai-row input { flex: 1; min-width: 160px; }
+  .compose-footer {
+    display: flex; justify-content: flex-end; gap: 8px;
+    padding: 12px 18px; border-top: 1px solid var(--border);
+  }
 
   /* ── Models Panel ── */
   .models-panel { padding: 24px; overflow-y: auto; max-width: 860px; }
@@ -1316,18 +1380,18 @@
     </div>
 
     <!-- Email Tab -->
-    <div class="tab-panel" id="tab-email">
+    <div class="tab-panel email-app-font" id="tab-email">
       <div class="runner-layout">
-        <div class="runner-panel">
-          <div class="runner-toolbar">
-            <h2>📧 Email</h2>
-            <select id="email-account-select" style="width:auto;min-width:200px" onchange="loadInbox()"></select>
+        <div class="runner-panel" style="padding:0">
+          <div class="email-ribbon">
+            <button class="btn btn-primary btn-sm" onclick="openComposeModal()">✉ New Email</button>
+            <select id="email-account-select" onchange="onEmailAccountChange()"></select>
             <button class="btn btn-secondary btn-sm" onclick="loadInbox()">↻ Refresh</button>
             <button class="btn btn-secondary btn-sm" onclick="toggleEmailSetup()">⚙ Accounts</button>
             <button class="btn btn-secondary btn-sm" onclick="toggleContacts()">👥 Contacts</button>
           </div>
 
-          <div id="email-setup" style="display:none;padding:12px;border:1px solid var(--border);border-radius:8px;flex-direction:column;gap:8px;flex-shrink:0">
+          <div id="email-setup" style="display:none;padding:12px;margin:12px;border:1px solid var(--border);border-radius:8px;flex-direction:column;gap:8px;flex-shrink:0">
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding-bottom:8px;border-bottom:1px solid var(--border)">
               <button class="btn btn-accent btn-sm" onclick="startGoogleSignIn()">🔵 Sign in with Google</button>
               <span style="font-size:11px;color:var(--muted)">Covers both Gmail and Google Calendar in one step — you'll confirm what to import before anything's added.</span>
@@ -1371,7 +1435,7 @@
             <div id="email-accounts-list" style="display:flex;flex-direction:column;gap:4px"></div>
           </div>
 
-          <div id="contacts-panel" style="display:none;padding:12px;border:1px solid var(--border);border-radius:8px;flex-direction:column;gap:8px;flex-shrink:0;max-height:280px">
+          <div id="contacts-panel" style="display:none;padding:12px;margin:12px;border:1px solid var(--border);border-radius:8px;flex-direction:column;gap:8px;flex-shrink:0;max-height:280px">
             <div style="display:flex;gap:8px;flex-wrap:wrap">
               <input type="text" id="contact-name" placeholder="Name" style="width:auto;flex:1;min-width:120px">
               <input type="text" id="contact-email" placeholder="Email" style="width:auto;flex:1;min-width:160px">
@@ -1382,7 +1446,10 @@
             </div>
           </div>
 
-          <div style="flex:1;display:flex;overflow:hidden;gap:0;min-height:0;border:1px solid var(--border);border-radius:8px">
+          <div class="email-3pane">
+            <div class="email-folder-rail" id="email-folder-rail">
+              <div style="font-size:12px;color:var(--muted);padding:8px 10px">No account selected</div>
+            </div>
             <div id="email-message-list" class="email-list" style="width:320px;flex-shrink:0;overflow-y:auto;border-right:1px solid var(--border)">
               <div class="runner-placeholder">Add an account, pick it above, then Refresh.</div>
             </div>
@@ -5216,6 +5283,7 @@ function removeFilePill(filename) {
 let emailAccounts = [];
 let emailProviders = {};
 let currentEmailMessages = [];
+let currentEmailFolder = 'INBOX';
 
 async function initEmailTab() {
   await loadEmailProviders();
@@ -5497,7 +5565,80 @@ async function loadEmailAccounts() {
       ? emailAccounts.map(a => `<option value="${a.id}">${escHtml(a.label)}</option>`).join('')
       : '<option value="">No accounts</option>';
     if (prev && emailAccounts.some(a => a.id === prev)) sel.value = prev;
+    if (sel.value) await loadEmailFolders();
   } catch {}
+}
+
+// Switching accounts always lands back on INBOX — a folder id from one
+// account (especially a Gmail-style "[Gmail]/Sent Mail" one) has no
+// guaranteed meaning on another.
+async function onEmailAccountChange() {
+  currentEmailFolder = 'INBOX';
+  await loadEmailFolders();
+}
+
+let currentEmailFolders = ['INBOX'];
+
+async function loadEmailFolders() {
+  const accountId = document.getElementById('email-account-select').value;
+  const rail = document.getElementById('email-folder-rail');
+  if (!accountId) {
+    rail.innerHTML = '<div style="font-size:12px;color:var(--muted);padding:8px 10px">No account selected</div>';
+    return;
+  }
+  rail.innerHTML = '<div style="font-size:12px;color:var(--muted);padding:8px 10px">Loading folders…</div>';
+  try {
+    const r = await fetch(`${API}/api/email/${accountId}/folders`);
+    const d = await r.json();
+    currentEmailFolders = d.folders && d.folders.length ? d.folders : ['INBOX'];
+    if (!currentEmailFolders.includes(currentEmailFolder)) currentEmailFolder = 'INBOX';
+    renderEmailFolderRail();
+    await loadInbox();
+  } catch (err) {
+    rail.innerHTML = `<div style="font-size:12px;padding:8px 10px" class="stderr">${escHtml(err.message)}</div>`;
+  }
+}
+
+// Common IMAP folder names get a matching icon, same idea as Outlook's
+// built-in folder icons — anything else (a custom label, a Gmail category)
+// just gets the generic folder glyph.
+const EMAIL_FOLDER_ICONS = {
+  INBOX: '📥', SENT: '📤', DRAFTS: '📝', TRASH: '🗑', DELETED: '🗑',
+  JUNK: '⚠️', SPAM: '⚠️', ARCHIVE: '📦', STARRED: '⭐', IMPORTANT: '❗',
+};
+function emailFolderIcon(name) {
+  const key = name.split('/').pop().toUpperCase();
+  return EMAIL_FOLDER_ICONS[key] || '📁';
+}
+function emailFolderLabel(name) {
+  // "[Gmail]/Sent Mail" -> "Sent Mail" — the provider prefix is redundant
+  // once it's already grouped under this account in the rail.
+  return name.replace(/^\[Gmail\]\//, '');
+}
+
+function renderEmailFolderRail() {
+  const rail = document.getElementById('email-folder-rail');
+  rail.innerHTML = currentEmailFolders.map(f => `
+    <div class="email-folder-item ${f === currentEmailFolder ? 'active' : ''}" data-folder="${escHtml(f)}">
+      <span>${emailFolderIcon(f)}</span>
+      <span style="overflow:hidden;text-overflow:ellipsis">${escHtml(emailFolderLabel(f))}</span>
+    </div>
+  `).join('');
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('email-folder-rail').addEventListener('click', e => {
+    const item = e.target.closest('.email-folder-item');
+    if (item) selectEmailFolder(item.dataset.folder);
+  });
+});
+
+function selectEmailFolder(folder) {
+  if (folder === currentEmailFolder) return;
+  currentEmailFolder = folder;
+  renderEmailFolderRail();
+  document.getElementById('email-message-detail').innerHTML = '<div class="runner-placeholder">Select a message to read it.</div>';
+  loadInbox();
 }
 
 async function addEmailAccount() {
@@ -5580,7 +5721,7 @@ async function loadInbox() {
   if (!accountId) { list.innerHTML = '<div class="runner-placeholder">Add an account first.</div>'; return; }
   list.innerHTML = '<div style="padding:12px;color:var(--muted)"><div class="thinking"><span></span><span></span><span></span></div> Loading inbox...</div>';
   try {
-    const r = await fetch(`${API}/api/email/${accountId}/messages?limit=25`);
+    const r = await fetch(`${API}/api/email/${accountId}/messages?limit=25&folder=${encodeURIComponent(currentEmailFolder)}`);
     if (!r.ok) { const e = await r.json(); throw new Error(e.detail || 'Failed'); }
     const d = await r.json();
     currentEmailMessages = d.messages || [];
@@ -5591,7 +5732,7 @@ async function loadInbox() {
     list.innerHTML = currentEmailMessages.map((m, i) => {
       const sender = parseEmailFrom(m.from);
       return `
-      <div class="email-row" id="email-row-${i}" onclick="openEmailMessage(${i})">
+      <div class="email-row ${m.unread ? 'unread' : ''}" id="email-row-${i}" onclick="openEmailMessage(${i})">
         <div class="email-row-top">
           <span class="email-row-sender">${escHtml(sender.name)}</span>
           <span class="email-row-date">${escHtml(formatEmailDate(m.date))}</span>
@@ -5609,7 +5750,19 @@ function openEmailMessage(i) {
   const m = currentEmailMessages[i];
   if (!m) return;
   document.querySelectorAll('.email-row.active').forEach(el => el.classList.remove('active'));
-  document.getElementById(`email-row-${i}`)?.classList.add('active');
+  const row = document.getElementById(`email-row-${i}`);
+  row?.classList.add('active');
+
+  // Mark read both locally (immediate UI feedback) and on the server (a
+  // real IMAP \Seen flag, not just local state) — matches what opening a
+  // message in any real mail client actually does. Fire-and-forget: a
+  // failed mark-read shouldn't block reading the message you already opened.
+  if (m.unread) {
+    m.unread = false;
+    row?.classList.remove('unread');
+    const accountId = document.getElementById('email-account-select').value;
+    fetch(`${API}/api/email/${accountId}/messages/${encodeURIComponent(m.uid)}/read?folder=${encodeURIComponent(currentEmailFolder)}`, { method: 'POST' }).catch(() => {});
+  }
 
   const sender = parseEmailFrom(m.from);
   const initial = (sender.name || '?').trim().charAt(0).toUpperCase();
@@ -5628,7 +5781,7 @@ function openEmailMessage(i) {
     </div>
     <div class="email-detail-body">${escHtml(m.body)}</div>
     <div class="email-detail-actions">
-      <button class="btn btn-accent btn-sm" onclick="draftEmailReplies(${i})">✉ Draft 3 Replies</button>
+      <button class="btn-copper btn-sm" onclick="draftEmailReplies(${i})">✨ Copper AI Reply</button>
       <button class="btn btn-secondary btn-sm" onclick="scanEmailForEvents(${i})">📅 Scan for Events</button>
       <button class="btn btn-secondary btn-sm" onclick="saveEmailMessage(${i})">💾 Save</button>
       <button class="btn btn-secondary btn-sm" onclick="deleteEmailMessage(${i})">🗑 Delete</button>
@@ -5663,7 +5816,7 @@ async function deleteEmailMessage(i) {
   if (!confirm(`Delete "${m.subject || '(no subject)'}"? This removes it from the server and can't be undone.`)) return;
   const accountId = document.getElementById('email-account-select').value;
   try {
-    const r = await fetch(`${API}/api/email/${accountId}/messages/${encodeURIComponent(m.uid)}`, { method: 'DELETE' });
+    const r = await fetch(`${API}/api/email/${accountId}/messages/${encodeURIComponent(m.uid)}?folder=${encodeURIComponent(currentEmailFolder)}`, { method: 'DELETE' });
     if (!r.ok) { const e = await r.json(); throw new Error(e.detail || 'Failed'); }
     document.getElementById('email-message-detail').innerHTML = '<div class="runner-placeholder">Select a message to read it.</div>';
     await loadInbox();
@@ -5719,6 +5872,105 @@ async function sendEmailReply(i, ri) {
     alert('Sent!');
   } catch (err) {
     alert('Error sending: ' + err.message);
+  }
+}
+
+// ── Compose (New Email) — same overlay pattern as showAboutModal()/
+// requestSudoPassword() elsewhere in this file: built in JS, not static
+// markup, since only one can ever be open at a time. Its "✨ Copper AI" row
+// is the compose-side counterpart to the "✨ Copper AI Reply" button in
+// openEmailMessage() above — one drafts a reply to an existing message, this
+// one drafts a whole new email from a short instruction (POST
+// /api/email/compose, distinct from /api/email/draft-replies).
+function openComposeModal() {
+  if (document.getElementById('compose-overlay')) return;
+  const accountId = document.getElementById('email-account-select').value;
+  if (!accountId) { alert('Add and select an email account first.'); return; }
+
+  const overlay = document.createElement('div');
+  overlay.id = 'compose-overlay';
+  overlay.className = 'compose-overlay';
+  overlay.innerHTML = `
+    <div class="compose-box">
+      <div class="compose-header">
+        <span>✉ New Email</span>
+        <button class="icon-btn" onclick="closeComposeModal()" aria-label="Close">✕</button>
+      </div>
+      <div class="compose-body">
+        <input type="text" id="compose-to" placeholder="To">
+        <input type="text" id="compose-subject" placeholder="Subject">
+        <div class="compose-ai-row">
+          <span style="font-size:13px;white-space:nowrap">✨ Copper AI:</span>
+          <input type="text" id="compose-ai-instructions" placeholder="What should this email say?" onkeydown="if(event.key==='Enter'){event.preventDefault();composeWithAI();}">
+          <button class="btn-copper btn-sm" id="compose-ai-btn" onclick="composeWithAI()">Draft it</button>
+        </div>
+        <textarea id="compose-body" placeholder="Write your email, or let Copper AI draft it above..."></textarea>
+        <div id="compose-status" style="font-size:12px;color:var(--muted)"></div>
+      </div>
+      <div class="compose-footer">
+        <button class="btn btn-secondary" onclick="closeComposeModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="sendComposedEmail()">Send</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', e => { if (e.target === overlay) closeComposeModal(); });
+  document.addEventListener('keydown', function onEsc(e) {
+    if (e.key === 'Escape') { closeComposeModal(); document.removeEventListener('keydown', onEsc); }
+  });
+  setTimeout(() => document.getElementById('compose-to').focus(), 0);
+}
+
+function closeComposeModal() {
+  document.getElementById('compose-overlay')?.remove();
+}
+
+async function composeWithAI() {
+  const model = document.getElementById('model-select').value;
+  if (!model) { alert('Select a model first (top-left)'); return; }
+  const instructions = document.getElementById('compose-ai-instructions').value.trim();
+  if (!instructions) { alert('Tell Copper AI what the email should say first.'); return; }
+  const to = document.getElementById('compose-to').value.trim();
+  const btn = document.getElementById('compose-ai-btn');
+  const status = document.getElementById('compose-status');
+  btn.disabled = true; btn.textContent = 'Drafting…';
+  status.textContent = '';
+  try {
+    const r = await fetch(`${API}/api/email/compose`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, to, instructions })
+    });
+    if (!r.ok) { const e = await r.json(); throw new Error(e.detail || 'Failed'); }
+    const d = await r.json();
+    if (d.subject && !document.getElementById('compose-subject').value) {
+      document.getElementById('compose-subject').value = d.subject;
+    }
+    document.getElementById('compose-body').value = d.body || '';
+  } catch (err) {
+    status.textContent = 'Error: ' + err.message;
+  } finally {
+    btn.disabled = false; btn.textContent = 'Draft it';
+  }
+}
+
+async function sendComposedEmail() {
+  const accountId = document.getElementById('email-account-select').value;
+  const to = document.getElementById('compose-to').value.trim();
+  const subject = document.getElementById('compose-subject').value.trim();
+  const body = document.getElementById('compose-body').value;
+  if (!to) { alert('Enter a recipient.'); return; }
+  if (!body.trim()) { alert('Write something first (or let Copper AI draft it).'); return; }
+  const status = document.getElementById('compose-status');
+  status.textContent = 'Sending…';
+  try {
+    const r = await fetch(`${API}/api/email/send`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ account_id: accountId, to, subject, body })
+    });
+    if (!r.ok) { const e = await r.json(); throw new Error(e.detail || 'Failed'); }
+    closeComposeModal();
+  } catch (err) {
+    status.textContent = 'Error: ' + err.message;
   }
 }
 

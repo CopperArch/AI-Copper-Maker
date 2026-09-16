@@ -4318,6 +4318,11 @@ class DraftRepliesRequest(BaseModel):
     body: str
     instructions: str = ""
 
+class ComposeEmailRequest(BaseModel):
+    model: str
+    to: str = ""
+    instructions: str
+
 class SendEmailRequest(BaseModel):
     account_id: str
     to: str
@@ -4401,6 +4406,34 @@ def _decode_mime(value: str) -> str:
         out += text.decode(enc or "utf-8", errors="replace") if isinstance(text, bytes) else text
     return out
 
+def _decode_imap_utf7(name: str) -> str:
+    """IMAP folder names are encoded in RFC 3501's modified UTF-7 ('&' where
+    standard UTF-7 uses '+', ',' where it uses '/', no padding, '&-' as a
+    literal ampersand). Real folder names (INBOX, Sent, Drafts...) are plain
+    ASCII and never hit this path — falls back to the raw name on anything
+    unexpected rather than failing the whole folder list over one oddly
+    named folder."""
+    if "&" not in name:
+        return name
+    try:
+        result, i = [], 0
+        while i < len(name):
+            if name[i] == "&":
+                j = name.index("-", i)
+                chunk = name[i + 1:j]
+                if not chunk:
+                    result.append("&")
+                else:
+                    b64 = (chunk.replace(",", "/") + "=" * (-len(chunk) % 4)).encode("ascii")
+                    result.append(base64.b64decode(b64).decode("utf-16-be"))
+                i = j + 1
+            else:
+                result.append(name[i])
+                i += 1
+        return "".join(result)
+    except Exception:
+        return name
+
 def _extract_body(msg) -> str:
     if msg.is_multipart():
         for part in msg.walk():
@@ -4444,10 +4477,16 @@ def _imap_fetch(account: dict, folder: str, limit: int, access_token: str = "") 
             return []
         ids = data[0].split()[-limit:]
         for uid_ in reversed(ids):
-            status, msg_data = imap.fetch(uid_, "(RFC822)")
+            # FLAGS alongside RFC822 in one round trip — msg_data[0] stays the
+            # same (meta-line, raw-bytes) tuple imaplib always returns for a
+            # single fetched item, just with the FLAGS list folded into the
+            # meta line instead of a second server round trip per message.
+            status, msg_data = imap.fetch(uid_, "(FLAGS RFC822)")
             if status != "OK" or not msg_data or not msg_data[0]:
                 continue
-            msg = message_from_bytes(msg_data[0][1])
+            meta, raw = msg_data[0]
+            unread = b"\\Seen" not in (meta or b"")
+            msg = message_from_bytes(raw)
             body = _extract_body(msg)
             messages.append({
                 "uid": uid_.decode(),
@@ -4456,8 +4495,39 @@ def _imap_fetch(account: dict, folder: str, limit: int, access_token: str = "") 
                 "date": msg.get("Date", ""),
                 "preview": body.strip()[:200],
                 "body": body.strip()[:20000],
+                "unread": unread,
             })
     return messages
+
+def _imap_list_folders(account: dict, access_token: str = "") -> list:
+    with imaplib.IMAP4_SSL(account["imap_host"], account.get("imap_port", 993)) as imap:
+        _imap_login(imap, account, access_token)
+        status, data = imap.list()
+        if status != "OK" or not data:
+            return ["INBOX"]
+        folders = []
+        for entry in data:
+            if not entry:
+                continue
+            # A LIST response line looks like: (\HasNoChildren) "/" "INBOX"
+            # — the folder name is always the last quoted (or bare) token.
+            decoded = entry.decode(errors="replace")
+            match = re.search(r'"([^"]*)"\s*$', decoded)
+            name = match.group(1) if match else decoded.rsplit(" ", 1)[-1]
+            folders.append(_decode_imap_utf7(name))
+        # INBOX first, then alphabetical — the order every real mail client uses.
+        folders.sort(key=lambda f: (f.upper() != "INBOX", f.lower()))
+        return folders or ["INBOX"]
+
+@app.get("/api/email/{account_id}/folders")
+async def get_email_folders(account_id: str):
+    account = _get_email_account(account_id)
+    try:
+        access_token = await _google_access_token(account["google_account_id"]) if account.get("auth") == "oauth" else ""
+        folders = await asyncio.to_thread(_imap_list_folders, account, access_token)
+        return {"folders": folders}
+    except Exception as e:
+        raise HTTPException(502, f"IMAP error: {e}")
 
 @app.get("/api/email/{account_id}/messages")
 async def get_email_messages(account_id: str, folder: str = "INBOX", limit: int = 25):
@@ -4477,6 +4547,22 @@ def _imap_delete(account: dict, folder: str, uid: str, access_token: str = ""):
         imap.select(folder or "INBOX")
         imap.store(uid, "+FLAGS", "\\Deleted")
         imap.expunge()
+
+def _imap_mark_read(account: dict, folder: str, uid: str, access_token: str = ""):
+    with imaplib.IMAP4_SSL(account["imap_host"], account.get("imap_port", 993)) as imap:
+        _imap_login(imap, account, access_token)
+        imap.select(folder or "INBOX")
+        imap.store(uid, "+FLAGS", "\\Seen")
+
+@app.post("/api/email/{account_id}/messages/{uid}/read")
+async def mark_email_read(account_id: str, uid: str, folder: str = "INBOX"):
+    account = _get_email_account(account_id)
+    try:
+        access_token = await _google_access_token(account["google_account_id"]) if account.get("auth") == "oauth" else ""
+        await asyncio.to_thread(_imap_mark_read, account, folder, uid, access_token)
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(502, f"IMAP error: {e}")
 
 @app.delete("/api/email/{account_id}/messages/{uid}")
 async def delete_email_message(account_id: str, uid: str, folder: str = "INBOX"):
@@ -4559,6 +4645,34 @@ Each reply should be a complete, ready-to-send email body (no subject line). Var
         except json.JSONDecodeError:
             pass
     return {"replies": [content.strip()] if content.strip() else ["(No draft generated — try again.)"]}
+
+
+@app.post("/api/email/compose")
+async def compose_email(req: ComposeEmailRequest):
+    """Drafts a brand-new email (subject + body) from a short instruction —
+    the "Copper AI" compose path, distinct from draft_replies above which
+    always answers an existing message. Same JSON-extraction-with-fallback
+    shape as draft_replies for consistency."""
+    prompt = f"""Draft a new email from scratch based on the instructions below. Respond with ONLY a JSON object (no other text, no markdown fences): {{"subject": string, "body": string}}.
+
+{"Recipient: " + req.to if req.to else ""}
+Instructions: {req.instructions}
+
+The body should be a complete, ready-to-send email — no placeholder brackets like [Your Name] unless the instructions specifically ask for a signature placeholder."""
+    try:
+        content = await _llm_complete(req.model, [{"role": "user", "content": prompt}])
+    except Exception as e:
+        raise HTTPException(502, f"Model error: {e}")
+
+    match = re.search(r'\{.*\}', content, re.DOTALL)
+    if match:
+        try:
+            draft = json.loads(match.group(0))
+            if isinstance(draft, dict) and draft.get("body"):
+                return {"subject": str(draft.get("subject", "")), "body": str(draft.get("body", ""))}
+        except json.JSONDecodeError:
+            pass
+    return {"subject": "", "body": content.strip()}
 
 
 @app.post("/api/email/send")
