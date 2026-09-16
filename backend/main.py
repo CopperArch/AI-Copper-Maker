@@ -4201,6 +4201,12 @@ EMAIL_PROVIDERS = {
     "zoho":     {"label": "Zoho Mail",                  "imap_host": "imap.zoho.com",         "imap_port": 993, "smtp_host": "smtp.zoho.com",       "smtp_port": 587, "smtp_ssl": False, "note": "Generate an app-specific password in Zoho Account Security."},
     "aol":      {"label": "AOL Mail",                   "imap_host": "imap.aol.com",          "imap_port": 993, "smtp_host": "smtp.aol.com",        "smtp_port": 587, "smtp_ssl": False, "note": "Generate an app password in AOL Account Security."},
     "gmx":      {"label": "GMX Mail",                   "imap_host": "imap.gmx.com",          "imap_port": 993, "smtp_host": "smtp.gmx.com",        "smtp_port": 587, "smtp_ssl": False, "note": ""},
+    # Proton doesn't expose real IMAP/SMTP on its own servers at all (mail
+    # stays end-to-end encrypted there) — Proton Mail Bridge, a small app
+    # Proton ships, runs on this same machine and re-exposes it locally.
+    # Host/port/password all come from Bridge's own UI, not proton.me — the
+    # defaults below are Bridge's standard local ports, not a live endpoint.
+    "protonmail": {"label": "Proton Mail",              "imap_host": "127.0.0.1",             "imap_port": 1143, "smtp_host": "127.0.0.1",           "smtp_port": 1025, "smtp_ssl": False, "note": "Requires Proton Mail Bridge running on this machine (proton.me/mail/bridge) — use the host, port, and password Bridge itself displays, not your real Proton password."},
     "custom":   {"label": "Custom / Other (IMAP+SMTP)", "imap_host": "",                      "imap_port": 993, "smtp_host": "",                    "smtp_port": 587, "smtp_ssl": False, "note": "Works with any standards-compliant IMAP/SMTP server — enter your provider's host/port."},
 }
 
@@ -4215,6 +4221,7 @@ _EMAIL_DOMAIN_MAP = {
     "zoho.com": "zoho",
     "aol.com": "aol",
     "gmx.com": "gmx", "gmx.net": "gmx",
+    "protonmail.com": "protonmail", "proton.me": "protonmail", "pm.me": "protonmail",
 }
 
 def _parse_autoconfig_xml(xml_text: str) -> dict | None:
