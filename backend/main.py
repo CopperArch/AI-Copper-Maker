@@ -473,6 +473,15 @@ def _lang_plan(language: str, tmp: str) -> dict | None:
             "file": f, "compile": None, "run": [_python_cmd(), harness, f],
             "extra_files": {harness: _SQL_HARNESS},
         }
+    if language == "bash":
+        f = os.path.join(tmp, "code.sh")
+        return {"file": f, "compile": None, "run": ["bash", f]}
+    if language == "zsh":
+        f = os.path.join(tmp, "code.zsh")
+        return {"file": f, "compile": None, "run": ["zsh", f]}
+    if language == "fish":
+        f = os.path.join(tmp, "code.fish")
+        return {"file": f, "compile": None, "run": ["fish", f]}
     return None
 
 
@@ -1701,11 +1710,11 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "execute_code",
-            "description": "Execute a short script or program in a sandbox and return its output. C/C++/Rust/Go/C# are compiled (or built) first; SQL runs against a fresh in-memory SQLite database and prints SELECT results as tab-separated rows.",
+            "description": "Execute a short script or program in a sandbox and return its output. C/C++/Rust/Go/C# are compiled (or built) first; SQL runs against a fresh in-memory SQLite database and prints SELECT results as tab-separated rows; bash/zsh/fish run as shell scripts.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "language": {"type": "string", "enum": ["python", "javascript", "c", "cpp", "rust", "go", "csharp", "sql"]},
+                    "language": {"type": "string", "enum": ["python", "javascript", "c", "cpp", "rust", "go", "csharp", "sql", "bash", "zsh", "fish"]},
                     "code": {"type": "string", "description": "The code to execute"}
                 },
                 "required": ["language", "code"]
@@ -3894,6 +3903,12 @@ async def analyze_code_project(project_id: str, req: ProjectAnalyzeRequest):
                    f"{lang} project more complete, useful, or polished. List them as a "
                    f"short bullet list, each with a one-line rationale — don't write "
                    f"code, just ideas.\n\n{blob}")
+    elif req.action == "fix":
+        prior = (f"\n\nBugs already identified in a previous review — fix exactly these, "
+                 f"don't go looking for a different set:\n{req.instruction}\n") if req.instruction.strip() else ""
+        prompt = (f"Fix the bugs in the following {lang} project.{prior} "
+                  f"Change only what's needed to fix them — don't refactor unrelated code. "
+                  f"{rewrite_format}\n\n{blob}")
     elif req.action == "improve":
         prompt = (f"Improve the following {lang} project — fix bugs, improve "
                    f"readability/performance/correctness — without changing its "

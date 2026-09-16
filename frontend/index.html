@@ -1264,6 +1264,9 @@
               <option value="go">Go</option>
               <option value="csharp">C# (.NET)</option>
               <option value="sql">SQL (SQLite)</option>
+              <option value="bash">Bash</option>
+              <option value="zsh">Zsh</option>
+              <option value="fish">Fish</option>
             </select>
           </div>
           <textarea id="runner-code" placeholder="Paste or write code here..."></textarea>
@@ -4274,7 +4277,7 @@ async function cpAnalyze(action, instruction = '') {
   const model = document.getElementById('model-select').value;
   if (!model) { alert('Select a model first (top-left)'); return; }
   const area = document.getElementById('cp-result-area');
-  const labels = { bugs: 'Finding bugs', improve: 'Improving code', features: 'Adding feature(s)', suggest: 'Suggesting features' };
+  const labels = { bugs: 'Finding bugs', fix: 'Fixing bugs', improve: 'Improving code', features: 'Adding feature(s)', suggest: 'Suggesting features' };
   area.innerHTML = `<div class="runner-placeholder">${labels[action] || 'Working'}…</div>`;
   let fullText = '';
   try {
@@ -4305,13 +4308,28 @@ async function cpAnalyze(action, instruction = '') {
         } catch {}
       }
     }
-    if ((action === 'improve' || action === 'features') && /===\s*FILE:/.test(fullText)) {
+    if ((action === 'improve' || action === 'features' || action === 'fix') && /===\s*FILE:/.test(fullText)) {
+      // The "show what it intends to fix" step: the streamed rewrite above
+      // (proposed file content, not a diff) IS the preview — Apply only
+      // writes it to the project once the user has actually seen it, same
+      // as Improve/Add Feature already do.
       const applyBtn = document.createElement('button');
       applyBtn.className = 'btn btn-accent btn-sm';
       applyBtn.textContent = '✓ Apply changes to project';
       applyBtn.style.marginTop = '8px';
       applyBtn.onclick = () => cpApply(fullText);
       area.appendChild(applyBtn);
+    } else if (action === 'bugs' && fullText.trim()) {
+      // Bug-finding itself only describes issues in prose — Fix is a
+      // separate, explicit second step that re-asks the model to actually
+      // write the fix, grounded in exactly the bugs just listed (passed
+      // through as `instruction`) rather than re-discovering its own set.
+      const fixBtn = document.createElement('button');
+      fixBtn.className = 'btn btn-accent btn-sm';
+      fixBtn.textContent = '🔧 Fix these bugs';
+      fixBtn.style.marginTop = '8px';
+      fixBtn.onclick = () => cpAnalyze('fix', fullText);
+      area.appendChild(fixBtn);
     }
   } catch (err) {
     area.innerHTML = `<span class="stderr">Connection error: ${escHtml(err.message)}</span>`;
