@@ -81,10 +81,34 @@ LMS_BIN = shutil.which("lms") or str(
 )
 API_KEYS_FILE = Path(__file__).parent.parent / "api_keys.json"
 CLOUD_PROVIDERS = {
-    "anthropic": {"label": "Claude (Anthropic)", "default_model": "claude-sonnet-4-6"},
-    "openai": {"label": "ChatGPT (OpenAI)", "default_model": "gpt-4o"},
-    "google": {"label": "Gemini (Google)", "default_model": "gemini-2.0-flash"},
+    "anthropic":  {"label": "Claude (Anthropic)",  "default_model": "claude-sonnet-4-6"},
+    "openai":     {"label": "ChatGPT (OpenAI)",     "default_model": "gpt-4o"},
+    "google":     {"label": "Gemini (Google)",      "default_model": "gemini-2.0-flash"},
+    "xai":        {"label": "Grok (xAI)",           "default_model": "grok-4"},
+    "deepseek":   {"label": "DeepSeek",             "default_model": "deepseek-chat"},
+    # Not one fixed model like the five above — one key here unlocks
+    # hundreds of other paid models (Llama, Mistral, Qwen, Grok, and the
+    # big-name ones above too) through a single OpenAI-compatible endpoint.
+    # See OPENROUTER_FEATURED_MODELS below for what actually lands in the
+    # model dropdown.
+    "openrouter": {"label": "OpenRouter (100s of paid models, 1 key)", "default_model": "openai/gpt-4o"},
 }
+
+# A small, diverse hand-picked slice of OpenRouter's full catalog (hundreds
+# of models) — enough to cover every major paid family through the one
+# OpenRouter key without turning the model dropdown into an unbrowsable
+# wall of options. Model slugs are OpenRouter's own naming (provider/model),
+# nested under this app's own "openrouter/" prefix in the dropdown.
+OPENROUTER_FEATURED_MODELS = [
+    "openai/gpt-4o",
+    "anthropic/claude-3.7-sonnet",
+    "google/gemini-2.0-flash-001",
+    "x-ai/grok-2-1212",
+    "deepseek/deepseek-chat",
+    "meta-llama/llama-3.3-70b-instruct",
+    "mistralai/mistral-large",
+    "qwen/qwen-2.5-72b-instruct",
+]
 
 
 def _load_api_keys() -> dict:
@@ -2369,6 +2393,14 @@ async def _test_cloud_key(provider: str, key: str) -> None:
                                   headers={"Authorization": f"Bearer {key}"})
         elif provider == "google":
             r = await client.get("https://generativelanguage.googleapis.com/v1beta/models", params={"key": key})
+        elif provider == "xai":
+            r = await client.get("https://api.x.ai/v1/models", headers={"Authorization": f"Bearer {key}"})
+        elif provider == "deepseek":
+            r = await client.get("https://api.deepseek.com/v1/models", headers={"Authorization": f"Bearer {key}"})
+        elif provider == "openrouter":
+            # /auth/key (not /models, which is public and unauthenticated)
+            # so an actually-invalid key still fails validation here.
+            r = await client.get("https://openrouter.ai/api/v1/auth/key", headers={"Authorization": f"Bearer {key}"})
         else:
             return
     if r.status_code != 200:
@@ -2427,10 +2459,22 @@ async def set_expo_key(req: ExpoTokenRequest):
 
 @app.get("/api/models/cloud")
 async def list_cloud_models():
-    """Only lists a provider's model as usable once a key is actually
-    configured for it — no point offering a model the app can't call."""
+    """Only lists a provider's model(s) as usable once a key is actually
+    configured for it — no point offering a model the app can't call.
+    OpenRouter is the one exception to "one model per provider": it fans
+    out to OPENROUTER_FEATURED_MODELS instead of a single default_model,
+    since the whole point of adding it is access to many paid models
+    through one key, not just one more fixed option."""
     keys = _load_api_keys()
-    return {"models": [f"{p}/{meta['default_model']}" for p, meta in CLOUD_PROVIDERS.items() if keys.get(p)]}
+    models = []
+    for p, meta in CLOUD_PROVIDERS.items():
+        if not keys.get(p):
+            continue
+        if p == "openrouter":
+            models.extend(f"openrouter/{m}" for m in OPENROUTER_FEATURED_MODELS)
+        else:
+            models.append(f"{p}/{meta['default_model']}")
+    return {"models": models}
 
 
 def _messages_for_cloud(messages: list) -> list:
@@ -2463,20 +2507,53 @@ async def _call_anthropic(model: str, messages: list, system: str, api_key: str)
         return "".join(b.get("text", "") for b in data.get("content", []))
 
 
-async def _call_openai(model: str, messages: list, system: str, api_key: str) -> str:
+async def _call_openai_compatible(url: str, model: str, messages: list, system: str, api_key: str,
+                                   label: str, extra_headers: dict | None = None) -> str:
+    """Shared implementation for every provider whose API mirrors OpenAI's
+    /chat/completions request/response shape — which by design is OpenAI
+    itself plus xAI, DeepSeek, and OpenRouter below (all three publish
+    their API as "OpenAI-compatible" specifically so existing OpenAI-SDK
+    code, and helpers exactly like this one, need only a different base URL
+    and key)."""
+    headers = {"Authorization": f"Bearer {api_key}", "content-type": "application/json"}
+    if extra_headers:
+        headers.update(extra_headers)
     async with httpx.AsyncClient(timeout=120) as client:
         r = await client.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "content-type": "application/json"},
+            url, headers=headers,
             json={
                 "model": model,
                 "messages": [{"role": "system", "content": system}] + _messages_for_cloud(messages),
             },
         )
         if r.status_code != 200:
-            return f"OpenAI API error ({r.status_code}): {r.text[:500]}"
+            return f"{label} API error ({r.status_code}): {r.text[:500]}"
         data = r.json()
         return data["choices"][0]["message"]["content"] or ""
+
+
+async def _call_openai(model: str, messages: list, system: str, api_key: str) -> str:
+    return await _call_openai_compatible(
+        "https://api.openai.com/v1/chat/completions", model, messages, system, api_key, "OpenAI")
+
+
+async def _call_xai(model: str, messages: list, system: str, api_key: str) -> str:
+    return await _call_openai_compatible(
+        "https://api.x.ai/v1/chat/completions", model, messages, system, api_key, "xAI")
+
+
+async def _call_deepseek(model: str, messages: list, system: str, api_key: str) -> str:
+    return await _call_openai_compatible(
+        "https://api.deepseek.com/v1/chat/completions", model, messages, system, api_key, "DeepSeek")
+
+
+async def _call_openrouter(model: str, messages: list, system: str, api_key: str) -> str:
+    # HTTP-Referer/X-Title are OpenRouter's optional app-attribution headers
+    # (surfaced on openrouter.ai/rankings) — harmless to include, not
+    # required for the call to work.
+    return await _call_openai_compatible(
+        "https://openrouter.ai/api/v1/chat/completions", model, messages, system, api_key, "OpenRouter",
+        extra_headers={"HTTP-Referer": "https://github.com/CopperArch/AI-Copper-Maker", "X-Title": "AI Copper Maker"})
 
 
 async def _call_gemini(model: str, messages: list, system: str, api_key: str) -> str:
@@ -2515,6 +2592,12 @@ async def _call_cloud_model(model_ref: str, messages: list, system: str) -> str:
         return await _call_openai(model, messages, system, api_key)
     if provider == "google":
         return await _call_gemini(model, messages, system, api_key)
+    if provider == "xai":
+        return await _call_xai(model, messages, system, api_key)
+    if provider == "deepseek":
+        return await _call_deepseek(model, messages, system, api_key)
+    if provider == "openrouter":
+        return await _call_openrouter(model, messages, system, api_key)
     return f"Unknown cloud provider '{provider}'."
 
 
