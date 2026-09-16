@@ -4587,8 +4587,8 @@ def _imap_list_folders(account: dict, access_token: str = "") -> list:
         _imap_login(imap, account, access_token)
         status, data = imap.list()
         if status != "OK" or not data:
-            return ["INBOX"]
-        folders = []
+            return [{"name": "INBOX", "unread": 0}]
+        raw_names = []
         for entry in data:
             if not entry:
                 continue
@@ -4596,11 +4596,29 @@ def _imap_list_folders(account: dict, access_token: str = "") -> list:
             # — the folder name is always the last quoted (or bare) token.
             decoded = entry.decode(errors="replace")
             match = re.search(r'"([^"]*)"\s*$', decoded)
-            name = match.group(1) if match else decoded.rsplit(" ", 1)[-1]
-            folders.append(_decode_imap_utf7(name))
+            raw_names.append(match.group(1) if match else decoded.rsplit(" ", 1)[-1])
+
+        folders = []
+        for raw_name in raw_names:
+            # One STATUS round trip per folder for its unread count (Outlook's
+            # "Inbox 11" badges) — quoted since names with spaces ("Sent
+            # Mail") are otherwise invalid IMAP syntax. Wrapped per-folder so
+            # one folder a server won't report STATUS for (seen on some
+            # [Gmail]/... container folders) doesn't blank out every count.
+            unread = 0
+            try:
+                st, st_data = imap.status(f'"{raw_name}"', "(UNSEEN)")
+                if st == "OK" and st_data and st_data[0]:
+                    m = re.search(rb"UNSEEN\s+(\d+)", st_data[0])
+                    if m:
+                        unread = int(m.group(1))
+            except Exception:
+                pass
+            folders.append({"name": _decode_imap_utf7(raw_name), "unread": unread})
+
         # INBOX first, then alphabetical — the order every real mail client uses.
-        folders.sort(key=lambda f: (f.upper() != "INBOX", f.lower()))
-        return folders or ["INBOX"]
+        folders.sort(key=lambda f: (f["name"].upper() != "INBOX", f["name"].lower()))
+        return folders or [{"name": "INBOX", "unread": 0}]
 
 @app.get("/api/email/{account_id}/folders")
 async def get_email_folders(account_id: str):

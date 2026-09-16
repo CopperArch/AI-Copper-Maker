@@ -602,6 +602,37 @@
   }
   .email-folder-item:hover { background: rgba(255,255,255,.05); }
   .email-folder-item.active { background: rgba(31,111,235,.15); color: var(--accent2); font-weight: 600; }
+  .email-folder-item .folder-name { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+  .email-folder-item .folder-unread-count {
+    font-size: 11px; color: var(--muted); flex-shrink: 0;
+  }
+  .email-folder-item.active .folder-unread-count { color: var(--accent2); }
+
+  /* ── Calendar peek (Outlook-style right-hand mini calendar) ── */
+  .email-calendar-peek {
+    width: 220px; flex-shrink: 0; overflow-y: auto; padding: 12px;
+    border-left: 1px solid var(--border); background: var(--surface);
+  }
+  .peek-month {
+    font-size: 13px; font-weight: 600; margin-bottom: 8px; text-align: center;
+  }
+  .peek-group-label {
+    font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px;
+    margin: 12px 0 6px;
+  }
+  .peek-group-label:first-of-type { margin-top: 0; }
+  .peek-event {
+    display: flex; gap: 8px; padding: 6px 4px; border-radius: 6px; font-size: 12px;
+    cursor: default;
+  }
+  .peek-event:hover { background: rgba(255,255,255,.05); }
+  .peek-event-time { color: var(--muted); flex-shrink: 0; width: 46px; }
+  .peek-event-title {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;
+  }
+  .peek-empty { font-size: 12px; color: var(--muted); text-align: center; padding: 16px 4px; }
+  .peek-viewall { display: block; text-align: center; font-size: 12px; margin-top: 10px; color: var(--accent2); cursor: pointer; }
+  .peek-viewall:hover { text-decoration: underline; }
 
   .email-list, .email-detail { background: var(--surface); }
   .email-row {
@@ -1455,6 +1486,9 @@
             </div>
             <div id="email-message-detail" class="email-detail" style="flex:1;overflow-y:auto">
               <div class="runner-placeholder">Select a message to read it.</div>
+            </div>
+            <div class="email-calendar-peek" id="email-calendar-peek">
+              <div class="peek-empty">Loading calendar…</div>
             </div>
           </div>
         </div>
@@ -5288,6 +5322,71 @@ let currentEmailFolder = 'INBOX';
 async function initEmailTab() {
   await loadEmailProviders();
   await loadEmailAccounts();
+  loadEmailCalendarPeek();
+}
+
+// Outlook-style "Calendar & Meetings" peek — shows your own approved events
+// (the ones already pushed to CalDAV/the ICS feed via the Calendar tab), not
+// a live read of an external calendar this app doesn't have two-way sync
+// with. Account-independent (your own local event queue, not per-mailbox),
+// so it loads once when the Email tab opens rather than per account/folder.
+async function loadEmailCalendarPeek() {
+  const peek = document.getElementById('email-calendar-peek');
+  if (!peek) return;
+  const monthLabel = new Date().toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+  try {
+    const r = await fetch(`${API}/api/calendar/events?status=approved`);
+    const d = await r.json();
+    const now = new Date();
+    const todayStr = now.toISOString().slice(0, 10);
+    const tomorrow = new Date(now);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const tomorrowStr = tomorrow.toISOString().slice(0, 10);
+
+    const upcoming = (d.events || [])
+      .filter(e => e.start && e.start.slice(0, 10) >= todayStr)
+      .sort((a, b) => a.start.localeCompare(b.start))
+      .slice(0, 12);
+
+    if (!upcoming.length) {
+      peek.innerHTML = `
+        <div class="peek-month">${escHtml(monthLabel)}</div>
+        <div class="peek-empty">No upcoming events</div>
+        <span class="peek-viewall" onclick="switchTab('calendar')">Open Calendar →</span>
+      `;
+      return;
+    }
+
+    const groups = { today: [], tomorrow: [], later: [] };
+    for (const e of upcoming) {
+      const dateStr = e.start.slice(0, 10);
+      if (dateStr === todayStr) groups.today.push(e);
+      else if (dateStr === tomorrowStr) groups.tomorrow.push(e);
+      else groups.later.push(e);
+    }
+    const renderEvent = e => {
+      const time = e.all_day ? 'All day' : (e.start.slice(11, 16) || '');
+      const titleAttr = e.location ? `${e.title} — ${e.location}` : (e.title || '');
+      return `
+        <div class="peek-event" title="${escHtml(titleAttr)}">
+          <span class="peek-event-time">${escHtml(time)}</span>
+          <span class="peek-event-title">${escHtml(e.title || '(untitled)')}</span>
+        </div>`;
+    };
+    const renderGroup = (label, events) => events.length
+      ? `<div class="peek-group-label">${label}</div>${events.map(renderEvent).join('')}`
+      : '';
+
+    peek.innerHTML = `
+      <div class="peek-month">${escHtml(monthLabel)}</div>
+      ${renderGroup('Today', groups.today)}
+      ${renderGroup('Tomorrow', groups.tomorrow)}
+      ${renderGroup('Upcoming', groups.later)}
+      <span class="peek-viewall" onclick="switchTab('calendar')">Open Calendar →</span>
+    `;
+  } catch (err) {
+    peek.innerHTML = `<div class="peek-month">${escHtml(monthLabel)}</div><div class="peek-empty">Couldn't load calendar</div>`;
+  }
 }
 
 function toggleEmailSetup() {
@@ -5577,7 +5676,7 @@ async function onEmailAccountChange() {
   await loadEmailFolders();
 }
 
-let currentEmailFolders = ['INBOX'];
+let currentEmailFolders = [{ name: 'INBOX', unread: 0 }];
 
 async function loadEmailFolders() {
   const accountId = document.getElementById('email-account-select').value;
@@ -5590,8 +5689,8 @@ async function loadEmailFolders() {
   try {
     const r = await fetch(`${API}/api/email/${accountId}/folders`);
     const d = await r.json();
-    currentEmailFolders = d.folders && d.folders.length ? d.folders : ['INBOX'];
-    if (!currentEmailFolders.includes(currentEmailFolder)) currentEmailFolder = 'INBOX';
+    currentEmailFolders = d.folders && d.folders.length ? d.folders : [{ name: 'INBOX', unread: 0 }];
+    if (!currentEmailFolders.some(f => f.name === currentEmailFolder)) currentEmailFolder = 'INBOX';
     renderEmailFolderRail();
     await loadInbox();
   } catch (err) {
@@ -5619,9 +5718,10 @@ function emailFolderLabel(name) {
 function renderEmailFolderRail() {
   const rail = document.getElementById('email-folder-rail');
   rail.innerHTML = currentEmailFolders.map(f => `
-    <div class="email-folder-item ${f === currentEmailFolder ? 'active' : ''}" data-folder="${escHtml(f)}">
-      <span>${emailFolderIcon(f)}</span>
-      <span style="overflow:hidden;text-overflow:ellipsis">${escHtml(emailFolderLabel(f))}</span>
+    <div class="email-folder-item ${f.name === currentEmailFolder ? 'active' : ''}" data-folder="${escHtml(f.name)}">
+      <span>${emailFolderIcon(f.name)}</span>
+      <span class="folder-name">${escHtml(emailFolderLabel(f.name))}</span>
+      ${f.unread ? `<span class="folder-unread-count">${f.unread}</span>` : ''}
     </div>
   `).join('');
 }
