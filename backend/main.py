@@ -4665,6 +4665,52 @@ async def mark_email_read(account_id: str, uid: str, folder: str = "INBOX"):
     except Exception as e:
         raise HTTPException(502, f"IMAP error: {e}")
 
+
+def _imap_archive(account: dict, folder: str, uid: str, access_token: str = "") -> str:
+    """Moves a message to this account's archive-equivalent folder — swipe-
+    to-archive in the frontend. Returns the folder it moved to. Gmail has no
+    real "Archive" folder (archiving there just means removing it from
+    INBOX; the message stays visible under [Gmail]/All Mail, which is what
+    that IMAP folder actually is), so Gmail accounts target that folder
+    specifically; everything else looks for a folder literally named
+    "Archive". Raises ValueError (→ 400, a real "can't do this" answer) when
+    neither exists, rather than silently picking an unrelated folder."""
+    existing = _imap_list_folders(account, access_token)
+    target = None
+    if account.get("provider") == "gmail":
+        target = next((f["name"] for f in existing if f["name"] == "[Gmail]/All Mail"), None)
+    if not target:
+        target = next((f["name"] for f in existing if f["name"].lower() == "archive"), None)
+    if not target:
+        raise ValueError("No Archive folder found on this account — create one (Gmail accounts use [Gmail]/All Mail automatically and don't need one).")
+
+    with imaplib.IMAP4_SSL(account["imap_host"], account.get("imap_port", 993)) as imap:
+        _imap_login(imap, account, access_token)
+        imap.select(folder or "INBOX")
+        # IMAP MOVE (RFC 6851) first — one round trip, supported by Gmail and
+        # every mainstream provider this app lists. COPY + mark-deleted +
+        # EXPUNGE is the fallback for a server that predates it.
+        typ, _ = imap.uid("MOVE", uid, f'"{target}"')
+        if typ != "OK":
+            typ, _ = imap.uid("COPY", uid, f'"{target}"')
+            if typ != "OK":
+                raise ValueError(f"Could not move this message to {target}")
+            imap.uid("STORE", uid, "+FLAGS", "(\\Deleted)")
+            imap.expunge()
+    return target
+
+@app.post("/api/email/{account_id}/messages/{uid}/archive")
+async def archive_email_message(account_id: str, uid: str, folder: str = "INBOX"):
+    account = _get_email_account(account_id)
+    try:
+        access_token = await _google_access_token(account["google_account_id"]) if account.get("auth") == "oauth" else ""
+        target = await asyncio.to_thread(_imap_archive, account, folder, uid, access_token)
+        return {"ok": True, "archived_to": target}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(502, f"IMAP error: {e}")
+
 @app.delete("/api/email/{account_id}/messages/{uid}")
 async def delete_email_message(account_id: str, uid: str, folder: str = "INBOX"):
     account = _get_email_account(account_id)

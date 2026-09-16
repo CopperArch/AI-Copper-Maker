@@ -660,6 +660,17 @@
   .email-row:hover .email-row-pin, .email-row.pinned .email-row-pin { display: inline-block; }
   .email-row.pinned .email-row-pin { opacity: 1; }
   .email-row-pin:hover { background: rgba(255,255,255,.12); opacity: 1; }
+
+  /* ── Swipe to delete/archive ── */
+  .email-row { touch-action: pan-y; transition: transform .18s ease, opacity .18s ease; }
+  .email-row.dragging { transition: none; }
+  .email-row-swipe-bg {
+    position: absolute; inset: 0; border-radius: 10px;
+    display: flex; align-items: center; padding: 0 16px;
+    font-size: 13px; font-weight: 600; color: #fff;
+    opacity: 0; pointer-events: none; z-index: 0;
+  }
+  .email-row-top, .email-row-subject, .email-row-preview, .email-row-pin { position: relative; z-index: 1; }
   .email-row-top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
   .email-row-sender { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .email-row-date { font-size: 11px; color: var(--muted); flex-shrink: 0; }
@@ -1434,6 +1445,10 @@
             <button class="btn btn-secondary btn-sm" onclick="loadInbox()">↻ Refresh</button>
             <button class="btn btn-secondary btn-sm" onclick="toggleEmailSetup()">⚙ Accounts</button>
             <button class="btn btn-secondary btn-sm" onclick="toggleContacts()">👥 Contacts</button>
+            <span style="margin-left:auto;font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px">
+              <span id="email-swipe-label"></span>
+              <button class="icon-btn" onclick="toggleEmailSwipeDirection()" title="Swap swipe directions">⇄</button>
+            </span>
           </div>
 
           <div id="email-setup" style="display:none;padding:12px;margin:12px;border:1px solid var(--border);border-radius:8px;flex-direction:column;gap:8px;flex-shrink:0">
@@ -5337,6 +5352,120 @@ async function initEmailTab() {
   await loadEmailProviders();
   await loadEmailAccounts();
   loadEmailCalendarPeek();
+  updateSwipeDirectionLabel();
+  initEmailSwipeHandlers();
+}
+
+// ── Swipe to delete/archive ──────────────────────────────────────────────────
+
+let emailSwipeReversed = localStorage.getItem('emailSwipeReversed') === '1';
+const EMAIL_SWIPE_THRESHOLD = 90; // px of horizontal drag before it counts as a real swipe, not a wobble
+
+function toggleEmailSwipeDirection() {
+  emailSwipeReversed = !emailSwipeReversed;
+  localStorage.setItem('emailSwipeReversed', emailSwipeReversed ? '1' : '0');
+  updateSwipeDirectionLabel();
+}
+
+function updateSwipeDirectionLabel() {
+  const el = document.getElementById('email-swipe-label');
+  if (!el) return;
+  el.textContent = emailSwipeReversed ? '← Archive · Delete →' : '← Delete · Archive →';
+}
+
+// dx < 0 is a left-swipe (row drags left), dx > 0 is a right-swipe.
+// Default: left = delete, right = archive — reversible via the ⇄ toggle.
+function emailSwipeAction(dx) {
+  const leftSwipe = dx < 0;
+  if (leftSwipe) return emailSwipeReversed ? 'archive' : 'delete';
+  return emailSwipeReversed ? 'delete' : 'archive';
+}
+
+let _emailSwipe = null; // { row, idx, startX, currentX }
+
+// Pointer Events (not separate touch/mouse handlers) so the same code
+// drives this on a touchscreen and as a mouse drag on desktop — this app's
+// primary surface. Delegated on the list container since rows are
+// recreated on every render; a per-row listener would need rebinding
+// every time renderEmailMessageList() runs.
+function initEmailSwipeHandlers() {
+  const list = document.getElementById('email-message-list');
+  if (!list || list.dataset.swipeInit) return;
+  list.dataset.swipeInit = '1';
+
+  list.addEventListener('pointerdown', e => {
+    if (e.target.closest('.email-row-pin')) return; // pin button has its own click handling
+    const row = e.target.closest('.email-row');
+    if (!row) return;
+    const idx = parseInt(row.id.replace('email-row-', ''), 10);
+    _emailSwipe = { row, idx, startX: e.clientX, currentX: e.clientX };
+    row.setPointerCapture(e.pointerId);
+    row.classList.add('dragging');
+  });
+
+  list.addEventListener('pointermove', e => {
+    if (!_emailSwipe) return;
+    _emailSwipe.currentX = e.clientX;
+    const dx = Math.max(-160, Math.min(160, _emailSwipe.currentX - _emailSwipe.startX));
+    _emailSwipe.row.style.transform = `translateX(${dx}px)`;
+    renderEmailSwipeBg(_emailSwipe.row, dx);
+  });
+
+  const endSwipe = () => {
+    if (!_emailSwipe) return;
+    const { row, idx } = _emailSwipe;
+    const dx = _emailSwipe.currentX - _emailSwipe.startX;
+    row.classList.remove('dragging');
+    if (Math.abs(dx) >= EMAIL_SWIPE_THRESHOLD) {
+      const action = emailSwipeAction(dx);
+      row.style.transform = `translateX(${dx < 0 ? '-100%' : '100%'})`;
+      row.style.opacity = '0';
+      setTimeout(() => runEmailSwipeAction(idx, action), 160);
+    } else {
+      row.style.transform = 'translateX(0)';
+      const bg = row.querySelector('.email-row-swipe-bg');
+      if (bg) bg.style.opacity = '0';
+    }
+    _emailSwipe = null;
+  };
+  list.addEventListener('pointerup', endSwipe);
+  list.addEventListener('pointercancel', endSwipe);
+}
+
+function renderEmailSwipeBg(row, dx) {
+  let bg = row.querySelector('.email-row-swipe-bg');
+  if (!bg) {
+    bg = document.createElement('div');
+    bg.className = 'email-row-swipe-bg';
+    row.insertBefore(bg, row.firstChild);
+  }
+  if (dx === 0) { bg.style.opacity = '0'; return; }
+  const action = emailSwipeAction(dx);
+  bg.style.opacity = String(Math.min(1, Math.abs(dx) / EMAIL_SWIPE_THRESHOLD));
+  bg.style.background = action === 'delete' ? 'var(--danger)' : 'var(--accent2)';
+  bg.style.justifyContent = dx < 0 ? 'flex-end' : 'flex-start';
+  bg.textContent = action === 'delete' ? '🗑 Delete' : '📦 Archive';
+}
+
+async function runEmailSwipeAction(idx, action) {
+  const m = currentEmailMessages[idx];
+  if (!m) { renderEmailMessageList(); return; }
+  const accountId = document.getElementById('email-account-select').value;
+  const folderQS = `folder=${encodeURIComponent(currentEmailFolder)}`;
+  try {
+    const r = action === 'delete'
+      ? await fetch(`${API}/api/email/${accountId}/messages/${encodeURIComponent(m.uid)}?${folderQS}`, { method: 'DELETE' })
+      : await fetch(`${API}/api/email/${accountId}/messages/${encodeURIComponent(m.uid)}/archive?${folderQS}`, { method: 'POST' });
+    if (!r.ok) { const e = await r.json(); throw new Error(e.detail || 'Failed'); }
+    // Optimistic local removal so the list doesn't flash back before the
+    // folder/inbox refresh below completes.
+    currentEmailMessages = currentEmailMessages.filter(x => x !== m);
+    renderEmailMessageList();
+    loadEmailFolders(); // re-fetches this folder's messages + all folders' unread counts
+  } catch (err) {
+    alert(`Could not ${action}: ${err.message}`);
+    renderEmailMessageList();
+  }
 }
 
 // Outlook-style "Calendar & Meetings" peek — shows your own approved events
