@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>AI Copper Maker</title>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/styles/github-dark.min.css">
+<link rel="stylesheet" id="hljs-theme-link" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/styles/github-dark.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/highlight.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.0/marked.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
@@ -36,6 +36,24 @@
     --ai-bg:    #161b22;
     --danger:   #da3633;
     --warn:     #d29922;
+  }
+
+  /* Light theme — toggled via data-theme="light" on <html>, persisted to
+     localStorage('theme'). Kept as a full token override (not a handful of
+     tweaks) so every surface — including ones added later — stays correct
+     under both themes automatically. */
+  :root[data-theme="light"] {
+    --bg:       #f6f8fa;
+    --surface:  #ffffff;
+    --border:   #d0d7de;
+    --accent:   #1a7f37;
+    --accent2:  #0969da;
+    --text:     #1f2328;
+    --muted:    #59636e;
+    --user-bg:  #eef1f4;
+    --ai-bg:    #ffffff;
+    --danger:   #cf222e;
+    --warn:     #9a6700;
   }
 
   body {
@@ -117,7 +135,10 @@
     margin-top: 4px;
   }
 
+  .conv-search-wrap { padding: 0 12px 8px; }
+  .conv-search-wrap input { font-size: 12px; padding: 5px 8px; }
   .conv-list { flex: 1; overflow-y: auto; padding: 8px; }
+  .conv-item.search-hidden { display: none; }
   .conv-item {
     padding: 8px 10px;
     border-radius: 6px;
@@ -175,6 +196,17 @@
   .btn-danger:disabled { opacity: .4; cursor: not-allowed; }
   .btn-sm { padding: 4px 10px; font-size: 12px; }
   .btn-full { width: 100%; justify-content: center; }
+
+  /* Small chrome buttons (theme toggle, sidebar collapse) — same understated
+     hover-reveal language as .conv-menu-btn/.pw-toggle-btn elsewhere. */
+  .icon-btn {
+    background: none; border: 1px solid transparent; color: var(--muted);
+    cursor: pointer; font-size: 15px; line-height: 1; padding: 5px 7px;
+    border-radius: 6px; transition: background .15s, color .15s;
+  }
+  .icon-btn:hover { color: var(--text); background: rgba(127,127,127,.12); }
+  .sidebar-toggle-btn { display: none; }
+  .sidebar-backdrop { display: none; }
 
   /* ── Tabs ── */
   .tabs-row {
@@ -265,6 +297,22 @@
   .message.user .bubble {
     background: rgba(31,111,235,.15);
     border-color: rgba(31,111,235,.3);
+  }
+
+  /* Edit-and-resend — offered only on the most recent user message (see
+     renderMessageGroups). Hover-reveal matches .conv-menu-btn elsewhere. */
+  .user-edit-btn {
+    display: none;
+    margin-left: 8px;
+    background: none; border: none; color: var(--muted); cursor: pointer;
+    font-size: 12px; padding: 2px 5px; border-radius: 4px; vertical-align: middle;
+  }
+  .message.user:hover .user-edit-btn { display: inline-block; }
+  .user-edit-btn:hover { color: var(--text); background: rgba(255,255,255,.12); }
+  .edit-user-textarea {
+    width: 100%; min-height: 60px; resize: vertical;
+    background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    border-radius: 6px; padding: 6px 8px; font-size: 14px; font-family: inherit;
   }
 
   /* Markdown rendering */
@@ -680,17 +728,65 @@
   .file-attachments {
     display: flex; flex-wrap: wrap; gap: 4px; padding: 6px 0;
   }
+
+  /* ── Command palette (Ctrl/Cmd+K conversation switcher) ── */
+  .cmdk-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,.5);
+    display: flex; align-items: flex-start; justify-content: center;
+    padding-top: 12vh; z-index: 2000;
+  }
+  .cmdk-box {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    width: 90%; max-width: 480px; max-height: 60vh; display: flex; flex-direction: column;
+    box-shadow: 0 12px 40px rgba(0,0,0,.4); overflow: hidden;
+  }
+  .cmdk-box input {
+    border: none; border-bottom: 1px solid var(--border); border-radius: 0;
+    padding: 12px 14px; font-size: 14px;
+  }
+  .cmdk-box input:focus { border-color: var(--border); }
+  .cmdk-results { overflow-y: auto; padding: 6px; }
+  .cmdk-item {
+    padding: 8px 10px; border-radius: 6px; cursor: pointer; font-size: 13px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .cmdk-item:hover, .cmdk-item.active { background: rgba(255,255,255,.08); }
+  .cmdk-empty { padding: 14px; font-size: 12px; color: var(--muted); text-align: center; }
+
+  /* ── Mobile / narrow viewport ── */
+  @media (max-width: 760px) {
+    .sidebar-toggle-btn { display: inline-flex; }
+    header h1 .byline { display: none; }
+    .header-right { gap: 8px; }
+    .status-group .status-text { display: none; }
+
+    .sidebar {
+      position: fixed; top: 0; bottom: 0; left: 0; z-index: 500;
+      transform: translateX(-100%); transition: transform .2s ease;
+      box-shadow: 4px 0 20px rgba(0,0,0,.35);
+    }
+    .sidebar.open { transform: translateX(0); }
+    .sidebar-backdrop.open {
+      display: block; position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 499;
+    }
+
+    .tabs { overflow-x: auto; }
+    .bubble { max-width: calc(100% - 34px); font-size: 13px; }
+    .cmdk-box { max-width: 92%; }
+  }
 </style>
 </head>
 <body>
 
 <header>
+  <button class="icon-btn sidebar-toggle-btn" onclick="toggleSidebar()" title="Toggle sidebar" aria-label="Toggle sidebar">☰</button>
   <svg width="24" height="24" viewBox="0 0 24 24" fill="none" onclick="showAboutModal()" style="cursor:pointer" title="About AI Copper Maker">
     <rect width="24" height="24" rx="6" fill="#238636"/>
     <path d="M7 8h10M7 12h6M7 16h8" stroke="white" stroke-width="1.8" stroke-linecap="round"/>
   </svg>
   <h1>AI <span>Copper</span> Maker<span class="byline">A local AI coding studio — by CopperArch</span></h1>
   <div class="header-right">
+    <button class="icon-btn" id="theme-toggle-btn" onclick="toggleTheme()" title="Toggle light/dark theme" aria-label="Toggle light/dark theme">🌙</button>
     <div class="status-group">
       <div id="status-dot" class="status-dot"></div>
       <span id="status-text" class="status-text">Connecting...</span>
@@ -703,8 +799,9 @@
 </header>
 
 <div class="app">
+  <div class="sidebar-backdrop" id="sidebar-backdrop" onclick="toggleSidebar(false)"></div>
   <!-- Sidebar -->
-  <div class="sidebar">
+  <div class="sidebar" id="sidebar">
     <div class="sidebar-section">
       <label>Model</label>
       <select id="model-select">
@@ -723,6 +820,9 @@
       </button>
     </div>
 
+    <div class="conv-search-wrap">
+      <input type="text" id="conv-search" placeholder="🔍 Search conversations…" oninput="filterConvList(this.value)">
+    </div>
     <div class="conv-list" id="conv-list"></div>
 
     <div class="sidebar-section" style="margin-top:auto">
@@ -803,7 +903,8 @@
           <span id="turn-token-count" style="font-size:11px;color:var(--muted)"></span>
           <span id="queue-indicator" style="font-size:11px;color:var(--muted)"></span>
           <span class="system-toggle" onclick="toggleSystemPrompt()">⚙ System prompt</span>
-          <span style="font-size:11px;color:var(--muted);margin-left:auto">📎 Drop files or folders anywhere on chat</span>
+          <span class="system-toggle" id="regenerate-toggle" onclick="regenerateLastResponse()" style="display:none">↻ Regenerate</span>
+          <span style="font-size:11px;color:var(--muted);margin-left:auto">📎 Drop files or folders anywhere on chat · Ctrl+K to search chats</span>
         </div>
         <div class="activity-bar" id="chat-activity-bar"></div>
         <div id="system-prompt-box">
@@ -1552,6 +1653,13 @@ You write clean, production-ready code. When asked to build an app:
 
 document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('system-prompt').value = DEFAULT_SYSTEM;
+  initTheme();
+  document.addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+      e.preventDefault();
+      openCommandPalette();
+    }
+  });
   checkStatus();
   await loadConversations();
   loadSaveDirConfig();
@@ -1624,6 +1732,106 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (btn) cpShowFile(btn.dataset.path);
   });
 });
+
+// ── Theme ──────────────────────────────────────────────────────────────────────
+
+// highlight.js ships separate light/dark stylesheets — swapped alongside the
+// CSS custom properties so code blocks stay legible under both themes
+// instead of e.g. dark syntax-highlighted code sitting on a light bubble.
+const HLJS_DARK_CSS = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/styles/github-dark.min.css';
+const HLJS_LIGHT_CSS = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/styles/github.min.css';
+
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  const link = document.getElementById('hljs-theme-link');
+  if (link) link.href = theme === 'light' ? HLJS_LIGHT_CSS : HLJS_DARK_CSS;
+  const btn = document.getElementById('theme-toggle-btn');
+  if (btn) btn.textContent = theme === 'light' ? '☀️' : '🌙';
+}
+
+function initTheme() {
+  applyTheme(localStorage.getItem('theme') === 'light' ? 'light' : 'dark');
+}
+
+function toggleTheme() {
+  const next = document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+  localStorage.setItem('theme', next);
+  applyTheme(next);
+}
+
+// ── Sidebar (mobile off-canvas) ─────────────────────────────────────────────────
+
+// Only meaningful under the mobile breakpoint (see the max-width:760px media
+// query) — on desktop the sidebar is always laid out in-flow and these
+// classes have no visual effect either way. `force` lets the backdrop click
+// handler always close rather than toggle.
+function toggleSidebar(force) {
+  const sidebar = document.getElementById('sidebar');
+  const backdrop = document.getElementById('sidebar-backdrop');
+  const open = force !== undefined ? force : !sidebar.classList.contains('open');
+  sidebar.classList.toggle('open', open);
+  backdrop.classList.toggle('open', open);
+}
+
+// ── Command palette (Ctrl/Cmd+K) ────────────────────────────────────────────────
+
+let cmdkActiveIdx = -1;
+
+function openCommandPalette() {
+  if (document.getElementById('cmdk-overlay')) return; // already open
+  const overlay = document.createElement('div');
+  overlay.id = 'cmdk-overlay';
+  overlay.className = 'cmdk-overlay';
+  overlay.innerHTML = `
+    <div class="cmdk-box">
+      <input type="text" id="cmdk-input" placeholder="Search conversations…" autocomplete="off">
+      <div class="cmdk-results" id="cmdk-results"></div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', e => { if (e.target === overlay) closeCommandPalette(); });
+
+  const input = overlay.querySelector('#cmdk-input');
+  cmdkActiveIdx = 0;
+  renderCmdkResults('');
+  input.addEventListener('input', () => { cmdkActiveIdx = 0; renderCmdkResults(input.value); });
+  input.addEventListener('keydown', e => {
+    const items = () => Array.from(document.querySelectorAll('#cmdk-results .cmdk-item'));
+    if (e.key === 'Escape') { closeCommandPalette(); }
+    else if (e.key === 'ArrowDown') { e.preventDefault(); cmdkActiveIdx = Math.min(cmdkActiveIdx + 1, items().length - 1); highlightCmdkActive(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); cmdkActiveIdx = Math.max(cmdkActiveIdx - 1, 0); highlightCmdkActive(); }
+    else if (e.key === 'Enter') { e.preventDefault(); items()[cmdkActiveIdx]?.click(); }
+  });
+  setTimeout(() => input.focus(), 0);
+}
+
+function closeCommandPalette() {
+  document.getElementById('cmdk-overlay')?.remove();
+}
+
+function highlightCmdkActive() {
+  document.querySelectorAll('#cmdk-results .cmdk-item').forEach((el, i) => {
+    el.classList.toggle('active', i === cmdkActiveIdx);
+  });
+}
+
+function renderCmdkResults(query) {
+  const q = query.trim().toLowerCase();
+  const results = document.getElementById('cmdk-results');
+  const matches = conversations.filter(c => !q || c.title.toLowerCase().includes(q));
+  if (!matches.length) {
+    results.innerHTML = '<div class="cmdk-empty">No conversations match</div>';
+    return;
+  }
+  results.innerHTML = matches.map(c => `<div class="cmdk-item" data-cid="${c.id}">💬 ${escHtml(c.title)}</div>`).join('');
+  results.querySelectorAll('.cmdk-item').forEach(el => {
+    el.addEventListener('click', () => {
+      loadConversation(el.dataset.cid);
+      closeCommandPalette();
+    });
+  });
+  highlightCmdkActive();
+}
 
 // ── Status & Models ────────────────────────────────────────────────────────────
 
@@ -2102,6 +2310,22 @@ function renderConvList() {
       <button class="conv-menu-btn" data-cid="${c.id}" title="More">⋮</button>
     </div>
   `).join('');
+  // Re-apply whatever search term is currently typed — renderConvList()
+  // rebuilds the list wholesale (new conversation, delete, rename, streaming
+  // dot updates...), which would otherwise silently drop the active filter.
+  const searchInput = document.getElementById('conv-search');
+  if (searchInput && searchInput.value) filterConvList(searchInput.value);
+}
+
+// Client-side filter over the already-rendered conv-list — cheap since
+// conversations are already a small in-memory array, no need to re-fetch.
+function filterConvList(query) {
+  const q = query.trim().toLowerCase();
+  document.querySelectorAll('#conv-list .conv-item').forEach(el => {
+    const conv = conversations.find(c => c.id === el.dataset.cid);
+    const match = !q || (conv && conv.title.toLowerCase().includes(q));
+    el.classList.toggle('search-hidden', !match);
+  });
 }
 
 function currentConv() { return conversations.find(c => c.id === currentConvId); }
@@ -2145,6 +2369,7 @@ function renderMessages() {
       </div>
     `;
     container.appendChild(empty);
+    updateRegenerateVisibility();
     return;
   }
   container.innerHTML = renderMessageGroups(conv.messages);
@@ -2157,6 +2382,7 @@ function renderMessages() {
   const stream = activeStreams.get(conv.id);
   if (stream) insertThinkingBubble(stream.fullText, renderPendingToolRows(conv));
   container.scrollTop = container.scrollHeight;
+  updateRegenerateVisibility();
 }
 
 // Shown when the agent hits a `sudo`-prefixed run_command and needs
@@ -2249,6 +2475,14 @@ function renderToolRow(callMsg, resultMsg, id) {
 // tool_call is always immediately followed by its own tool_result (see
 // _agent_turns in the backend), so they're paired up here into one row.
 function renderMessageGroups(messages) {
+  // Edit-and-resend is only offered on the most recent user turn — the
+  // agentHistory rollback in saveEditUserMessage()/regenerateLastResponse()
+  // only knows how to rewind to "the last user entry," so editing an older
+  // one would desync conv.messages from agentHistory.
+  let lastUserIdx = -1;
+  for (let k = messages.length - 1; k >= 0; k--) {
+    if (messages[k].role === 'user') { lastUserIdx = k; break; }
+  }
   const html = [];
   let i = 0;
   while (i < messages.length) {
@@ -2274,14 +2508,14 @@ function renderMessageGroups(messages) {
         </div>
       `);
     } else {
-      html.push(renderMsg(messages[i], i));
+      html.push(renderMsg(messages[i], i, i === lastUserIdx));
       i++;
     }
   }
   return html.join('');
 }
 
-function renderMsg(msg, idx) {
+function renderMsg(msg, idx, isEditableUser) {
   const isUser = msg.role === 'user';
   // Older saved messages have no displayText/attachments — fall back to the raw content.
   const displayText = isUser && msg.displayText !== undefined ? msg.displayText : msg.content;
@@ -2293,12 +2527,121 @@ function renderMsg(msg, idx) {
   // blocks — it maps a rendered <pre> back to conv.messages[idx] so edits can
   // be written back into the stored conversation.
   const idxAttr = !isUser ? ` data-msg-idx="${idx}"` : '';
+  // data-user-idx is the equivalent lookup key for startEditUserMessage()/
+  // saveEditUserMessage() — only set on the one message editing is offered on.
+  const userIdxAttr = (isUser && isEditableUser) ? ` data-user-idx="${idx}"` : '';
+  const editBtn = (isUser && isEditableUser)
+    ? `<button class="user-edit-btn" title="Edit and resend" onclick="startEditUserMessage(${idx})">✎ Edit</button>`
+    : '';
   return `
     <div class="message ${isUser ? 'user' : ''}">
       <div class="avatar ${isUser ? 'user-av' : 'ai-av'}">${isUser ? '👤' : '🤖'}</div>
-      <div class="bubble"${idxAttr}>${attachmentsHtml}${content}</div>
+      <div class="bubble"${idxAttr}${userIdxAttr}>${attachmentsHtml}${content}${editBtn}</div>
     </div>
   `;
+}
+
+// Swaps the most recent user bubble into an inline textarea. Only ever
+// called on the message renderMessageGroups marked editable (the last user
+// turn), so saveEditUserMessage() below can safely assume "rewind to the
+// last user entry" is the correct agentHistory rollback point.
+function startEditUserMessage(idx) {
+  const conv = currentConv();
+  if (!conv) return;
+  const msg = conv.messages[idx];
+  if (!msg || msg.role !== 'user') return;
+  if (activeStreams.has(conv.id)) { alert('Wait for the current response to finish before editing.'); return; }
+  const bubble = document.querySelector(`.bubble[data-user-idx="${idx}"]`);
+  if (!bubble) return;
+  const original = msg.displayText !== undefined ? msg.displayText : msg.content;
+  bubble.innerHTML = `
+    <textarea class="edit-user-textarea">${escHtml(original)}</textarea>
+    <div style="display:flex;gap:6px;margin-top:6px;justify-content:flex-end">
+      <button class="btn btn-secondary btn-sm" onclick="renderMessages()">Cancel</button>
+      <button class="btn btn-primary btn-sm" onclick="saveEditUserMessage(${idx})">Save &amp; Resend</button>
+    </div>
+  `;
+  const ta = bubble.querySelector('textarea');
+  ta.focus();
+  ta.selectionStart = ta.selectionEnd = ta.value.length;
+}
+
+// Resends an edited user message the same way sendMessage() sends a new one:
+// drops the old turn and everything the model produced after it (it's being
+// superseded, not appended to), rewinds agentHistory to just before that
+// turn so runNextTurn()'s own push doesn't duplicate it, then queues the
+// edited text. File attachments on the original turn are not carried
+// forward — re-attaching is left to the user, same as any other resend.
+function saveEditUserMessage(idx) {
+  const conv = currentConv();
+  if (!conv) return;
+  if (activeStreams.has(conv.id)) { alert('Wait for the current response to finish before editing.'); return; }
+  const bubble = document.querySelector(`.bubble[data-user-idx="${idx}"]`);
+  const newText = bubble?.querySelector('textarea')?.value.trim();
+  if (!newText) { renderMessages(); return; }
+
+  conv.messages.splice(idx);
+  const hist = ensureAgentHistory(conv);
+  let lastUserHistIdx = -1;
+  for (let i = hist.length - 1; i >= 0; i--) {
+    if (hist[i].role === 'user') { lastUserHistIdx = i; break; }
+  }
+  if (lastUserHistIdx !== -1) hist.splice(lastUserHistIdx);
+
+  conv.messages.push({ role: 'user', content: newText, displayText: newText, attachments: [] });
+  if (idx === 0) conv.title = newText.slice(0, 40);
+  saveConvs();
+  renderConvList();
+  renderMessages();
+
+  if (!turnQueues.has(conv.id)) turnQueues.set(conv.id, []);
+  turnQueues.get(conv.id).push(newText);
+  updateQueueIndicator(conv.id);
+  runNextTurn(conv.id);
+}
+
+// Re-runs the last turn without retyping it: drops the previous
+// assistant/tool-call output after the last user message, rewinds
+// agentHistory to just before that turn (same rollback shape as
+// saveEditUserMessage()), and re-queues the same content.
+function regenerateLastResponse() {
+  const conv = currentConv();
+  if (!conv || !conv.messages.length) return;
+  if (activeStreams.has(conv.id)) return;
+
+  let lastUserIdx = -1;
+  for (let i = conv.messages.length - 1; i >= 0; i--) {
+    if (conv.messages[i].role === 'user') { lastUserIdx = i; break; }
+  }
+  if (lastUserIdx === -1) return;
+  const messageContent = conv.messages[lastUserIdx].content;
+
+  conv.messages.splice(lastUserIdx + 1);
+  const hist = ensureAgentHistory(conv);
+  let lastUserHistIdx = -1;
+  for (let i = hist.length - 1; i >= 0; i--) {
+    if (hist[i].role === 'user') { lastUserHistIdx = i; break; }
+  }
+  if (lastUserHistIdx !== -1) hist.splice(lastUserHistIdx);
+
+  saveConvs();
+  renderMessages();
+
+  if (!turnQueues.has(conv.id)) turnQueues.set(conv.id, []);
+  turnQueues.get(conv.id).push(messageContent);
+  updateQueueIndicator(conv.id);
+  runNextTurn(conv.id);
+}
+
+// Shows "↻ Regenerate" only when it would do something sensible: a
+// conversation is open, nothing is currently streaming, and there's at
+// least one user turn to redo.
+function updateRegenerateVisibility() {
+  const el = document.getElementById('regenerate-toggle');
+  if (!el) return;
+  const conv = currentConv();
+  const canRegenerate = !!conv && !activeStreams.has(conv.id) && conv.messages.some(m => m.role === 'user');
+  el.style.display = canRegenerate ? '' : 'none';
 }
 
 function renderAttachmentPill(f) {
@@ -2690,6 +3033,7 @@ async function runNextTurn(convId) {
 function setStreamingUI(streaming) {
   document.getElementById('stop-btn').style.display = streaming ? '' : 'none';
   document.getElementById('chat-activity-bar').classList.toggle('active', streaming);
+  updateRegenerateVisibility();
 }
 
 function insertThinkingBubble(existingText, toolsHtml) {
