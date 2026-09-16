@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import difflib
 import glob
 import imaplib
 import json
@@ -20,6 +21,7 @@ from email import message_from_bytes
 from email.header import decode_header
 from email.utils import parseaddr
 from email.message import EmailMessage as StdEmailMessage
+from fnmatch import fnmatch
 from pathlib import Path
 
 import httpx
@@ -81,34 +83,94 @@ LMS_BIN = shutil.which("lms") or str(
 )
 API_KEYS_FILE = Path(__file__).parent.parent / "api_keys.json"
 CLOUD_PROVIDERS = {
-    "anthropic":  {"label": "Claude (Anthropic)",  "default_model": "claude-sonnet-4-6"},
-    "openai":     {"label": "ChatGPT (OpenAI)",     "default_model": "gpt-4o"},
-    "google":     {"label": "Gemini (Google)",      "default_model": "gemini-2.0-flash"},
-    "xai":        {"label": "Grok (xAI)",           "default_model": "grok-4"},
-    "deepseek":   {"label": "DeepSeek",             "default_model": "deepseek-chat"},
-    # Not one fixed model like the five above — one key here unlocks
-    # hundreds of other paid models (Llama, Mistral, Qwen, Grok, and the
-    # big-name ones above too) through a single OpenAI-compatible endpoint.
-    # See OPENROUTER_FEATURED_MODELS below for what actually lands in the
-    # model dropdown.
-    "openrouter": {"label": "OpenRouter (100s of paid models, 1 key)", "default_model": "openai/gpt-4o"},
+    "anthropic": {"label": "Claude (Anthropic)", "default_model": "claude-sonnet-4-6"},
+    "openai": {"label": "ChatGPT (OpenAI)", "default_model": "gpt-4o"},
+    "google": {"label": "Gemini (Google)", "default_model": "gemini-2.0-flash"},
 }
 
-# A small, diverse hand-picked slice of OpenRouter's full catalog (hundreds
-# of models) — enough to cover every major paid family through the one
-# OpenRouter key without turning the model dropdown into an unbrowsable
-# wall of options. Model slugs are OpenRouter's own naming (provider/model),
-# nested under this app's own "openrouter/" prefix in the dropdown.
-OPENROUTER_FEATURED_MODELS = [
-    "openai/gpt-4o",
-    "anthropic/claude-3.7-sonnet",
-    "google/gemini-2.0-flash-001",
-    "x-ai/grok-2-1212",
-    "deepseek/deepseek-chat",
-    "meta-llama/llama-3.3-70b-instruct",
-    "mistralai/mistral-large",
-    "qwen/qwen-2.5-72b-instruct",
-]
+# ── Cloud-model pricing + spend tracking ──────────────────────────────────────
+# USD per MILLION tokens, from each provider's published price page. "cache_read"
+# is the discounted rate for tokens served from a prompt cache (Anthropic prompt
+# caching / OpenAI automatic caching / Gemini implicit caching); "cache_write"
+# (Anthropic only) is the surcharge for tokens written INTO the cache. These
+# move over time, so every cost shown anywhere in the app is prefixed "≈" and
+# unknown models fall back to their provider's default tier — an estimate for
+# awareness, not a bill.
+PRICING = {
+    "anthropic": {
+        "default": {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75},
+        "claude-sonnet-4-6": {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75},
+        "claude-sonnet-4-5": {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75},
+        "claude-opus-4-6": {"input": 15.0, "output": 75.0, "cache_read": 1.50, "cache_write": 18.75},
+        "claude-opus-4-1": {"input": 10.0, "output": 50.0, "cache_read": 1.00, "cache_write": 12.50},
+        "claude-3-5-haiku": {"input": 0.80, "output": 4.0, "cache_read": 0.08, "cache_write": 1.0},
+        "claude-haiku-4-5": {"input": 1.0, "output": 5.0, "cache_read": 0.10, "cache_write": 1.25},
+    },
+    "openai": {
+        "default": {"input": 2.50, "output": 10.0, "cache_read": 1.25},
+        "gpt-4o": {"input": 2.50, "output": 10.0, "cache_read": 1.25},
+        "gpt-4o-mini": {"input": 0.15, "output": 0.60, "cache_read": 0.075},
+        "gpt-4.1": {"input": 2.0, "output": 8.0, "cache_read": 0.50},
+        "gpt-4.1-mini": {"input": 0.40, "output": 1.60, "cache_read": 0.10},
+        "gpt-4.1-nano": {"input": 0.10, "output": 0.40, "cache_read": 0.025},
+    },
+    "google": {
+        "default": {"input": 0.10, "output": 0.40, "cache_read": 0.025},
+        "gemini-2.0-flash": {"input": 0.10, "output": 0.40, "cache_read": 0.025},
+        "gemini-2.5-flash": {"input": 0.30, "output": 2.50, "cache_read": 0.075},
+        "gemini-2.5-pro": {"input": 1.25, "output": 10.0, "cache_read": 0.31},
+    },
+}
+
+def _pricing_for(provider: str, model: str) -> dict:
+    table = PRICING.get(provider, {})
+    return table.get(model) or table.get("default") or {"input": 0.0, "output": 0.0}
+
+SPEND_FILE = Path(__file__).parent.parent / "usage_cost.json"
+
+def _load_spend() -> dict:
+    """Per-calendar-month spend ledger: {"period": "YYYY-MM", "spent": float,
+    "by_model": {model: dollars}}. A new month rolls the ledger back to zero
+    (previous months aren't archived — this is an awareness meter, not an
+    invoice archive)."""
+    try:
+        data = json.loads(SPEND_FILE.read_text()) if SPEND_FILE.exists() else {}
+    except (json.JSONDecodeError, OSError):
+        data = {}
+    this_month = datetime.now().strftime("%Y-%m")
+    if data.get("period") != this_month:
+        data = {"period": this_month, "spent": 0.0, "by_model": {}}
+    return data
+
+def _record_spend(model: str, cost: float):
+    if cost <= 0:
+        return
+    data = _load_spend()
+    data["spent"] = round(data.get("spent", 0.0) + cost, 6)
+    data["by_model"][model] = round(data["by_model"].get(model, 0.0) + cost, 6)
+    try:
+        SPEND_FILE.write_text(json.dumps(data, indent=2))
+    except (OSError, IOError):
+        pass  # ledger is best-effort; never let it break a real completion
+
+def _cost_summary() -> dict:
+    """Everything the UI needs to render "cost used + % of budget left" for
+    paid models: the month's spend from the ledger, the budget ceiling from
+    config.json (cloud_budget, default $20/month), and the derived
+    percent-left. Local models spend nothing — the frontend only shows this
+    row when a cloud model is selected."""
+    data = _load_spend()
+    budget = float(load_config().get("cloud_budget", 20.0) or 0)
+    spent = data.get("spent", 0.0)
+    pct_left = max(0.0, round(100.0 * (budget - spent) / budget, 1)) if budget > 0 else None
+    return {
+        "period": data.get("period"),
+        "budget": budget,
+        "spent": round(spent, 4),
+        "remaining": round(max(0.0, budget - spent), 4) if budget > 0 else None,
+        "percent_left": pct_left,
+        "by_model": data.get("by_model", {}),
+    }
 
 
 def _load_api_keys() -> dict:
@@ -304,6 +366,12 @@ class FileWriteRequest(BaseModel):
     path: str
     content: str
 
+class FileEditRequest(BaseModel):
+    path: str
+    old_string: str
+    new_string: str
+    replace_all: bool = False
+
 class FileSearchRequest(BaseModel):
     pattern: str
     path: str = ""
@@ -473,15 +541,6 @@ def _lang_plan(language: str, tmp: str) -> dict | None:
             "file": f, "compile": None, "run": [_python_cmd(), harness, f],
             "extra_files": {harness: _SQL_HARNESS},
         }
-    if language == "bash":
-        f = os.path.join(tmp, "code.sh")
-        return {"file": f, "compile": None, "run": ["bash", f]}
-    if language == "zsh":
-        f = os.path.join(tmp, "code.zsh")
-        return {"file": f, "compile": None, "run": ["zsh", f]}
-    if language == "fish":
-        f = os.path.join(tmp, "code.fish")
-        return {"file": f, "compile": None, "run": ["fish", f]}
     return None
 
 
@@ -1360,11 +1419,45 @@ async def apply_update():
     return {"ok": True, "output": output, "restart_required": True}
 
 
-# The standalone /api/search (plain web search) endpoint was removed — it
-# backed the frontend's now-removed web-search UI, which only duplicated the
-# agent's own "web_search" tool (see execute_tool below) with none of the
-# model's synthesis on top. SearchRequest is kept: the tool handler still
-# builds one from the model's tool-call arguments.
+# ── Web Search ─────────────────────────────────────────────────────────────────
+
+@app.post("/api/search")
+async def web_search(req: SearchRequest):
+    try:
+        import urllib.parse
+        encoded = urllib.parse.quote(req.query)
+        url = f"https://html.duckduckgo.com/html/?q={encoded}"
+
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            client.headers.update({
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
+            })
+            r = await client.get(url)
+
+        results = []
+        for match in re.finditer(
+            r'<a rel="nofollow" class="result__a" href="(.*?)".*?>(.*?)</a>.*?'
+            r'<a class="result__snippet".*?>(.*?)</a>',
+            r.text, re.DOTALL
+        ):
+            link = match.group(1)
+            title = re.sub(r'<[^>]+>', '', match.group(2)).strip()
+            snippet = re.sub(r'<[^>]+>', '', match.group(3)).strip()
+            results.append({"title": title, "url": link, "snippet": snippet})
+            if len(results) >= req.max_results:
+                break
+
+        if not results and "anomaly" in r.text.lower():
+            # DuckDuckGo's own bot-detection interstitial (confirmed live: a
+            # burst of requests gets this instead of real results, same 200
+            # status, same URL, no redirect — indistinguishable from a
+            # genuine "no results" without checking for it) — say so plainly
+            # instead of silently reporting zero results either way.
+            return {"results": [], "error": "DuckDuckGo is temporarily rate-limiting automated requests from this machine — wait a minute and try again."}
+
+        return {"results": results}
+    except Exception as e:
+        return {"results": [], "error": str(e)}
 
 
 # ── Image Generation ───────────────────────────────────────────────────────────
@@ -1705,16 +1798,28 @@ async def semantic_search_endpoint(req: SemanticSearchRequest):
 
 # ── Tool definitions for function calling ──────────────────────────────────────
 
+# grep_files skips these outright — reading them as text is useless (and for
+# big ones, slow) even with errors="ignore".
+BINARY_SUFFIXES = {
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".ico", ".svgz",
+    ".pdf", ".zip", ".tar", ".gz", ".xz", ".bz2", ".7z", ".rar",
+    ".exe", ".dll", ".so", ".dylib", ".bin", ".o", ".a", ".class",
+    ".jar", ".apk", ".aab", ".wasm", ".pyc", ".pyo",
+    ".mp3", ".mp4", ".wav", ".avi", ".mkv", ".mov", ".flac", ".ogg",
+    ".woff", ".woff2", ".ttf", ".otf", ".eot", ".db", ".sqlite", ".sqlite3",
+    ".iso", ".img", ".vdi", ".vmdk", ".qcow2", ".lock", ".DS_Store",
+}
+
 TOOLS = [
     {
         "type": "function",
         "function": {
             "name": "execute_code",
-            "description": "Execute a short script or program in a sandbox and return its output. C/C++/Rust/Go/C# are compiled (or built) first; SQL runs against a fresh in-memory SQLite database and prints SELECT results as tab-separated rows; bash/zsh/fish run as shell scripts.",
+            "description": "Execute a short script or program in a sandbox and return its output. C/C++/Rust/Go/C# are compiled (or built) first; SQL runs against a fresh in-memory SQLite database and prints SELECT results as tab-separated rows.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "language": {"type": "string", "enum": ["python", "javascript", "c", "cpp", "rust", "go", "csharp", "sql", "bash", "zsh", "fish"]},
+                    "language": {"type": "string", "enum": ["python", "javascript", "c", "cpp", "rust", "go", "csharp", "sql"]},
                     "code": {"type": "string", "description": "The code to execute"}
                 },
                 "required": ["language", "code"]
@@ -1877,6 +1982,79 @@ TOOLS = [
                 "required": ["command"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_file",
+            "description": "Make a surgical edit to an EXISTING file by replacing an exact old_string with new_string, and get back a unified diff of what changed. STRONGLY PREFER this over write_file when the file already exists — rewriting a whole file from memory silently loses whatever you misremembered, while a targeted edit can only touch what you explicitly named. old_string must match the file's content exactly (including whitespace/indentation) and must be unique in the file — include 2-3 surrounding lines of context to make it unique. If the file doesn't exist yet, it's created with new_string (same as write_file).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Relative file path within the user's home directory"},
+                    "old_string": {"type": "string", "description": "Exact text to find and replace. For a new file, pass the empty string."},
+                    "new_string": {"type": "string", "description": "Replacement text."},
+                    "replace_all": {"type": "boolean", "description": "Replace every occurrence instead of requiring a unique match (default false)."}
+                },
+                "required": ["path", "old_string", "new_string"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "grep_files",
+            "description": "Search file CONTENTS for a regex across the home directory (like ripgrep/grep) and get matching lines with file:line numbers — this is how you find where a function/variable/config/error string is actually used, as opposed to search_files which only matches file NAMES. Skips binary files and common junk dirs (node_modules, .git, venv).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "Regular expression to search for in file contents (Python re syntax)"},
+                    "path": {"type": "string", "description": "Subdirectory to search in, relative to home (optional, defaults to all)"},
+                    "include": {"type": "string", "description": "Optional filename filter with wildcards, e.g. '*.py' or '*.ts'"},
+                    "max_results": {"type": "integer", "description": "Max matching lines to return (default 50)"}
+                },
+                "required": ["pattern"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "todo_write",
+            "description": "Create or update the session's task list so you (and the user) can track multi-step progress. For any task needing 3+ steps, call this FIRST with the full plan, then update statuses (pending/in_progress/completed) as you go. This replaces the whole list each call — always send the complete updated list, not a delta.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "todos": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "content": {"type": "string", "description": "Short task description"},
+                                "status": {"type": "string", "enum": ["pending", "in_progress", "completed"], "description": "Current status"}
+                            },
+                            "required": ["content", "status"]
+                        }
+                    }
+                },
+                "required": ["todos"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "task",
+            "description": "Delegate a self-contained sub-task to a fresh subagent with its own clean context window and the same tools, and get back its final report. Use this for research/exploration that would otherwise flood your own context with file contents or long command output (e.g. 'find every place the auth token is refreshed and summarize the flow') — the subagent reads the files in ITS context and only the distilled findings come back to you. The subagent cannot sudo or ask the user questions; describe the goal fully, including which directory to look in and what the output should contain.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "description": {"type": "string", "description": "Complete, self-contained description of the sub-task — the subagent sees ONLY this, with no other conversation context."},
+                    "max_turns": {"type": "integer", "description": "Optional cap on the subagent's tool-use turns (default 12, max 20)"}
+                },
+                "required": ["description"]
+            }
+        }
     }
 ]
 
@@ -1974,7 +2152,27 @@ async def _run_privileged_command(command: str, cwd: Path, password: str, timeou
     return f"$ sudo {cmd}\n(exit code {proc.returncode})\n{output or '(no output)'}"
 
 
-async def execute_tool(name: str, args: dict) -> str:
+def _unified_diff(before: str, after: str, path: str) -> str:
+    """Unified diff in a ```diff fence so the chat UI colors it red/green.
+    Capped hard: a whole-file rewrite of a big file produces a wall of diff
+    the model doesn't need verbatim in history (it has both versions
+    conceptually already — the diff exists for the human watching)."""
+    diff_lines = list(difflib.unified_diff(
+        before.splitlines(keepends=True), after.splitlines(keepends=True),
+        fromfile=f"a/{path}", tofile=f"b/{path}", n=3,
+    ))
+    if not diff_lines:
+        return "(no textual change)"
+    # Files without trailing newlines produce diff lines without them too,
+    # which renders as "-old+new" run together — normalize every line to be
+    # newline-terminated before joining.
+    text = "".join(l if l.endswith("\n") else l + "\n" for l in diff_lines)
+    if len(text) > 4000:
+        text = text[:4000] + "\n...[diff truncated]"
+    return f"```diff\n{text.strip()}\n```"
+
+
+async def execute_tool(name: str, args: dict, model: str = "", allow_subagents: bool = True) -> str:
     try:
         if name == "execute_code":
             req = ExecuteRequest(**args)
@@ -2046,8 +2244,49 @@ async def execute_tool(name: str, args: dict) -> str:
             if not target.is_relative_to(base):
                 return "Error: Access denied"
             target.parent.mkdir(parents=True, exist_ok=True)
+            before = target.read_text(encoding="utf-8", errors="replace") if target.is_file() else None
             target.write_text(req.content)
-            return f"Written to {req.path} ({len(req.content)} bytes)"
+            if before is None:
+                return f"Created {req.path} ({len(req.content)} bytes)"
+            return f"Wrote {req.path} ({len(req.content)} bytes)\n\n{_unified_diff(before, req.content, req.path)}"
+
+        elif name == "edit_file":
+            req = FileEditRequest(**args)
+            base = Path(BASE_PROJECTS).resolve()
+            target = (base / req.path).resolve()
+            if not target.is_relative_to(base):
+                return "Error: Access denied"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if not target.is_file():
+                if req.old_string:
+                    return f"Error: {req.path} doesn't exist yet. To create it, call edit_file with old_string=\"\" and new_string set to the full file content."
+                target.write_text(req.new_string)
+                return f"Created {req.path} ({len(req.new_string)} bytes)"
+            before = target.read_text(encoding="utf-8", errors="replace")
+            if req.old_string == "":
+                return (f"Error: {req.path} already exists — pass the exact text to replace in old_string "
+                        f"(prefer this over rewriting the whole file).")
+            occurrences = before.count(req.old_string)
+            if occurrences == 0:
+                # Give the model a fighting chance to recover on the next
+                # turn: show what IS around the closest match instead of a
+                # bare "not found" (the usual cause is off-by-a-bit
+                # whitespace/indentation, which difflib can point at).
+                closest = difflib.get_close_matches(req.old_string, before.splitlines(), n=1, cutoff=0.6)
+                hint = f"\nClosest similar line in the file:\n{closest[0]}" if closest else ""
+                return (f"Error: old_string not found in {req.path}. It must match the file exactly, "
+                        f"including whitespace and indentation. Read the file (or the relevant section) "
+                        f"and copy the text precisely.{hint}")
+            if occurrences > 1 and not req.replace_all:
+                first_line = req.old_string.strip().splitlines()[0] if req.old_string.strip() else "(whitespace)"
+                return (f"Error: old_string appears {occurrences} times in {req.path} — it must be unique "
+                        f"so the edit is unambiguous. Include 2-3 surrounding lines of context to make it "
+                        f"unique, or set replace_all=true if you really want all {occurrences} replaced. "
+                        f"First line of the match: {first_line}")
+            after = before.replace(req.old_string, req.new_string) if req.replace_all else \
+                before.replace(req.old_string, req.new_string, 1)
+            target.write_text(after)
+            return f"Edited {req.path} ({occurrences if req.replace_all else 1} replacement(s))\n\n{_unified_diff(before, after, req.path)}"
 
         elif name == "list_files":
             path = args.get("path", "")
@@ -2098,7 +2337,6 @@ async def execute_tool(name: str, args: dict) -> str:
             search_path = (base / spath).resolve() if spath else base
             if not search_path.is_relative_to(base):
                 return "Error: Access denied"
-            from fnmatch import fnmatch
             results = []
             for entry in _safe_rglob(search_path):
                 if entry.is_file():
@@ -2132,6 +2370,102 @@ async def execute_tool(name: str, args: dict) -> str:
                 if s.get("name", "").strip().lower() == skill_name:
                     return f"Skill '{s['name']}': {s.get('instructions', '')}"
             return f"No skill named '{args.get('name', '')}' found."
+
+        elif name == "grep_files":
+            pattern = args.get("pattern", "")
+            try:
+                rx = re.compile(pattern)
+            except re.error as e:
+                return f"Error: invalid regex: {e}"
+            spath = args.get("path", "") or ""
+            base = Path(BASE_PROJECTS).resolve()
+            search_path = (base / spath).resolve() if spath else base
+            if not search_path.is_relative_to(base):
+                return "Error: Access denied"
+            if not search_path.exists():
+                return f"Directory not found: {spath}"
+            include = args.get("include", "") or None
+            max_results = int(args.get("max_results", 50))
+            junk = {"node_modules", ".git", ".venv", "venv", "__pycache__",
+                    ".cache", "dist", "build", "target", ".gradle", ".idea", ".vscode"}
+            results = []
+            for entry in _safe_rglob(search_path):
+                if not entry.is_file() or entry.suffix.lower() in BINARY_SUFFIXES:
+                    continue
+                if any(part in junk for part in entry.parts):
+                    continue
+                if include and not fnmatch(entry.name, include):
+                    continue
+                rel = str(entry.relative_to(base))
+                try:
+                    if (st := _safe_stat(entry)) and st.st_size > 2_000_000:
+                        continue
+                    text = entry.read_text(encoding="utf-8", errors="ignore")
+                except Exception:
+                    continue
+                for lineno, line in enumerate(text.splitlines(), 1):
+                    if rx.search(line):
+                        results.append(f"{rel}:{lineno}: {line.strip()[:240]}")
+                        if len(results) >= max_results:
+                            return (f"Found {len(results)} matching line(s) "
+                                    f"(hit the cap — narrow the pattern/path/include):\n" + "\n".join(results))
+            if not results:
+                return f"No matches for /{pattern}/ in {spath or '~'}"
+            return f"Found {len(results)} matching line(s):\n" + "\n".join(results)
+
+        elif name == "todo_write":
+            todos = args.get("todos", [])
+            if not isinstance(todos, list) or not todos:
+                return "Error: todos must be a non-empty array of {content, status}."
+            clean = []
+            for t in todos:
+                if isinstance(t, dict) and t.get("content"):
+                    clean.append({
+                        "content": str(t["content"])[:200],
+                        "status": t.get("status", "pending"),
+                    })
+            if not clean:
+                return "Error: no usable todo items in the list."
+            done = sum(1 for t in clean if t["status"] == "completed")
+            active = next((t["content"] for t in clean if t["status"] == "in_progress"), None)
+            status_line = f"Task list updated: {done}/{len(clean)} done"
+            if active:
+                status_line += f" — currently: {active}"
+            return status_line + ". Keep going."
+
+        elif name == "task":
+            if not model:
+                return "Error: subagents need a model; run this from the Agent/Chat loop."
+            if not allow_subagents:
+                return ("Error: subagents cannot spawn further subagents (one level of delegation only). "
+                        "Do the work yourself with your own tools instead.")
+            description = str(args.get("description", "")).strip()
+            if not description:
+                return "Error: no task description given."
+            try:
+                max_turns = min(int(args.get("max_turns", 12)), 20)
+            except (TypeError, ValueError):
+                max_turns = 12
+            # Fresh context, same tool loop, but no sudo (a password prompt
+            # from a nested agent the user can't attribute to a step is a bad
+            # experience) and a tighter turn budget. The subagent sees ONLY
+            # the description — that isolation is the entire point (top
+            # agents call this "subagents": heavy reads happen in its context
+            # and only the distilled findings come back).
+            sub_conv = [{"role": "user", "content":
+                description + "\n\n(You are a subagent: no conversation history beyond this message. "
+                "You cannot ask the user questions or use sudo — make reasonable autonomous decisions "
+                "and return a complete, self-contained final report.)"}]
+            report = ""
+            async for ev in _agent_turns(
+                model, sub_conv, max_turns=max_turns,
+                allow_sudo=False, allow_subagents=False,
+            ):
+                if ev["type"] in ("done", "error"):
+                    report = ev.get("content", "")
+            if not report:
+                return "Subagent finished without a final report."
+            return _clip_for_model(report, limit=6000)
 
         elif name == "semantic_search":
             query = args.get("query", "")
@@ -2402,14 +2736,6 @@ async def _test_cloud_key(provider: str, key: str) -> None:
                                   headers={"Authorization": f"Bearer {key}"})
         elif provider == "google":
             r = await client.get("https://generativelanguage.googleapis.com/v1beta/models", params={"key": key})
-        elif provider == "xai":
-            r = await client.get("https://api.x.ai/v1/models", headers={"Authorization": f"Bearer {key}"})
-        elif provider == "deepseek":
-            r = await client.get("https://api.deepseek.com/v1/models", headers={"Authorization": f"Bearer {key}"})
-        elif provider == "openrouter":
-            # /auth/key (not /models, which is public and unauthenticated)
-            # so an actually-invalid key still fails validation here.
-            r = await client.get("https://openrouter.ai/api/v1/auth/key", headers={"Authorization": f"Bearer {key}"})
         else:
             return
     if r.status_code != 200:
@@ -2468,25 +2794,13 @@ async def set_expo_key(req: ExpoTokenRequest):
 
 @app.get("/api/models/cloud")
 async def list_cloud_models():
-    """Only lists a provider's model(s) as usable once a key is actually
-    configured for it — no point offering a model the app can't call.
-    OpenRouter is the one exception to "one model per provider": it fans
-    out to OPENROUTER_FEATURED_MODELS instead of a single default_model,
-    since the whole point of adding it is access to many paid models
-    through one key, not just one more fixed option."""
+    """Only lists a provider's model as usable once a key is actually
+    configured for it — no point offering a model the app can't call."""
     keys = _load_api_keys()
-    models = []
-    for p, meta in CLOUD_PROVIDERS.items():
-        if not keys.get(p):
-            continue
-        if p == "openrouter":
-            models.extend(f"openrouter/{m}" for m in OPENROUTER_FEATURED_MODELS)
-        else:
-            models.append(f"{p}/{meta['default_model']}")
-    return {"models": models}
+    return {"models": [f"{p}/{meta['default_model']}" for p, meta in CLOUD_PROVIDERS.items() if keys.get(p)]}
 
 
-def _messages_for_cloud(messages: list) -> list:
+def _messages_for_cloud(messages: list, slim: bool = False) -> list:
     """None of the three cloud calls below use that provider's native
     tool-calling schema — like the Ollama/local path, tool calls and results
     here are just plain-text turns the model itself parses out of its own
@@ -2495,77 +2809,133 @@ def _messages_for_cloud(messages: list) -> list:
     "user" instead of being dropped. Dropping it (the previous behavior)
     silently erased every tool result from what a cloud model saw on its
     next turn — it would still be told "Continue with the result above" with
-    the actual result missing, breaking anything past a single tool call."""
-    return [{"role": "user" if m["role"] == "tool" else m["role"], "content": m["content"]}
-            for m in messages if m["role"] in ("user", "assistant", "tool")]
+    the actual result missing, breaking anything past a single tool call.
+
+    `slim=True` (used only by the agent loop, where multi-turn tool sessions
+    balloon fastest) stubs out every tool result except the last 4 — paying
+    for a 40k-token npm log AGAIN on every subsequent turn is pure waste
+    once the model has already reacted to it; the recent ones it may still
+    be reasoning over stay verbatim. This is the same history-squashing
+    trick the top-tier agents use to keep paid-model context lean."""
+    out = []
+    tool_indices = [i for i, m in enumerate(messages) if m["role"] == "tool"]
+    keep = set(tool_indices[-4:]) if slim else set()
+    for i, m in enumerate(messages):
+        if m["role"] not in ("user", "assistant", "tool"):
+            continue
+        content = m["content"]
+        if slim and m["role"] == "tool" and i not in keep:
+            content = "(older tool output elided to save context — the model already used it)"
+        out.append({"role": "user" if m["role"] == "tool" else m["role"], "content": content})
+    return out
 
 
-async def _call_anthropic(model: str, messages: list, system: str, api_key: str) -> str:
+def _usage_with_cost(provider: str, model: str, input_tokens: int, output_tokens: int,
+                     cached_tokens: int = 0, cache_write_tokens: int = 0) -> dict:
+    """Normalizes each provider's usage fields into one shape and attaches the
+    estimated USD cost, computed with that provider's cached-token rates.
+    Semantics differ subtly per provider and each caller below passes numbers
+    already adjusted for its own convention:
+      - Anthropic: input_tokens EXCLUDES cache tokens; cache read/write are
+        separate fields, each with its own rate.
+      - OpenAI/Gemini: prompt tokens INCLUDE the cached subset; cached tokens
+        bill at the (much cheaper) cache_read rate, the rest at full input."""
+    p = _pricing_for(provider, model)
+    input_rate = p.get("input", 0.0)
+    cost = 0.0
+    if provider == "anthropic":
+        cost = (input_tokens * input_rate
+                + cached_tokens * p.get("cache_read", 0.0)
+                + cache_write_tokens * p.get("cache_write", 0.0)
+                + output_tokens * p.get("output", 0.0)) / 1_000_000
+    else:
+        uncached = max(0, input_tokens - cached_tokens)
+        cost = (uncached * input_rate
+                + cached_tokens * p.get("cache_read", 0.0)
+                + output_tokens * p.get("output", 0.0)) / 1_000_000
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cached_tokens": cached_tokens,
+        "cost": round(cost, 6),
+    }
+
+
+async def _call_anthropic(model: str, messages: list, system: str, api_key: str) -> tuple[str, dict]:
+    # Prompt caching (the single biggest paid-model saver): the system prompt
+    # (which here includes the whole tool instruction sheet — thousands of
+    # stable tokens) is sent as a cached block, and a second cache breakpoint
+    # sits on the second-to-last message so the entire conversation prefix is
+    # read from cache on every turn after the first. Cached reads bill at a
+    # ~90% discount; the one-time write surcharge pays for itself immediately
+    # in an agent loop that re-sends the whole history every turn.
+    system_blocks = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+    cloud_msgs = _messages_for_cloud(messages, slim=len(messages) > 8)
+    if len(cloud_msgs) > 2:
+        # Content must be block-form to carry cache_control; string content
+        # is fine for the rest and stays that way.
+        prefix = cloud_msgs[:-2]
+        breakpoint_idx = len(prefix) - 1
+        for i, m in enumerate(cloud_msgs):
+            if i == breakpoint_idx:
+                cloud_msgs[i] = {"role": m["role"], "content": [
+                    {"type": "text", "text": m["content"], "cache_control": {"type": "ephemeral"}}
+                ]}
     async with httpx.AsyncClient(timeout=120) as client:
         r = await client.post(
             "https://api.anthropic.com/v1/messages",
             headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
             json={
-                "model": model, "max_tokens": 4096, "system": system,
-                "messages": _messages_for_cloud(messages),
+                "model": model, "max_tokens": 4096, "system": system_blocks,
+                "messages": cloud_msgs,
             },
         )
         if r.status_code != 200:
-            return f"Anthropic API error ({r.status_code}): {r.text[:500]}"
+            return f"Anthropic API error ({r.status_code}): {r.text[:500]}", {}
         data = r.json()
-        return "".join(b.get("text", "") for b in data.get("content", []))
+        u = data.get("usage", {})
+        usage = _usage_with_cost(
+            "anthropic", model,
+            input_tokens=u.get("input_tokens", 0),
+            output_tokens=u.get("output_tokens", 0),
+            cached_tokens=u.get("cache_read_input_tokens", 0),
+            cache_write_tokens=u.get("cache_creation_input_tokens", 0),
+        )
+        return "".join(b.get("text", "") for b in data.get("content", [])), usage
 
 
-async def _call_openai_compatible(url: str, model: str, messages: list, system: str, api_key: str,
-                                   label: str, extra_headers: dict | None = None) -> str:
-    """Shared implementation for every provider whose API mirrors OpenAI's
-    /chat/completions request/response shape — which by design is OpenAI
-    itself plus xAI, DeepSeek, and OpenRouter below (all three publish
-    their API as "OpenAI-compatible" specifically so existing OpenAI-SDK
-    code, and helpers exactly like this one, need only a different base URL
-    and key)."""
-    headers = {"Authorization": f"Bearer {api_key}", "content-type": "application/json"}
-    if extra_headers:
-        headers.update(extra_headers)
+async def _call_openai(model: str, messages: list, system: str, api_key: str) -> tuple[str, dict]:
+    # OpenAI prompt caching is automatic for prompts over 1024 tokens with a
+    # stable prefix (system first — which is already how we send it), so there
+    # is nothing to opt into; the response reports how many tokens hit the
+    # cache and they bill at the discounted rate automatically.
     async with httpx.AsyncClient(timeout=120) as client:
         r = await client.post(
-            url, headers=headers,
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "content-type": "application/json"},
             json={
                 "model": model,
-                "messages": [{"role": "system", "content": system}] + _messages_for_cloud(messages),
+                "messages": [{"role": "system", "content": system}] + _messages_for_cloud(messages, slim=len(messages) > 8),
             },
         )
         if r.status_code != 200:
-            return f"{label} API error ({r.status_code}): {r.text[:500]}"
+            return f"OpenAI API error ({r.status_code}): {r.text[:500]}", {}
         data = r.json()
-        return data["choices"][0]["message"]["content"] or ""
+        u = data.get("usage", {}) or {}
+        cached = (u.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
+        usage = _usage_with_cost(
+            "openai", model,
+            input_tokens=u.get("prompt_tokens", 0),
+            output_tokens=u.get("completion_tokens", 0),
+            cached_tokens=cached,
+        )
+        return data["choices"][0]["message"]["content"] or "", usage
 
 
-async def _call_openai(model: str, messages: list, system: str, api_key: str) -> str:
-    return await _call_openai_compatible(
-        "https://api.openai.com/v1/chat/completions", model, messages, system, api_key, "OpenAI")
-
-
-async def _call_xai(model: str, messages: list, system: str, api_key: str) -> str:
-    return await _call_openai_compatible(
-        "https://api.x.ai/v1/chat/completions", model, messages, system, api_key, "xAI")
-
-
-async def _call_deepseek(model: str, messages: list, system: str, api_key: str) -> str:
-    return await _call_openai_compatible(
-        "https://api.deepseek.com/v1/chat/completions", model, messages, system, api_key, "DeepSeek")
-
-
-async def _call_openrouter(model: str, messages: list, system: str, api_key: str) -> str:
-    # HTTP-Referer/X-Title are OpenRouter's optional app-attribution headers
-    # (surfaced on openrouter.ai/rankings) — harmless to include, not
-    # required for the call to work.
-    return await _call_openai_compatible(
-        "https://openrouter.ai/api/v1/chat/completions", model, messages, system, api_key, "OpenRouter",
-        extra_headers={"HTTP-Referer": "https://github.com/CopperArch/AI-Copper-Maker", "X-Title": "AI Copper Maker"})
-
-
-async def _call_gemini(model: str, messages: list, system: str, api_key: str) -> str:
+async def _call_gemini(model: str, messages: list, system: str, api_key: str) -> tuple[str, dict]:
+    # Gemini 2.x does implicit context caching server-side on stable prefixes
+    # — nothing to configure; the response reports cachedContentTokenCount and
+    # those tokens bill at the discounted rate.
     async with httpx.AsyncClient(timeout=120) as client:
         r = await client.post(
             f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
@@ -2574,40 +2944,50 @@ async def _call_gemini(model: str, messages: list, system: str, api_key: str) ->
                 "systemInstruction": {"parts": [{"text": system}]},
                 "contents": [
                     {"role": "model" if m["role"] == "assistant" else "user", "parts": [{"text": m["content"]}]}
-                    for m in _messages_for_cloud(messages)
+                    for m in _messages_for_cloud(messages, slim=len(messages) > 8)
                 ],
             },
         )
         if r.status_code != 200:
-            return f"Gemini API error ({r.status_code}): {r.text[:500]}"
+            return f"Gemini API error ({r.status_code}): {r.text[:500]}", {}
         data = r.json()
+        u = data.get("usageMetadata", {}) or {}
+        usage = _usage_with_cost(
+            "google", model,
+            input_tokens=u.get("promptTokenCount", 0),
+            output_tokens=u.get("candidatesTokenCount", 0),
+            cached_tokens=u.get("cachedContentTokenCount", 0),
+        )
         parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
-        return "".join(p.get("text", "") for p in parts)
+        return "".join(p.get("text", "") for p in parts), usage
 
 
-async def _call_cloud_model(model_ref: str, messages: list, system: str) -> str:
+async def _call_cloud_model(model_ref: str, messages: list, system: str, slim_history: bool = False) -> tuple[str, dict]:
     """model_ref is "<provider>/<model>", e.g. "anthropic/claude-sonnet-4-6" —
     the same slash convention Ollama itself uses for community model tags
     (e.g. huihui_ai/qwen2.5-coder-abliterate), so cloud models sit naturally
-    in the same model-name space instead of needing a different UI concept."""
+    in the same model-name space instead of needing a different UI concept.
+    Returns (text, usage); usage carries token counts, cached tokens, and the
+    estimated USD cost, and every dollar spent is recorded into the monthly
+    ledger so the budget meter in the UI reflects ALL cloud usage — agent
+    runs, drafting, analyzer, everything."""
     provider, _, model = model_ref.partition("/")
     keys = _load_api_keys()
     api_key = keys.get(provider)
     if not api_key:
-        return f"No API key configured for '{provider}' — add one in the Models tab first."
+        return f"No API key configured for '{provider}' — add one in the Models tab first.", {}
+    if slim_history:
+        messages = _messages_for_cloud(messages, slim=True)
     if provider == "anthropic":
-        return await _call_anthropic(model, messages, system, api_key)
-    if provider == "openai":
-        return await _call_openai(model, messages, system, api_key)
-    if provider == "google":
-        return await _call_gemini(model, messages, system, api_key)
-    if provider == "xai":
-        return await _call_xai(model, messages, system, api_key)
-    if provider == "deepseek":
-        return await _call_deepseek(model, messages, system, api_key)
-    if provider == "openrouter":
-        return await _call_openrouter(model, messages, system, api_key)
-    return f"Unknown cloud provider '{provider}'."
+        text, usage = await _call_anthropic(model, messages, system, api_key)
+    elif provider == "openai":
+        text, usage = await _call_openai(model, messages, system, api_key)
+    elif provider == "google":
+        text, usage = await _call_gemini(model, messages, system, api_key)
+    else:
+        return f"Unknown cloud provider '{provider}'.", {}
+    _record_spend(model_ref, usage.get("cost", 0.0))
+    return text, usage
 
 
 def _is_cloud_model(model: str) -> bool:
@@ -2630,7 +3010,8 @@ async def _llm_complete(model: str, messages: list, timeout: int = 120) -> str:
     if _is_cloud_model(model):
         system = next((m["content"] for m in messages if m["role"] == "system"), "")
         convo = [m for m in messages if m["role"] != "system"]
-        return await _call_cloud_model(model, convo, system)
+        text, _usage = await _call_cloud_model(model, convo, system)
+        return text
     async with httpx.AsyncClient(timeout=timeout) as client:
         r = await client.post(f"{OLLAMA}/api/chat", json={"model": model, "messages": messages, "stream": False})
         r.raise_for_status()
@@ -2648,7 +3029,7 @@ async def _stream_chat_ndjson(model: str, messages: list, timeout: int = 600):
     if _is_cloud_model(model):
         system = next((m["content"] for m in messages if m["role"] == "system"), "")
         convo = [m for m in messages if m["role"] != "system"]
-        text = await _call_cloud_model(model, convo, system)
+        text, _usage = await _call_cloud_model(model, convo, system)
         yield (json.dumps({"message": {"content": text}, "done": True}) + "\n").encode()
         return
     try:
@@ -2902,7 +3283,14 @@ When you need to use a tool, your ENTIRE response must be ONLY this — no narra
 ```
 The tool will be executed for you and its real result given back to you as the next message. Never fabricate what a tool would return, and never write example/hypothetical output as if it were a real result — if a tool call fails or doesn't exist, say so and try a different real tool or ask the user, rather than making up an answer. Once you have everything you need and the task is complete, respond in plain natural language summarizing what you actually did and the real outcome — do not emit another tool call once the task is finished.
 
-You are expected to actually DO the task with these tools — write the file, run the fix, run the build — not describe a plan and stop to ask whether you should proceed. Only stop and ask the user a question when you are genuinely blocked (missing credentials, a genuinely ambiguous target you can't infer, a destructive/irreversible action outside the project directory) — never merely to get permission for something you already have a working tool for.
+Working method (this is how top-tier coding agents operate — follow it):
+- PLAN FIRST: for any task needing 3+ steps, call todo_write with the full step list before doing anything else, then mark steps in_progress/completed as you actually go. Update it when reality diverges from the plan — the user sees this list live.
+- SEARCH, DON'T GUESS: to find where something lives in the codebase, use grep_files (contents) / search_files (filenames) / read_file, and include real line numbers in what you tell the user. Never speculate about code you haven't read.
+- SURGICAL EDITS: for changes to existing files, use edit_file (exact old_string → new_string) — NOT write_file. Rewriting a whole file from memory silently drops whatever you misremembered; a targeted edit can only touch what you named. write_file is for genuinely new files only. Every edit/write returns a unified diff — read it to verify the change is what you intended.
+- DELEGATE HEAVY READING: when a task involves reading lots of files or long command output that you don't need verbatim (codebase exploration, "how does X work" research), use the task tool — the subagent burns ITS context on the reading and only the distilled report comes back to yours.
+- VERIFY YOUR WORK: after changing code/config, actually run/test it (execute_code, run_command) and react to the real output instead of declaring success and stopping.
+
+You are expected to actually DO the task with these tools — write the file, run the fix, run the build — not describe a plan and stop to ask whether it should proceed. Only stop and ask the user a question when you are genuinely blocked (missing credentials, a genuinely ambiguous target you can't infer, a destructive/irreversible action outside the project directory) — never merely to get permission for something you already have a working tool for.
 
 You may install whatever software the task needs (package-manager installs, `ollama pull`, `flatpak install`, `git clone` + build, `npm install`/`pip install`, anything else) without asking permission first — the user has already directed full autonomy. Just say what you're installing as you go, and respect the platform caveats below (e.g. the atomic-distro reboot notes — those are physics, not restrictions).
 
@@ -2923,6 +3311,19 @@ def _clip_for_model(text: str, limit: int = 8000) -> str:
     return text[:limit] + f"\n...[truncated at {limit} characters — ask for a specific range if you need more]"
 
 
+MAX_AUTO_SKILLS = 120
+
+def _name_similarity(a: str, b: str) -> float:
+    """Token-overlap similarity for near-duplicate skill detection — exact-name
+    matching alone lets the same lesson pile up under slight rewordings
+    ("fix npm ebusy error" vs "fixing npm EBUSY errors"), which is exactly
+    what the auto-learner produces when a similar task recurs."""
+    ta = {w for w in re.split(r'[^a-z0-9]+', a.lower()) if len(w) > 2}
+    tb = {w for w in re.split(r'[^a-z0-9]+', b.lower()) if len(w) > 2}
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / min(len(ta), len(tb))
+
 async def _auto_distill_skill(model: str, conv: list):
     """Fire-and-forget: after an agent session that actually searched the web
     or ran code, asks the model whether it learned anything reusable — a fix
@@ -2932,8 +3333,9 @@ async def _auto_distill_skill(model: str, conv: list):
     below) there is no human review queue here: the user asked for skills to
     build up automatically from what the agent learns while searching/coding,
     not to approve each one. Every failure mode (model says no, bad JSON, a
-    near-duplicate name) just quietly does nothing — this must never surface
-    an error to the user or interrupt the real conversation it's watching."""
+    near-duplicate name, the auto-skill library being full) just quietly does
+    nothing — this must never surface an error to the user or interrupt the
+    real conversation it's watching."""
     try:
         transcript = "\n".join(
             f"{m['role']}: {str(m.get('content', ''))[:1500]}" for m in conv[-14:] if m.get("content")
@@ -2956,9 +3358,24 @@ Did this session involve solving a real problem, fixing a non-obvious bug, or di
         if not (name and description and instructions):
             return
         skills = _load_json_list(SKILLS_FILE)
-        # Don't pile up near-duplicates every time a similar task recurs.
-        if any(s.get("name", "").strip().lower() == name.lower() for s in skills):
-            return
+        # Don't pile up near-duplicates every time a similar task recurs —
+        # block exact names AND strong token overlap (same lesson, reworded),
+        # and a description that's near-verbatim an existing skill's.
+        for s in skills:
+            if s.get("name", "").strip().lower() == name.lower():
+                return
+            if _name_similarity(s.get("name", ""), name) >= 0.7:
+                return
+            if _name_similarity(s.get("description", ""), description) >= 0.8:
+                return
+        # The auto library is useful precisely because it stays small enough
+        # to fit in the system prompt's skill directory — cap it, and shed
+        # the OLDEST auto-learned entries (manual ones are never evicted)
+        # rather than silently stop learning.
+        auto_skills = [s for s in skills if s.get("source") == "auto"]
+        if len(auto_skills) >= MAX_AUTO_SKILLS:
+            oldest = min(auto_skills, key=lambda s: s.get("created_at", ""))
+            skills = [s for s in skills if s is not oldest]
         skills.append({
             "id": uuid.uuid4().hex[:12],
             "name": name,
@@ -2972,114 +3389,17 @@ Did this session involve solving a real problem, fixing a non-obvious bug, or di
         pass
 
 
-_MODEL_CONTEXT_LENGTH_CACHE: dict[str, int] = {}
-DEFAULT_CONTEXT_TOKENS = 8192  # conservative fallback when Ollama doesn't report context_length
-
-
-async def _get_model_context_length(model: str) -> int:
-    """Best-effort lookup of the model's real context window, cached per
-    model name for the process lifetime — this is checked every agent turn
-    (see _compact_conversation_if_needed) and the value never changes
-    mid-run, so there's no reason to re-hit Ollama's API on every turn."""
-    if model in _MODEL_CONTEXT_LENGTH_CACHE:
-        return _MODEL_CONTEXT_LENGTH_CACHE[model]
-    if _is_cloud_model(model):
-        # Cloud context windows are documented and comfortably large; not
-        # worth a provider-specific lookup just to feed a compaction budget.
-        _MODEL_CONTEXT_LENGTH_CACHE[model] = 32000
-        return 32000
-    result = DEFAULT_CONTEXT_TOKENS
-    try:
-        async with httpx.AsyncClient(timeout=5) as client:
-            r = await client.get(f"{OLLAMA}/api/tags")
-            data = r.json()
-            for m in data.get("models", []):
-                if m.get("name") == model:
-                    ctx = (m.get("details") or {}).get("context_length")
-                    if isinstance(ctx, int) and ctx > 0:
-                        result = ctx
-                    break
-    except Exception:
-        pass
-    _MODEL_CONTEXT_LENGTH_CACHE[model] = result
-    return result
-
-
-async def _summarize_dropped_turns(model: str, turns: list) -> str:
-    """One cheap extra model call to compress history that's about to be
-    dropped — trading a bit more compute for keeping the gist of what
-    happened instead of losing it outright. This is the same trade
-    context-extending tools like Plandex make: break a big task into more,
-    smaller model calls instead of one call that no longer fits. Falls back
-    to a naive truncated transcript if the summarization call itself fails,
-    so compaction never hard-fails the user's actual turn."""
-    transcript = "\n".join(f"{t.get('role', '?')}: {(t.get('content') or '')[:500]}" for t in turns)
-    prompt = (
-        "Summarize the following AI agent conversation history in a few dense "
-        "sentences. Keep concrete facts, decisions, file paths, and results the "
-        "model will still need to correctly continue the task — this replaces "
-        "the full history from here on, not a preview of it:\n\n" + transcript[:20000]
-    )
-    try:
-        summary = (await _llm_complete(model, [{"role": "user", "content": prompt}], timeout=60)).strip()
-        if summary:
-            return summary
-    except Exception:
-        pass
-    return _clip_for_model(transcript, 2000)
-
-
-async def _compact_conversation_if_needed(conv: list, model: str, system_prompt_chars: int) -> list:
-    """Keeps a long agent run (or a long saved conversation resumed from
-    before) from silently overflowing the model's context window. Ollama
-    doesn't error when a request overflows num_ctx — it just quietly drops
-    earlier context, which reads to the user as the model "forgetting" the
-    task partway through a long multi-tool run. Instead of losing that
-    history for free, fold whatever would be dropped into one compact
-    summary turn first — replaces the old MAX_HISTORY_MESSAGES blind slice
-    (frontend/index.html), which only ever dropped history outright with
-    nothing kept in its place.
-
-    Budgets on character count (~4 chars/token, the standard estimator used
-    when a real tokenizer isn't available) rather than an exact token count —
-    good enough to trigger compaction comfortably before the real limit,
-    which is all a safety margin needs to do.
-    """
-    context_tokens = await _get_model_context_length(model)
-    # Compact at 60% of the window, not 90%+, so there's still headroom left
-    # for one big tool result (a large file read, a long command's output)
-    # on the very next turn without immediately tipping over again.
-    budget_chars = int(context_tokens * 4 * 0.6) - system_prompt_chars
-    total_chars = sum(len(m.get("content", "") or "") for m in conv)
-    if budget_chars <= 0 or total_chars <= budget_chars:
-        return conv
-
-    # Walk backward keeping the most recent messages verbatim — what the
-    # model actually needs to continue the current step — reserving at most
-    # half the budget for them so there's always real room left for the
-    # summary plus this turn's own reply.
-    keep_chars = budget_chars // 2
-    split_idx = len(conv)
-    running = 0
-    for i in range(len(conv) - 1, -1, -1):
-        running += len(conv[i].get("content", "") or "")
-        if running > keep_chars:
-            break
-        split_idx = i
-    if split_idx <= 0:
-        return conv  # everything is "recent" — nothing old enough to fold away
-
-    old, recent = conv[:split_idx], conv[split_idx:]
-    summary = await _summarize_dropped_turns(model, old)
-    return [{"role": "user", "content": f"[Summary of earlier turns, compacted to stay within context: {summary}]"}] + recent
-
-
-async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str = ""):
+async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str = "",
+                       allow_sudo: bool = True, allow_subagents: bool = True):
     """Runs the tool-use agent loop, yielding structured event dicts. Shared by
-    the interactive /api/agent endpoint (streamed to the browser) and scheduled
-    routine execution (collected into a final result) below. `conv` is mutated
-    in place and included in terminal events so the caller can persist the
-    full history (including tool calls/results) for the next turn."""
+    the interactive /api/agent endpoint (streamed to the browser), scheduled
+    routine execution (collected into a final result), and the `task` tool's
+    nested subagent runs below. `conv` is mutated in place and included in
+    terminal events so the caller can persist the full history (including
+    tool calls/results) for the next turn. `allow_sudo=False` turns the sudo
+    human-gate into a plain refusal — used by subagents, which must never put
+    a password prompt in front of the user with no visible step to attribute
+    it to."""
     response_text = ""
     # Set the moment a search or code tool actually runs — gates the
     # end-of-session auto-skill distillation below so a plain Q&A turn (no
@@ -3087,11 +3407,6 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
     used_learnable_tool = False
     for turn in range(max_turns):
         system_msg = {"role": "system", "content": build_system_prompt(system or UNCENSORED_SYSTEM) + "\n\n" + _agent_tool_instructions()}
-        # Mutates conv in place (per this function's own docstring/contract)
-        # so the caller's reference stays valid either way — folds anything
-        # that would overflow the model's context window into one summary
-        # turn instead of the model silently losing it.
-        conv[:] = await _compact_conversation_if_needed(conv, model, len(system_msg["content"]))
         messages = [system_msg] + conv
 
         # turn 0's user message is already the last entry in `conv` (the caller
@@ -3111,13 +3426,36 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
                 # one shot instead of animating word-by-word; everything
                 # downstream (tool-call extraction, sudo flow, etc.) works
                 # identically either way since it only looks at response_text.
-                response_text = await _call_cloud_model(model, messages[1:], system_msg["content"])
+                # slim_history: an agent loop re-sends the entire transcript
+                # every turn, so older tool results get elided (see
+                # _messages_for_cloud) to keep paid-token usage — and the
+                # metered cost — from ballooning. usage comes back with the
+                # exact cached/uncached token counts and estimated cost, and
+                # rides the terminal event to the frontend's cost display.
+                response_text, cloud_usage = await _call_cloud_model(model, messages[1:], system_msg["content"], slim_history=True)
+                # Frontend totals expect Ollama's field names — normalize the
+                # cloud usage into the same shape, keeping the extra cost /
+                # cached-token fields alongside for the cost display.
+                if cloud_usage:
+                    usage = {"prompt_eval_count": cloud_usage.get("input_tokens", 0),
+                             "eval_count": cloud_usage.get("output_tokens", 0), **cloud_usage}
                 yield {"type": "token", "content": response_text}
             else:
+                # Tool-format reliability needs determinism: at Ollama's
+                # default temperature (~0.8) the same prompt flip-flops
+                # between emitting the ```tool fence and politely
+                # acknowledging readiness (confirmed live against both local
+                # models), so the agent loop runs cool. num_ctx is explicit
+                # too — the tool instruction sheet alone is ~4-5k tokens, and
+                # Ollama's default window for some models is small enough to
+                # silently clip it, which reads to the model as "I have no
+                # tools" (also confirmed live: a direct call that DID fit
+                # emitted the fence perfectly while loop calls clipped).
                 async with httpx.AsyncClient(timeout=120) as client:
                     async with client.stream(
                         "POST", f"{OLLAMA}/api/chat",
-                        json={"model": model, "messages": messages, "stream": True}
+                        json={"model": model, "messages": messages, "stream": True,
+                              "options": {"temperature": 0.2, "num_ctx": 16384}}
                     ) as r:
                         async for chunk in r.aiter_bytes():
                             for line in chunk.decode().split("\n"):
@@ -3148,7 +3486,8 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
 
         tool_name = tool_spec["name"]
         tool_args = tool_spec.get("arguments", {}) or {}
-        if tool_name in ("execute_code", "run_command", "web_search"):
+        if tool_name in ("execute_code", "run_command", "web_search", "edit_file",
+                         "write_file", "grep_files", "task"):
             used_learnable_tool = True
 
         yield {"type": "tool_call", "name": tool_name, "arguments": tool_args}
@@ -3169,6 +3508,10 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
                 "anything — just start it on a different port instead, e.g. "
                 "`npx expo start --port 8082` or `--web-port 8082`."
             )
+        elif tool_name == "run_command" and not allow_sudo and re.search(r'\bsudo\b', tool_args.get("command", "")):
+            result = ("Refused: subagents cannot use sudo (no way to show the user an attributable "
+                      "password prompt from a nested run). Find a non-root approach, or finish your "
+                      "report and let the parent agent handle the root-needing step itself.")
         elif tool_name == "run_command" and re.search(r'\bsudo\b', tool_args.get("command", "")):
             # Root needs a human. Pause here — yield a request id the browser
             # turns into a password prompt, then block (with a timeout) on the
@@ -3199,7 +3542,7 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
                 result = await _run_privileged_command(tool_args["command"], target, password)
                 password = None  # drop the reference now that we're done with it
         else:
-            result = await execute_tool(tool_name, tool_args)
+            result = await execute_tool(tool_name, tool_args, model=model, allow_subagents=allow_subagents)
         yield {"type": "tool_result", "name": tool_name, "result": _clip_for_model(result)}
 
         # Truncate to just the matched call — a weaker model sometimes crams a
@@ -3229,8 +3572,22 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
 
 @app.post("/api/agent")
 async def agent_loop(req: AgentRequest):
+    # `message` is part of the request model, and anything POSTing to this
+    # endpoint directly (a script, a test, the Routines path via a different
+    # caller) reasonably expects it to reach the model — but it used to be
+    # silently dropped unless the caller ALSO happened to append it to
+    # `conversation` themselves (which is exactly what the frontend does, so
+    # the bug was invisible in the UI: a bare API call got a model staring at
+    # nothing but the system prompt, cheerfully acknowledging readiness).
+    # Seed it into the conversation when it isn't already the last user turn.
+    conv = [dict(m) for m in req.conversation]
+    if req.message.strip() and not (
+        conv and conv[-1].get("role") == "user" and conv[-1].get("content") == req.message
+    ):
+        conv.append({"role": "user", "content": req.message})
+
     async def stream():
-        async for event in _agent_turns(req.model, req.conversation, system=req.system):
+        async for event in _agent_turns(req.model, conv, system=req.system):
             yield json.dumps(event) + "\n"
 
     return StreamingResponse(stream(), media_type="application/x-ndjson")
@@ -3637,11 +3994,28 @@ async def get_config():
 @app.post("/api/config")
 async def set_config(cfg: dict):
     if not isinstance(cfg, dict):
-        raise HTTPException(status_code=422, detail="Expected a JSON object")
+        raise HTTPException(422, detail="Expected a JSON object")
     existing = load_config()
+    # cloud_budget is the monthly paid-model spend ceiling; validate it as a
+    # positive number (or null to disable the meter) before it lands.
+    if "cloud_budget" in cfg:
+        try:
+            v = cfg["cloud_budget"]
+            if v is not None and float(v) < 0:
+                raise ValueError
+            cfg["cloud_budget"] = None if v is None else float(v)
+        except (TypeError, ValueError):
+            raise HTTPException(422, detail="cloud_budget must be a non-negative number or null")
     existing.update(cfg)
     write_config(existing)
     return {"ok": True}
+
+
+@app.get("/api/cost/summary")
+async def cost_summary():
+    """Month-to-date cloud spend vs. the configured budget — powers the
+    '≈$X.XX used · N% left' line under the token count for paid models."""
+    return _cost_summary()
 
 
 # ── Save Project ───────────────────────────────────────────────────────────────
@@ -3903,12 +4277,6 @@ async def analyze_code_project(project_id: str, req: ProjectAnalyzeRequest):
                    f"{lang} project more complete, useful, or polished. List them as a "
                    f"short bullet list, each with a one-line rationale — don't write "
                    f"code, just ideas.\n\n{blob}")
-    elif req.action == "fix":
-        prior = (f"\n\nBugs already identified in a previous review — fix exactly these, "
-                 f"don't go looking for a different set:\n{req.instruction}\n") if req.instruction.strip() else ""
-        prompt = (f"Fix the bugs in the following {lang} project.{prior} "
-                  f"Change only what's needed to fix them — don't refactor unrelated code. "
-                  f"{rewrite_format}\n\n{blob}")
     elif req.action == "improve":
         prompt = (f"Improve the following {lang} project — fix bugs, improve "
                    f"readability/performance/correctness — without changing its "
@@ -3926,6 +4294,57 @@ async def analyze_code_project(project_id: str, req: ProjectAnalyzeRequest):
         {"role": "user", "content": prompt},
     ]
     return StreamingResponse(_stream_chat_ndjson(req.model, messages, timeout=300), media_type="application/x-ndjson")
+
+
+class AgentSuggestionsRequest(BaseModel):
+    model: str
+
+@app.post("/api/code-projects/{project_id}/agent-suggestions")
+async def code_project_agent_suggestions(project_id: str, req: AgentSuggestionsRequest):
+    """Proposes 3-5 concrete, ready-to-run agent tasks for this specific
+    project — the "what would a senior dev do next with this codebase" list
+    (bugs to fix, missing error handling, untested paths, obvious polish).
+    Each suggestion's `task` field is written to be handed STRAIGHT to the
+    autonomous agent as-is: self-contained, naming real files/lines from the
+    blob, no 'maybe consider' hedging — the frontend renders them as
+    one-click 'Run in Agent' cards."""
+    proj = _get_code_project_or_404(project_id)
+    blob = _project_code_blob(proj)
+    lang = proj.get("language") or "the project's language"
+    prompt = f"""Analyze this {lang} project and propose the 4 highest-value next tasks for an autonomous AI coding agent to do on it. Prioritize by real impact: actual bugs and unhandled errors first, then missing input/edge-case handling, then meaningful improvements or obvious missing features. Never propose busywork (comment additions, formatting, renaming for taste).
+
+For each task, write `title` (3-6 words) and `task` — a fully self-contained instruction the agent can execute with zero extra context: name the exact file(s) and function(s) involved, what's wrong or missing, and what "done" looks like. Reference real identifiers from the code below, not generic placeholders.
+
+Respond with ONLY a JSON array (no markdown fences, no other text), exactly this shape:
+[{{"title": "...", "task": "..."}}, ...]
+
+Project:
+{blob[:60000]}"""
+    try:
+        content = (await _llm_complete(req.model, [
+            {"role": "system", "content": "You are an expert software engineer planning autonomous agent work."},
+            {"role": "user", "content": prompt},
+        ], timeout=120)).strip()
+    except Exception as e:
+        raise HTTPException(502, f"Model error: {e}")
+
+    suggestions = []
+    match = re.search(r'\[.*\]', content, re.DOTALL)
+    if match:
+        try:
+            parsed = json.loads(match.group(0))
+            if isinstance(parsed, list):
+                for item in parsed:
+                    if isinstance(item, dict) and item.get("title") and item.get("task"):
+                        suggestions.append({
+                            "title": str(item["title"])[:80],
+                            "task": str(item["task"])[:600],
+                        })
+        except json.JSONDecodeError:
+            pass
+    if not suggestions:
+        raise HTTPException(502, "Could not parse suggestions from the model's response — try again.")
+    return {"suggestions": suggestions[:5]}
 
 @app.post("/api/code-projects/{project_id}/apply")
 async def apply_code_project_files(project_id: str, req: ApplyProjectFilesRequest):
@@ -4299,12 +4718,6 @@ EMAIL_PROVIDERS = {
     "zoho":     {"label": "Zoho Mail",                  "imap_host": "imap.zoho.com",         "imap_port": 993, "smtp_host": "smtp.zoho.com",       "smtp_port": 587, "smtp_ssl": False, "note": "Generate an app-specific password in Zoho Account Security."},
     "aol":      {"label": "AOL Mail",                   "imap_host": "imap.aol.com",          "imap_port": 993, "smtp_host": "smtp.aol.com",        "smtp_port": 587, "smtp_ssl": False, "note": "Generate an app password in AOL Account Security."},
     "gmx":      {"label": "GMX Mail",                   "imap_host": "imap.gmx.com",          "imap_port": 993, "smtp_host": "smtp.gmx.com",        "smtp_port": 587, "smtp_ssl": False, "note": ""},
-    # Proton doesn't expose real IMAP/SMTP on its own servers at all (mail
-    # stays end-to-end encrypted there) — Proton Mail Bridge, a small app
-    # Proton ships, runs on this same machine and re-exposes it locally.
-    # Host/port/password all come from Bridge's own UI, not proton.me — the
-    # defaults below are Bridge's standard local ports, not a live endpoint.
-    "protonmail": {"label": "Proton Mail",              "imap_host": "127.0.0.1",             "imap_port": 1143, "smtp_host": "127.0.0.1",           "smtp_port": 1025, "smtp_ssl": False, "note": "Requires Proton Mail Bridge running on this machine (proton.me/mail/bridge) — use the host, port, and password Bridge itself displays, not your real Proton password."},
     "custom":   {"label": "Custom / Other (IMAP+SMTP)", "imap_host": "",                      "imap_port": 993, "smtp_host": "",                    "smtp_port": 587, "smtp_ssl": False, "note": "Works with any standards-compliant IMAP/SMTP server — enter your provider's host/port."},
 }
 
@@ -4319,7 +4732,6 @@ _EMAIL_DOMAIN_MAP = {
     "zoho.com": "zoho",
     "aol.com": "aol",
     "gmx.com": "gmx", "gmx.net": "gmx",
-    "protonmail.com": "protonmail", "proton.me": "protonmail", "pm.me": "protonmail",
 }
 
 def _parse_autoconfig_xml(xml_text: str) -> dict | None:
@@ -4416,11 +4828,6 @@ class DraftRepliesRequest(BaseModel):
     body: str
     instructions: str = ""
 
-class ComposeEmailRequest(BaseModel):
-    model: str
-    to: str = ""
-    instructions: str
-
 class SendEmailRequest(BaseModel):
     account_id: str
     to: str
@@ -4504,34 +4911,6 @@ def _decode_mime(value: str) -> str:
         out += text.decode(enc or "utf-8", errors="replace") if isinstance(text, bytes) else text
     return out
 
-def _decode_imap_utf7(name: str) -> str:
-    """IMAP folder names are encoded in RFC 3501's modified UTF-7 ('&' where
-    standard UTF-7 uses '+', ',' where it uses '/', no padding, '&-' as a
-    literal ampersand). Real folder names (INBOX, Sent, Drafts...) are plain
-    ASCII and never hit this path — falls back to the raw name on anything
-    unexpected rather than failing the whole folder list over one oddly
-    named folder."""
-    if "&" not in name:
-        return name
-    try:
-        result, i = [], 0
-        while i < len(name):
-            if name[i] == "&":
-                j = name.index("-", i)
-                chunk = name[i + 1:j]
-                if not chunk:
-                    result.append("&")
-                else:
-                    b64 = (chunk.replace(",", "/") + "=" * (-len(chunk) % 4)).encode("ascii")
-                    result.append(base64.b64decode(b64).decode("utf-16-be"))
-                i = j + 1
-            else:
-                result.append(name[i])
-                i += 1
-        return "".join(result)
-    except Exception:
-        return name
-
 def _extract_body(msg) -> str:
     if msg.is_multipart():
         for part in msg.walk():
@@ -4575,16 +4954,10 @@ def _imap_fetch(account: dict, folder: str, limit: int, access_token: str = "") 
             return []
         ids = data[0].split()[-limit:]
         for uid_ in reversed(ids):
-            # FLAGS alongside RFC822 in one round trip — msg_data[0] stays the
-            # same (meta-line, raw-bytes) tuple imaplib always returns for a
-            # single fetched item, just with the FLAGS list folded into the
-            # meta line instead of a second server round trip per message.
-            status, msg_data = imap.fetch(uid_, "(FLAGS RFC822)")
+            status, msg_data = imap.fetch(uid_, "(RFC822)")
             if status != "OK" or not msg_data or not msg_data[0]:
                 continue
-            meta, raw = msg_data[0]
-            unread = b"\\Seen" not in (meta or b"")
-            msg = message_from_bytes(raw)
+            msg = message_from_bytes(msg_data[0][1])
             body = _extract_body(msg)
             messages.append({
                 "uid": uid_.decode(),
@@ -4593,57 +4966,8 @@ def _imap_fetch(account: dict, folder: str, limit: int, access_token: str = "") 
                 "date": msg.get("Date", ""),
                 "preview": body.strip()[:200],
                 "body": body.strip()[:20000],
-                "unread": unread,
             })
     return messages
-
-def _imap_list_folders(account: dict, access_token: str = "") -> list:
-    with imaplib.IMAP4_SSL(account["imap_host"], account.get("imap_port", 993)) as imap:
-        _imap_login(imap, account, access_token)
-        status, data = imap.list()
-        if status != "OK" or not data:
-            return [{"name": "INBOX", "unread": 0}]
-        raw_names = []
-        for entry in data:
-            if not entry:
-                continue
-            # A LIST response line looks like: (\HasNoChildren) "/" "INBOX"
-            # — the folder name is always the last quoted (or bare) token.
-            decoded = entry.decode(errors="replace")
-            match = re.search(r'"([^"]*)"\s*$', decoded)
-            raw_names.append(match.group(1) if match else decoded.rsplit(" ", 1)[-1])
-
-        folders = []
-        for raw_name in raw_names:
-            # One STATUS round trip per folder for its unread count (Outlook's
-            # "Inbox 11" badges) — quoted since names with spaces ("Sent
-            # Mail") are otherwise invalid IMAP syntax. Wrapped per-folder so
-            # one folder a server won't report STATUS for (seen on some
-            # [Gmail]/... container folders) doesn't blank out every count.
-            unread = 0
-            try:
-                st, st_data = imap.status(f'"{raw_name}"', "(UNSEEN)")
-                if st == "OK" and st_data and st_data[0]:
-                    m = re.search(rb"UNSEEN\s+(\d+)", st_data[0])
-                    if m:
-                        unread = int(m.group(1))
-            except Exception:
-                pass
-            folders.append({"name": _decode_imap_utf7(raw_name), "unread": unread})
-
-        # INBOX first, then alphabetical — the order every real mail client uses.
-        folders.sort(key=lambda f: (f["name"].upper() != "INBOX", f["name"].lower()))
-        return folders or [{"name": "INBOX", "unread": 0}]
-
-@app.get("/api/email/{account_id}/folders")
-async def get_email_folders(account_id: str):
-    account = _get_email_account(account_id)
-    try:
-        access_token = await _google_access_token(account["google_account_id"]) if account.get("auth") == "oauth" else ""
-        folders = await asyncio.to_thread(_imap_list_folders, account, access_token)
-        return {"folders": folders}
-    except Exception as e:
-        raise HTTPException(502, f"IMAP error: {e}")
 
 @app.get("/api/email/{account_id}/messages")
 async def get_email_messages(account_id: str, folder: str = "INBOX", limit: int = 25):
@@ -4663,97 +4987,6 @@ def _imap_delete(account: dict, folder: str, uid: str, access_token: str = ""):
         imap.select(folder or "INBOX")
         imap.store(uid, "+FLAGS", "\\Deleted")
         imap.expunge()
-
-def _imap_mark_read(account: dict, folder: str, uid: str, access_token: str = ""):
-    with imaplib.IMAP4_SSL(account["imap_host"], account.get("imap_port", 993)) as imap:
-        _imap_login(imap, account, access_token)
-        imap.select(folder or "INBOX")
-        imap.store(uid, "+FLAGS", "\\Seen")
-
-@app.post("/api/email/{account_id}/messages/{uid}/read")
-async def mark_email_read(account_id: str, uid: str, folder: str = "INBOX"):
-    account = _get_email_account(account_id)
-    try:
-        access_token = await _google_access_token(account["google_account_id"]) if account.get("auth") == "oauth" else ""
-        await asyncio.to_thread(_imap_mark_read, account, folder, uid, access_token)
-        return {"ok": True}
-    except Exception as e:
-        raise HTTPException(502, f"IMAP error: {e}")
-
-
-def _imap_archive(account: dict, folder: str, uid: str, access_token: str = "") -> str:
-    """Moves a message to this account's archive-equivalent folder — swipe-
-    to-archive in the frontend. Returns the folder it moved to. Gmail has no
-    real "Archive" folder (archiving there just means removing it from
-    INBOX; the message stays visible under [Gmail]/All Mail, which is what
-    that IMAP folder actually is), so Gmail accounts target that folder
-    specifically; everything else looks for a folder literally named
-    "Archive". Raises ValueError (→ 400, a real "can't do this" answer) when
-    neither exists, rather than silently picking an unrelated folder."""
-    existing = _imap_list_folders(account, access_token)
-    target = None
-    if account.get("provider") == "gmail":
-        target = next((f["name"] for f in existing if f["name"] == "[Gmail]/All Mail"), None)
-    if not target:
-        target = next((f["name"] for f in existing if f["name"].lower() == "archive"), None)
-    if not target:
-        raise ValueError("No Archive folder found on this account — create one (Gmail accounts use [Gmail]/All Mail automatically and don't need one).")
-
-    with imaplib.IMAP4_SSL(account["imap_host"], account.get("imap_port", 993)) as imap:
-        _imap_login(imap, account, access_token)
-        imap.select(folder or "INBOX")
-        # IMAP MOVE (RFC 6851) first — one round trip, supported by Gmail and
-        # every mainstream provider this app lists. COPY + mark-deleted +
-        # EXPUNGE is the fallback for a server that predates it.
-        typ, _ = imap.uid("MOVE", uid, f'"{target}"')
-        if typ != "OK":
-            typ, _ = imap.uid("COPY", uid, f'"{target}"')
-            if typ != "OK":
-                raise ValueError(f"Could not move this message to {target}")
-            imap.uid("STORE", uid, "+FLAGS", "(\\Deleted)")
-            imap.expunge()
-    return target
-
-@app.post("/api/email/{account_id}/messages/{uid}/archive")
-async def archive_email_message(account_id: str, uid: str, folder: str = "INBOX"):
-    account = _get_email_account(account_id)
-    try:
-        access_token = await _google_access_token(account["google_account_id"]) if account.get("auth") == "oauth" else ""
-        target = await asyncio.to_thread(_imap_archive, account, folder, uid, access_token)
-        return {"ok": True, "archived_to": target}
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-    except Exception as e:
-        raise HTTPException(502, f"IMAP error: {e}")
-
-
-def _imap_empty_folder(account: dict, folder: str, access_token: str = "") -> int:
-    """Permanently deletes every message in `folder` — the "Empty Trash/
-    Spam/Junk" action real mail clients offer for exactly those folders.
-    Returns how many were removed. `folder` takes a query param, not a path
-    segment, since real folder names contain "/" (e.g. "[Gmail]/Bin")."""
-    with imaplib.IMAP4_SSL(account["imap_host"], account.get("imap_port", 993)) as imap:
-        _imap_login(imap, account, access_token)
-        imap.select(folder or "INBOX")
-        status, data = imap.search(None, "ALL")
-        if status != "OK" or not data or not data[0]:
-            return 0
-        ids = data[0].split()
-        if not ids:
-            return 0
-        imap.store(b",".join(ids), "+FLAGS", "\\Deleted")
-        imap.expunge()
-        return len(ids)
-
-@app.post("/api/email/{account_id}/folders/empty")
-async def empty_email_folder(account_id: str, folder: str):
-    account = _get_email_account(account_id)
-    try:
-        access_token = await _google_access_token(account["google_account_id"]) if account.get("auth") == "oauth" else ""
-        count = await asyncio.to_thread(_imap_empty_folder, account, folder, access_token)
-        return {"ok": True, "deleted": count}
-    except Exception as e:
-        raise HTTPException(502, f"IMAP error: {e}")
 
 @app.delete("/api/email/{account_id}/messages/{uid}")
 async def delete_email_message(account_id: str, uid: str, folder: str = "INBOX"):
@@ -4836,34 +5069,6 @@ Each reply should be a complete, ready-to-send email body (no subject line). Var
         except json.JSONDecodeError:
             pass
     return {"replies": [content.strip()] if content.strip() else ["(No draft generated — try again.)"]}
-
-
-@app.post("/api/email/compose")
-async def compose_email(req: ComposeEmailRequest):
-    """Drafts a brand-new email (subject + body) from a short instruction —
-    the "Copper AI" compose path, distinct from draft_replies above which
-    always answers an existing message. Same JSON-extraction-with-fallback
-    shape as draft_replies for consistency."""
-    prompt = f"""Draft a new email from scratch based on the instructions below. Respond with ONLY a JSON object (no other text, no markdown fences): {{"subject": string, "body": string}}.
-
-{"Recipient: " + req.to if req.to else ""}
-Instructions: {req.instructions}
-
-The body should be a complete, ready-to-send email — no placeholder brackets like [Your Name] unless the instructions specifically ask for a signature placeholder."""
-    try:
-        content = await _llm_complete(req.model, [{"role": "user", "content": prompt}])
-    except Exception as e:
-        raise HTTPException(502, f"Model error: {e}")
-
-    match = re.search(r'\{.*\}', content, re.DOTALL)
-    if match:
-        try:
-            draft = json.loads(match.group(0))
-            if isinstance(draft, dict) and draft.get("body"):
-                return {"subject": str(draft.get("subject", "")), "body": str(draft.get("body", ""))}
-        except json.JSONDecodeError:
-            pass
-    return {"subject": "", "body": content.strip()}
 
 
 @app.post("/api/email/send")
@@ -5347,6 +5552,67 @@ Content to learn from:
         except json.JSONDecodeError:
             pass
     raise HTTPException(502, "Could not parse a skill from the model's response — try again or edit manually.")
+
+
+class CompactRequest(BaseModel):
+    model: str
+    messages: list[dict] = []
+    keep_last: int = 6
+
+@app.post("/api/compact")
+async def compact_conversation(req: CompactRequest):
+    """opencode/Claude-Code-style context compaction: summarize everything
+    except the last `keep_last` messages into one dense summary message, and
+    return the replacement conversation. Tool call/result entries are folded
+    into the summarized transcript (their results matter to the summary, but
+    keeping them verbatim is exactly the context bloat compaction exists to
+    remove). The summary is returned as a user-role message prefixed with a
+    marker so it's obviously synthesized, not something the human typed."""
+    msgs = [m for m in req.messages if m.get("content")]
+    if len(msgs) <= req.keep_last + 1:
+        return {"messages": msgs, "summary": "(conversation too short to compact)"}
+
+    to_summarize, tail = msgs[:-req.keep_last], msgs[-req.keep_last:]
+    transcript = "\n".join(
+        f"{m['role']}: {str(m.get('content', ''))[:2000]}" for m in to_summarize[-40:]
+    )
+    prompt = f"""Summarize this AI-assistant conversation so work can continue seamlessly with only this summary in context. Keep: the user's actual goal(s), decisions made and by whom, files created/edited (with paths), commands run and their outcomes, bugs found/fixed, anything the model was mid-way through, and any explicitly stated preferences or constraints. Drop: pleasantries, narration, full file contents, and verbose tool output. Be dense — bullet points, no preamble.
+
+Conversation:
+{transcript}"""
+    try:
+        summary = (await _llm_complete(req.model, [{"role": "user", "content": prompt}], timeout=120)).strip()
+    except Exception as e:
+        raise HTTPException(502, f"Model error during compaction: {e}")
+    if not summary:
+        raise HTTPException(502, "Compaction returned an empty summary — nothing changed.")
+
+    summary_msg = {"role": "user", "content":
+        f"[Compacted conversation summary — earlier messages were summarized to save context; "
+        f"treat this as established history, not a new request]\n\n{summary}"}
+    return {"messages": [summary_msg] + tail, "summary": summary[:400]}
+
+
+class TitleRequest(BaseModel):
+    model: str
+    text: str
+
+@app.post("/api/title")
+async def generate_title(req: TitleRequest):
+    """3-6 word conversation title (opencode/ChatGPT-style auto session names).
+    Deliberately tiny prompt, tiny max answer, and a hard strip of quotes/
+    markup so a chatty local model can't turn it into a paragraph."""
+    prompt = ("Write a 3-6 word title (no quotes, no punctuation at the ends, Title Case) "
+              "summarizing what this conversation is about. Respond with ONLY the title.\n\n"
+              + req.text[:3000])
+    try:
+        title = (await _llm_complete(req.model, [{"role": "user", "content": prompt}], timeout=60)).strip()
+    except Exception as e:
+        raise HTTPException(502, f"Model error: {e}")
+    title = title.strip('"\'` \n\r\t').split("\n")[0][:60]
+    if not title:
+        raise HTTPException(502, "Empty title")
+    return {"title": title}
 
 
 def build_system_prompt(base: str) -> str:
