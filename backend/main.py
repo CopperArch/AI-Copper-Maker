@@ -1327,45 +1327,11 @@ async def apply_update():
     return {"ok": True, "output": output, "restart_required": True}
 
 
-# ── Web Search ─────────────────────────────────────────────────────────────────
-
-@app.post("/api/search")
-async def web_search(req: SearchRequest):
-    try:
-        import urllib.parse
-        encoded = urllib.parse.quote(req.query)
-        url = f"https://html.duckduckgo.com/html/?q={encoded}"
-
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-            client.headers.update({
-                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
-            })
-            r = await client.get(url)
-
-        results = []
-        for match in re.finditer(
-            r'<a rel="nofollow" class="result__a" href="(.*?)".*?>(.*?)</a>.*?'
-            r'<a class="result__snippet".*?>(.*?)</a>',
-            r.text, re.DOTALL
-        ):
-            link = match.group(1)
-            title = re.sub(r'<[^>]+>', '', match.group(2)).strip()
-            snippet = re.sub(r'<[^>]+>', '', match.group(3)).strip()
-            results.append({"title": title, "url": link, "snippet": snippet})
-            if len(results) >= req.max_results:
-                break
-
-        if not results and "anomaly" in r.text.lower():
-            # DuckDuckGo's own bot-detection interstitial (confirmed live: a
-            # burst of requests gets this instead of real results, same 200
-            # status, same URL, no redirect — indistinguishable from a
-            # genuine "no results" without checking for it) — say so plainly
-            # instead of silently reporting zero results either way.
-            return {"results": [], "error": "DuckDuckGo is temporarily rate-limiting automated requests from this machine — wait a minute and try again."}
-
-        return {"results": results}
-    except Exception as e:
-        return {"results": [], "error": str(e)}
+# The standalone /api/search (plain web search) endpoint was removed — it
+# backed the frontend's now-removed web-search UI, which only duplicated the
+# agent's own "web_search" tool (see execute_tool below) with none of the
+# model's synthesis on top. SearchRequest is kept: the tool handler still
+# builds one from the model's tool-call arguments.
 
 
 # ── Image Generation ───────────────────────────────────────────────────────────
