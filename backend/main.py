@@ -101,6 +101,24 @@ CLOUD_PROVIDERS = {
     "openrouter": {"label": "OpenRouter (any model)", "default_model": "anthropic/claude-sonnet-4.5"},
 }
 
+# OpenRouter proxies hundreds of models behind one key/endpoint, unlike the
+# other providers here which each expose one fixed default_model — the Paid
+# section's OpenRouter card lets the user pick from this curated list instead
+# of being stuck on a single hardcoded model. The choice persists in
+# config.json ("openrouter_model") so it survives a reload/poll rather than
+# resetting to the hardcoded default.
+OPENROUTER_MODEL_CHOICES = [
+    {"model": "anthropic/claude-sonnet-4.5", "label": "Claude Sonnet 4.5"},
+    {"model": "anthropic/claude-opus-4", "label": "Claude Opus 4"},
+    {"model": "openai/gpt-4o", "label": "GPT-4o"},
+    {"model": "openai/gpt-4o-mini", "label": "GPT-4o mini"},
+    {"model": "deepseek/deepseek-chat", "label": "DeepSeek V3 (deepseek-chat)"},
+    {"model": "deepseek/deepseek-r1", "label": "DeepSeek R1 (reasoning)"},
+]
+
+def _openrouter_model() -> str:
+    return load_config().get("openrouter_model") or CLOUD_PROVIDERS["openrouter"]["default_model"]
+
 # ── Cloud-model pricing + spend tracking ──────────────────────────────────────
 # USD per MILLION tokens, from each provider's published price page. "cache_read"
 # is the discounted rate for tokens served from a prompt cache (Anthropic prompt
@@ -139,6 +157,8 @@ PRICING = {
         "anthropic/claude-opus-4": {"input": 15.0, "output": 75.0, "cache_read": 1.50, "cache_write": 18.75},
         "openai/gpt-4o": {"input": 2.50, "output": 10.0, "cache_read": 1.25},
         "openai/gpt-4o-mini": {"input": 0.15, "output": 0.60, "cache_read": 0.075},
+        "deepseek/deepseek-chat": {"input": 0.27, "output": 1.10, "cache_read": 0.07},
+        "deepseek/deepseek-r1": {"input": 0.55, "output": 2.19, "cache_read": 0.14},
     },
 }
 
@@ -3302,26 +3322,51 @@ async def set_expo_key(req: ExpoTokenRequest):
     _save_api_keys(keys)
     return {"ok": True}
 
+def _cloud_model_for(provider: str, meta: dict) -> str:
+    return _openrouter_model() if provider == "openrouter" else meta["default_model"]
+
 @app.get("/api/models/cloud")
 async def list_cloud_models():
     """Only lists a provider's model as usable once a key is actually
     configured for it — no point offering a model the app can't call."""
     keys = _load_api_keys()
-    return {"models": [f"{p}/{meta['default_model']}" for p, meta in CLOUD_PROVIDERS.items() if keys.get(p)]}
+    return {"models": [f"{p}/{_cloud_model_for(p, meta)}" for p, meta in CLOUD_PROVIDERS.items() if keys.get(p)]}
 
 @app.get("/api/models/cloud/details")
 async def cloud_model_details():
-    """Cards for the Models tab's Paid section: per-provider default model,
-    key status, and the estimated per-million-token rates from PRICING."""
+    """Cards for the Models tab's Paid section: per-provider default model
+    (the user's persisted pick for OpenRouter, since it isn't fixed to one
+    model like the others), key status, and the estimated per-million-token
+    rates. OpenRouter's rate (both for the currently-selected model and every
+    option in `models`, the curated picker list) comes from OpenRouter's own
+    live pricing API rather than the hardcoded PRICING table — those numbers
+    drift (see _openrouter_live_pricing's docstring) and OpenRouter is the one
+    provider here with a public endpoint that reports current prices
+    directly. The other providers stay on PRICING (their published price
+    pages), same as before."""
     keys = _load_api_keys()
+    live_prices = await _openrouter_live_pricing()
     out = []
     for p, meta in CLOUD_PROVIDERS.items():
-        rates = PRICING.get(p, {}).get(meta["default_model"]) or PRICING.get(p, {}).get("default", {})
-        out.append({
-            "provider": p, "label": meta["label"], "model": meta["default_model"],
+        model = _cloud_model_for(p, meta)
+        if p == "openrouter":
+            rates = live_prices.get(model) or PRICING.get(p, {}).get(model) or PRICING.get(p, {}).get("default", {})
+        else:
+            rates = PRICING.get(p, {}).get(model) or PRICING.get(p, {}).get("default", {})
+        entry = {
+            "provider": p, "label": meta["label"], "model": model,
             "configured": bool(keys.get(p)),
             "input_per_mtok": rates.get("input"), "output_per_mtok": rates.get("output"),
-        })
+        }
+        if p == "openrouter":
+            entry["models"] = [
+                {**choice, **({"input_per_mtok": live_prices[choice["model"]]["input"],
+                               "output_per_mtok": live_prices[choice["model"]]["output"],
+                               "is_free": live_prices[choice["model"]]["is_free"]}
+                              if choice["model"] in live_prices else {"is_free": choice["model"].endswith(":free")})}
+                for choice in OPENROUTER_MODEL_CHOICES
+            ]
+        out.append(entry)
     return {"models": out}
 
 
@@ -3369,6 +3414,48 @@ async def _fetch_openrouter_models() -> list:
     except Exception:
         pass
     return []
+
+
+OPENROUTER_PRICING_CACHE_FILE = Path(__file__).parent.parent / "openrouter_pricing_cache.json"
+OPENROUTER_PRICING_CACHE_TTL = 86400  # 24h — matches the rankings cache below
+
+async def _openrouter_live_pricing() -> dict:
+    """Per-token prices hand-typed into PRICING drift out of date (caught one
+    on the DeepSeek entries added alongside this: input was off by ~8%, output
+    by ~14%, against OpenRouter's own public API). This fetches that API —
+    unauthenticated, no key needed — and caches the result for
+    OPENROUTER_PRICING_CACHE_TTL so every request doesn't refetch it, but a
+    session that runs longer than that always picks up current prices rather
+    than trusting a hardcoded number indefinitely. Returns {model_id:
+    {"input": $/Mtok, "output": $/Mtok, "is_free": bool}}."""
+    try:
+        if OPENROUTER_PRICING_CACHE_FILE.exists():
+            cached = json.loads(OPENROUTER_PRICING_CACHE_FILE.read_text())
+            if time.time() - cached.get("fetched_at", 0) < OPENROUTER_PRICING_CACHE_TTL:
+                return cached["prices"]
+    except Exception:
+        pass
+
+    models = await _fetch_openrouter_models()
+    prices = {}
+    for m in models:
+        mid = m.get("id")
+        pricing = m.get("pricing") or {}
+        try:
+            input_ppm = float(pricing.get("prompt", 0)) * 1_000_000
+            output_ppm = float(pricing.get("completion", 0)) * 1_000_000
+        except (TypeError, ValueError):
+            continue
+        if mid:
+            prices[mid] = {"input": round(input_ppm, 4), "output": round(output_ppm, 4),
+                            "is_free": input_ppm == 0 and output_ppm == 0}
+
+    if prices:  # don't overwrite a good cache with an empty one from a failed fetch
+        try:
+            OPENROUTER_PRICING_CACHE_FILE.write_text(json.dumps({"fetched_at": time.time(), "prices": prices}))
+        except Exception:
+            pass
+    return prices
 
 
 @app.get("/api/models/rankings")

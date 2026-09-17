@@ -4046,10 +4046,14 @@ function renderModelsTab() {
   const card = (m) => {
     const rank = modelRankMap[m.name] || 0;
     const provider = m.provider || 'ollama';
-    const installed = isInstalled(m.name, provider);
+    // OpenRouter (and any other cloud-only source) has no local install step —
+    // there's nothing to "Pull", it's always just callable via API key. Only
+    // Ollama/LM Studio models go through isInstalled()'s local-disk check.
+    const isCloudOnly = provider === 'openrouter';
+    const installed = !isCloudOnly && isInstalled(m.name, provider);
     const id = m.name.replace(/[:.\/]/g, '_');
     const sizeLabel = m.size_gb == null ? '' : m.size_gb >= 20 ? `${m.size_gb} GB — needs CPU offload` : `${m.size_gb} GB`;
-    const providerBadge = `<span class="model-badge">${provider === 'lmstudio' ? 'LM Studio' : 'Ollama'}</span>`;
+    const providerBadge = `<span class="model-badge">${provider === 'lmstudio' ? 'LM Studio' : provider === 'openrouter' ? 'OpenRouter' : 'Ollama'}</span>`;
     const rankBadge = rank !== 0 ? `<span class="model-badge" style="background:var(--accent);color:#fff;padding:2px 6px;border-radius:4px;font-size:10px;margin-left:4px">#${rank}</span>` : '';
     const updatable = provider === 'ollama' && modelUpdates[m.name];
     const ctx = provider === 'ollama' && modelContextLengths[m.name]
@@ -4059,6 +4063,28 @@ function renderModelsTab() {
       ? `<span style="color:var(--danger)">${pull.cancelled ? 'Cancelled' : `Error: ${escHtml(pull.error)}`}</span>`
       : `<progress max="100" value="${pull.pct || 0}" id="pb-${id}"></progress><div id="pstatus-${id}">${escHtml(pull.status || 'Starting download...')}</div>
          <button class="btn btn-secondary btn-sm" onclick="cancelPull('${id}')" style="margin-top:4px">✕ Cancel</button>`;
+    let statusAndAction;
+    if (isCloudOnly) {
+      const hasKey = cloudModelDetails.find(c => c.provider === 'openrouter')?.configured;
+      statusAndAction = `
+        <span class="model-status">Free via OpenRouter</span>
+        ${hasKey
+          ? `<button class="btn btn-accent btn-sm" onclick="useCloudModel('openrouter/${escHtml(m.name)}')">Use</button>`
+          : `<span style="font-size:11px;color:var(--muted)">Needs an OpenRouter API key — add one in Paid ↓</span>`}`;
+    } else if (installed) {
+      statusAndAction = `
+        <span class="model-status">Installed</span>
+        ${provider === 'ollama'
+          ? `${updatable ? `<button class="btn btn-accent btn-sm" onclick="pullModel('${escHtml(m.name)}', document.getElementById('progress-${escHtml(id)}'))">⬆ Update</button>
+             <button class="btn btn-secondary btn-sm" onclick="dismissModelUpdate('${escHtml(m.name)}')" title="Skip this build">✕</button>` : ''}
+             <button class="btn ${updatable ? 'btn-secondary' : 'btn-accent'} btn-sm" onclick="useModel('${escHtml(m.name)}')">Use</button>
+             <button class="btn btn-secondary btn-sm" onclick="deleteModel('${escHtml(m.name)}')">Remove</button>`
+          : `<span style="font-size:11px;color:var(--muted)" title="Chat/Agent only talks to Ollama models right now">Installed in LM Studio</span>`}`;
+    } else {
+      statusAndAction = `
+        <span class="model-status not-installed">Not installed</span>
+        <button class="btn btn-accent btn-sm" onclick="pullModel('${escHtml(m.name)}', document.getElementById('progress-${escHtml(id)}'), '${provider}')">Pull</button>`;
+    }
     return `
       <div class="model-card" id="card-${id}">
         <div class="model-info">
@@ -4070,15 +4096,7 @@ function renderModelsTab() {
         </div>
         <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">
           ${updatable ? '<span class="update-badge">⬆ Update available</span>' : ''}
-          <span class="model-status ${installed ? '' : 'not-installed'}">${installed ? 'Installed' : 'Not installed'}</span>
-          ${installed
-            ? (provider === 'ollama'
-                ? `${updatable ? `<button class="btn btn-accent btn-sm" onclick="pullModel('${escHtml(m.name)}', document.getElementById('progress-${escHtml(id)}'))">⬆ Update</button>
-                   <button class="btn btn-secondary btn-sm" onclick="dismissModelUpdate('${escHtml(m.name)}')" title="Skip this build">✕</button>` : ''}
-                   <button class="btn ${updatable ? 'btn-secondary' : 'btn-accent'} btn-sm" onclick="useModel('${escHtml(m.name)}')">Use</button>
-                   <button class="btn btn-secondary btn-sm" onclick="deleteModel('${escHtml(m.name)}')">Remove</button>`
-                : `<span style="font-size:11px;color:var(--muted)" title="Chat/Agent only talks to Ollama models right now">Installed in LM Studio</span>`)
-            : `<button class="btn btn-accent btn-sm" onclick="pullModel('${escHtml(m.name)}', document.getElementById('progress-${escHtml(id)}'), '${provider}')">Pull</button>`}
+          ${statusAndAction}
         </div>
       </div>`;
   };
@@ -4154,19 +4172,41 @@ else if (catalogFilter === 'free') {
     html += sectionTitle('💳', 'Paid', 'cloud providers — metered per million tokens, budget-capped');
     const rows = cloudModelDetails.filter(r => matchesSearch(`${r.provider} ${r.model}`));
     html += rows.length
-      ? rows.map(r => `
+      ? rows.map(r => {
+        // OpenRouter proxies hundreds of models behind one key, unlike the
+        // other providers here which each have exactly one fixed model — give
+        // it a picker instead of a static name, defaulting to whatever's
+        // currently selected (persisted server-side via setOpenrouterModel()).
+        const isOpenrouter = r.provider === 'openrouter' && Array.isArray(r.models);
+        // <option> can't hold rich markup, so price/Free goes straight into the
+        // label text — live from OpenRouter's own pricing API (see
+        // _openrouter_live_pricing on the backend), not a hardcoded guess.
+        const optionLabel = (m) => m.is_free
+          ? `${m.label} — Free`
+          : `${m.label}${m.input_per_mtok != null ? ` — ≈$${m.input_per_mtok.toFixed(2)}/$${m.output_per_mtok.toFixed(2)} per M` : ''}`;
+        const modelField = isOpenrouter
+          ? `<select id="openrouter-model-select" onchange="setOpenrouterModel(this.value)" style="margin-top:4px;font-size:12px;padding:4px 6px">
+              ${r.models.map(m => `<option value="${escHtml(m.model)}" ${m.model === r.model ? 'selected' : ''}>${escHtml(optionLabel(m))}</option>`).join('')}
+            </select>`
+          : `<span class="model-badge">${escHtml(r.model)}</span>`;
+        const useOnclick = isOpenrouter
+          ? `useCloudModel('openrouter/' + document.getElementById('openrouter-model-select').value)`
+          : `useCloudModel('${escHtml(r.provider + '/' + r.model)}')`;
+        return `
         <div class="model-card">
           <div class="model-info">
-            <div class="model-name">${escHtml(r.label)} <span class="model-badge">${escHtml(r.model)}</span></div>
-            <div class="model-desc">≈$${r.input_per_mtok?.toFixed(2) ?? '—'} in / $${r.output_per_mtok?.toFixed(2) ?? '—'} out per 1M tokens</div>
+            <div class="model-name">${escHtml(r.label)} ${isOpenrouter ? '' : modelField}</div>
+            ${isOpenrouter ? modelField : ''}
+            <div class="model-desc">${r.input_per_mtok === 0 && r.output_per_mtok === 0 ? 'Free' : `≈$${r.input_per_mtok?.toFixed(2) ?? '—'} in / $${r.output_per_mtok?.toFixed(2) ?? '—'} out per 1M tokens`}</div>
           </div>
           <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">
             <span class="model-status ${r.configured ? '' : 'not-installed'}">${r.configured ? 'Key configured' : 'No API key'}</span>
             ${r.configured
-              ? `<button class="btn btn-accent btn-sm" onclick="useCloudModel('${escHtml(r.provider + '/' + r.model)}')">Use</button>`
+              ? `<button class="btn btn-accent btn-sm" onclick="${useOnclick}">Use</button>`
               : `<span style="font-size:11px;color:var(--muted)">Add a key below ↓</span>`}
           </div>
-        </div>`).join('')
+        </div>`;
+      }).join('')
       : emptyNote('No cloud models match your search.');
   }
 
@@ -4175,11 +4215,33 @@ else if (catalogFilter === 'free') {
 
 function useCloudModel(name) {
   const sel = document.getElementById('model-select');
-  if ([...sel.options].some(o => o.value === name)) {
-    sel.value = name;
-    localStorage.setItem('selectedModel', name);
-    switchTab('chat');
+  // The OpenRouter picker's onchange saves the new choice and refreshes this
+  // select's Cloud optgroup, but that's an async round-trip — if Use is
+  // clicked before it lands, the option for the just-picked model may not
+  // exist here yet. Add it on the fly rather than silently doing nothing.
+  if (![...sel.options].some(o => o.value === name)) {
+    let group = sel.querySelector('optgroup[label="Cloud"]');
+    if (!group) { group = document.createElement('optgroup'); group.label = 'Cloud'; sel.appendChild(group); }
+    const opt = document.createElement('option');
+    opt.value = name; opt.textContent = name;
+    group.appendChild(opt);
   }
+  sel.value = name;
+  localStorage.setItem('selectedModel', name);
+  switchTab('chat');
+}
+
+async function setOpenrouterModel(model) {
+  await fetch(`${API}/api/config`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ openrouter_model: model })
+  }).catch(() => {});
+  try {
+    const r = await fetch(`${API}/api/models/cloud/details`);
+    cloudModelDetails = (await r.json()).models || [];
+  } catch {}
+  renderModelsTab();
+  await loadModels(); // refreshes #model-select's Cloud optgroup to the new choice
 }
 
 async function loadLspStatus() {
