@@ -1461,7 +1461,7 @@ REPO_DIR = Path(__file__).parent.parent
 # No formal release process (no GitHub Releases/tags exist for this repo —
 # see the note on /api/update/check below) — bump this by hand alongside the
 # README's own "v0.2" heading whenever a notable batch of changes lands.
-APP_VERSION = "1.1.0"
+APP_VERSION = subprocess.run(["git", "describe", "--tags", "--always", "--dirty"], capture_output=True, text=True, cwd=Path(__file__).parent.parent).stdout.strip() or "dev"
 
 
 async def _run_git(*args: str) -> tuple[int, str]:
@@ -4976,15 +4976,21 @@ Write production-quality code, not demos."""
 async def get_conversations():
     if CONVERSATIONS_FILE.exists():
         try:
-            return json.loads(CONVERSATIONS_FILE.read_text())
+            data = json.loads(CONVERSATIONS_FILE.read_text())
         except json.JSONDecodeError:
             return []
+        return data if isinstance(data, list) else []
     return []
 
 @app.post("/api/conversations")
 async def save_conversations(request: Request):
     try:
         data = await request.json()
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON body: {e}")
+    if not isinstance(data, list):
+        raise HTTPException(status_code=400, detail="Conversations payload must be a list")
+    try:
         CONVERSATIONS_FILE.write_text(json.dumps(data, indent=2))
         return {"ok": True}
     except (OSError, IOError) as e:
