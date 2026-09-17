@@ -744,6 +744,15 @@
   }
   .compact-notice details { text-align: left; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; }
   .compact-notice summary { cursor: pointer; color: var(--accent2); }
+  /* LSP status chips (Models tab) */
+  .lsp-chip {
+    font-size: 11px; padding: 3px 10px; border-radius: 999px;
+    border: 1px solid var(--border); color: var(--muted); background: var(--surface);
+  }
+  .lsp-running { border-color: var(--accent); color: var(--accent); }
+  .lsp-available { border-color: var(--accent2); color: var(--accent2); }
+  .lsp-missing { border-color: var(--danger); color: var(--danger); }
+  .lsp-off { border-color: var(--warn); color: var(--warn); }
   .model-card {
     background: var(--surface); border: 1px solid var(--border);
     border-radius: 8px; padding: 14px 16px; margin-bottom: 10px;
@@ -1361,6 +1370,15 @@
 
         <div id="catalog-list">
           <p style="font-size:13px;color:var(--muted)">Loading catalog...</p>
+        </div>
+
+        <div style="margin-top:20px;padding-top:20px;border-top:1px solid var(--border)">
+          <h3 style="font-size:14px;margin-bottom:4px">Language Servers (LSP)</h3>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:8px">
+            opencode-style: when the agent edits a file, its language server's diagnostics are fed back so it fixes its own errors.
+            Configure in <code>config.json</code> — <code>"lsp": true/false</code> or per-server overrides.
+          </p>
+          <div id="lsp-status-list" style="display:flex;gap:8px;flex-wrap:wrap"></div>
         </div>
 
         <div style="margin-top:20px;padding-top:20px;border-top:1px solid var(--border)">
@@ -3850,6 +3868,7 @@ async function loadCatalog() {
     cloudModelDetails = (await r.json()).models || [];
     renderModelsTab();
   } catch { cloudModelDetails = []; }
+  loadLspStatus();
   try {
     const ram = await getRAMInfo();
     const note = document.getElementById('models-ram-note');
@@ -3994,6 +4013,24 @@ function useCloudModel(name) {
     sel.value = name;
     localStorage.setItem('selectedModel', name);
     switchTab('chat');
+  }
+}
+
+async function loadLspStatus() {
+  const el = document.getElementById('lsp-status-list');
+  if (!el) return;
+  try {
+    const r = await fetch(`${API}/api/lsp/status`);
+    const d = await r.json();
+    if (!d.enabled) {
+      el.innerHTML = '<span class="lsp-chip lsp-off">LSP disabled — set "lsp": true in config.json</span>';
+      return;
+    }
+    el.innerHTML = d.servers.map(s =>
+      `<span class="lsp-chip lsp-${s.state}" title="${escHtml(s.command.join(' '))} — ${escHtml(s.extensions.join(' '))}">${escHtml(s.name)} · ${s.state}</span>`
+    ).join('') || '<span class="lsp-chip">no servers configured</span>';
+  } catch {
+    el.innerHTML = '<span class="lsp-chip">status unavailable</span>';
   }
 }
 

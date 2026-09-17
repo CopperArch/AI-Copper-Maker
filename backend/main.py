@@ -57,6 +57,10 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     _load_and_schedule_routines()
     scheduler.add_job(_check_new_mail, IntervalTrigger(minutes=5), id="mail-poll", replace_existing=True)
+    # NOTE: this app uses a custom lifespan, which means @app.on_event
+    # handlers never fire — anything that must run at boot (skill/vendor
+    # import) or shutdown (LSP client cleanup) has to be wired in HERE.
+    await _register_builtin_skills()
     yield
     scheduler.shutdown(wait=False)
     # A "Run Code" dev server (npx expo start / flutter run) is deliberately
@@ -66,6 +70,12 @@ async def lifespan(app: FastAPI):
         proc = state.get("process")
         if proc and proc.returncode is None:
             proc.kill()
+    for client in _lsp_clients.values():
+        try:
+            if client.proc:
+                client.proc.terminate()
+        except Exception:
+            pass
 
 app = FastAPI(title="AI Copper Maker", lifespan=lifespan)
 
@@ -2108,7 +2118,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "task",
-            "description": "Delegate a self-contained sub-task to a fresh subagent with its own clean context window and the same tools, and get back its final report. Use this for research/exploration that would otherwise flood your own context with file contents or long command output (e.g. 'find every place the auth token is refreshed and summarize the flow') — the subagent reads the files in ITS context and only the distilled findings come back to you. The subagent cannot sudo or ask the user questions; describe the goal fully, including which directory to look in and what the output should contain.",
+            "description": "Delegate a self-contained sub-task to a fresh subagent with its own clean context window and the same tools, and get back its final report. Use this for research/exploration that would otherwise flood your own context with file contents or long command output (e.g. 'find every place the auth token is refreshed and summarize the flow') — the subagent reads the files in ITS context and only the distilled findings come back to you. The subagent cannot sudo or ask the user questions; describe the goal fully, including which directory to look in and what the output should contain. Optional 'agent' parameter: name one of the specialist agents listed in the system prompt (exact name) and its persona/instructions will drive the subagent — prefer this when the request matches a specialist.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -2308,10 +2318,21 @@ async def execute_tool(name: str, args: dict, model: str = "", allow_subagents: 
                 return "Error: Access denied"
             target.parent.mkdir(parents=True, exist_ok=True)
             before = target.read_text(encoding="utf-8", errors="replace") if target.is_file() else None
-            target.write_text(req.content)
+            content = req.content
+            target.write_text(content)
+            # humanizer_academic pre-save pass (see _humanize_text): prose
+            # files get AI-writing patterns stripped before the save is
+            # final. The note tells the model (and the user) it happened.
+            note = ""
+            if _humanize_enabled() and target.suffix.lower() in PROSE_EXTS:
+                humanized = await _humanize_text(model, content)
+                if humanized != content:
+                    target.write_text(humanized)
+                    content = humanized
+                    note = "\n\n[humanizer_academic skill applied before save — AI-writing patterns removed from the saved text]"
             if before is None:
-                return f"Created {req.path} ({len(req.content)} bytes)"
-            return f"Wrote {req.path} ({len(req.content)} bytes)\n\n{_unified_diff(before, req.content, req.path)}"
+                return f"Created {req.path} ({len(content)} bytes){note}"
+            return f"Wrote {req.path} ({len(content)} bytes)\n\n{_unified_diff(before, content, req.path)}{note}"
 
         elif name == "edit_file":
             req = FileEditRequest(**args)
@@ -2323,8 +2344,16 @@ async def execute_tool(name: str, args: dict, model: str = "", allow_subagents: 
             if not target.is_file():
                 if req.old_string:
                     return f"Error: {req.path} doesn't exist yet. To create it, call edit_file with old_string=\"\" and new_string set to the full file content."
-                target.write_text(req.new_string)
-                return f"Created {req.path} ({len(req.new_string)} bytes)"
+                content = req.new_string
+                target.write_text(content)
+                note = ""
+                if _humanize_enabled() and target.suffix.lower() in PROSE_EXTS:
+                    humanized = await _humanize_text(model, content)
+                    if humanized != content:
+                        target.write_text(humanized)
+                        content = humanized
+                        note = "\n\n[humanizer_academic skill applied before save — AI-writing patterns removed from the saved text]"
+                return f"Created {req.path} ({len(content)} bytes){note}"
             before = target.read_text(encoding="utf-8", errors="replace")
             if req.old_string == "":
                 return (f"Error: {req.path} already exists — pass the exact text to replace in old_string "
@@ -2349,7 +2378,14 @@ async def execute_tool(name: str, args: dict, model: str = "", allow_subagents: 
             after = before.replace(req.old_string, req.new_string) if req.replace_all else \
                 before.replace(req.old_string, req.new_string, 1)
             target.write_text(after)
-            return f"Edited {req.path} ({occurrences if req.replace_all else 1} replacement(s))\n\n{_unified_diff(before, after, req.path)}"
+            note = ""
+            if _humanize_enabled() and target.suffix.lower() in PROSE_EXTS:
+                humanized = await _humanize_text(model, after)
+                if humanized != after:
+                    target.write_text(humanized)
+                    after = humanized
+                    note = "\n\n[humanizer_academic skill applied before save — AI-writing patterns removed from the saved text]"
+            return f"Edited {req.path} ({occurrences if req.replace_all else 1} replacement(s))\n\n{_unified_diff(before, after, req.path)}{note}"
 
         elif name == "list_files":
             path = args.get("path", "")
@@ -2505,6 +2541,20 @@ async def execute_tool(name: str, args: dict, model: str = "", allow_subagents: 
             description = str(args.get("description", "")).strip()
             if not description:
                 return "Error: no task description given."
+            # Optional specialist persona: the agent= param names an entry
+            # in the library with kind="agent" (imported agent collections)
+            # — its full instructions become the subagent's driving prompt.
+            persona = ""
+            agent_name = str(args.get("agent", "")).strip()
+            if agent_name:
+                lib = _load_json_list(SKILLS_FILE)
+                ag = next((s for s in lib if s.get("kind") == "agent"
+                           and str(s.get("name", "")).lower() == agent_name.lower()), None)
+                if not ag:
+                    names = [s.get("name", "") for s in lib if s.get("kind") == "agent"]
+                    return (f"Error: no agent named '{agent_name}'. "
+                            f"Available agents: {', '.join(names[:40]) or '(none)'}")
+                persona = str(ag.get("instructions", "")) + "\n\n---\n\n"
             try:
                 max_turns = min(int(args.get("max_turns", 12)), 20)
             except (TypeError, ValueError):
@@ -2512,11 +2562,11 @@ async def execute_tool(name: str, args: dict, model: str = "", allow_subagents: 
             # Fresh context, same tool loop, but no sudo (a password prompt
             # from a nested agent the user can't attribute to a step is a bad
             # experience) and a tighter turn budget. The subagent sees ONLY
-            # the description — that isolation is the entire point (top
-            # agents call this "subagents": heavy reads happen in its context
-            # and only the distilled findings come back).
+            # the persona + description — that isolation is the entire point
+            # (top agents call this "subagents": heavy reads happen in its
+            # context and only the distilled findings come back).
             sub_conv = [{"role": "user", "content":
-                description + "\n\n(You are a subagent: no conversation history beyond this message. "
+                persona + description + "\n\n(You are a subagent: no conversation history beyond this message. "
                 "You cannot ask the user questions or use sudo — make reasonable autonomous decisions "
                 "and return a complete, self-contained final report.)"}]
             report = ""
@@ -3515,6 +3565,237 @@ Did this session involve solving a real problem, fixing a non-obvious bug, or di
         pass
 
 
+# ── LSP integration (opencode-style) ─────────────────────────────────────────
+# Language servers give the agent real compiler/type feedback on the files it
+# edits: after edit_file/write_file runs, the touched file's LSP diagnostics
+# are appended to the tool result so the model sees its own errors and
+# self-corrects. Registry + config follow opencode's shape — built-in servers
+# keyed by name, each with the command to run and the extensions it handles;
+# config.json's "lsp" key toggles them (true/false) or carries per-server
+# overrides ({"rust": {"disabled": true}, "custom": {"command": [...],
+# "extensions": [".x"]}}). One deliberate difference: opencode ships LSP off
+# by default; this app defaults it ON (set "lsp": false to disable).
+
+LSP_BUILTINS = {
+    "rust":       {"command": ["rust-analyzer"], "extensions": [".rs"]},
+    "typescript": {"command": ["npx", "-y", "typescript-language-server", "--stdio"],
+                    "extensions": [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"]},
+    "python":     {"command": ["npx", "-y", "pyright-langserver", "--stdio"],
+                    "extensions": [".py", ".pyi"]},
+    "bash":       {"command": ["npx", "-y", "bash-language-server", "start"],
+                    "extensions": [".sh", ".bash", ".zsh"]},
+}
+
+LSP_LANGUAGE_IDS = {".rs": "rust", ".ts": "typescript", ".tsx": "typescript", ".js": "javascript",
+                    ".jsx": "javascript", ".mjs": "javascript", ".cjs": "javascript",
+                    ".py": "python", ".pyi": "python",
+                    ".sh": "shellscript", ".bash": "shellscript", ".zsh": "shellscript"}
+
+def _lsp_registry():
+    """Resolved registry (builtins + config overrides), or None when LSP is
+    off. Absent "lsp" key = enabled (this app's default); explicit false = off."""
+    cfg = load_config().get("lsp")
+    if cfg is False:
+        return None
+    if cfg is True or cfg is None:
+        return {name: dict(spec) for name, spec in LSP_BUILTINS.items()}
+    merged = {name: dict(spec) for name, spec in LSP_BUILTINS.items()}
+    for name, over in (cfg or {}).items():
+        if not isinstance(over, dict):
+            continue
+        if over.get("disabled"):
+            merged.pop(name, None)
+            continue
+        merged.setdefault(name, {}).update(over)
+    return merged
+
+class _LspClient:
+    """Minimal async JSON-RPC/LSP client over stdio: enough protocol to
+    initialize a server, push didOpen/didChange, and collect its
+    publishDiagnostics pushes. The point is error feedback for the agent
+    loop, not an IDE."""
+
+    def __init__(self, name, command, initialization=None):
+        self.name = name
+        self.command = command
+        self.initialization = initialization
+        self.proc = None
+        self._next_id = 0
+        self._pending = {}
+        self.diagnostics = {}
+        self._events = {}
+        self._opened = {}
+        self.dead = False
+
+    async def start(self):
+        self.proc = await asyncio.create_subprocess_exec(
+            *self.command,
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        asyncio.get_event_loop().create_task(self._read_loop())
+        root = Path(BASE_PROJECTS).resolve()
+        params = {
+            "processId": os.getpid(),
+            "rootUri": root.as_uri(),
+            "workspaceFolders": [{"uri": root.as_uri(), "name": root.name}],
+            "capabilities": {"textDocument": {"sync": {"dynamicRegistration": False}}},
+        }
+        if self.initialization:
+            params["initializationOptions"] = self.initialization
+        await self._request("initialize", params, timeout=40)
+        self._notify("initialized", {})
+        return self
+
+    async def _send(self, payload):
+        body = json.dumps(payload).encode()
+        self.proc.stdin.write(b"Content-Length: %d\r\n\r\n" % len(body) + body)
+        await self.proc.stdin.drain()
+
+    async def _request(self, method, params, timeout=30):
+        self._next_id += 1
+        rid = self._next_id
+        fut = asyncio.get_event_loop().create_future()
+        self._pending[rid] = fut
+        await self._send({"jsonrpc": "2.0", "id": rid, "method": method, "params": params})
+        return await asyncio.wait_for(fut, timeout)
+
+    def _notify(self, method, params):
+        asyncio.get_event_loop().create_task(self._send({"jsonrpc": "2.0", "method": method, "params": params}))
+
+    async def _read_loop(self):
+        try:
+            while True:
+                headers = {}
+                while True:
+                    line = await self.proc.stdout.readline()
+                    if not line:
+                        raise ConnectionResetError("LSP server closed stdout")
+                    line = line.strip()
+                    if not line:
+                        break
+                    if b":" in line:
+                        k, v = line.split(b":", 1)
+                        headers[k.strip().lower()] = v.strip()
+                length = int(headers.get(b"content-length", b"0"))
+                msg = json.loads(await self.proc.stdout.readexactly(length))
+                if "id" in msg and ("result" in msg or "error" in msg):
+                    fut = self._pending.pop(msg["id"], None)
+                    if fut and not fut.done():
+                        fut.set_result(msg)
+                elif msg.get("method") == "textDocument/publishDiagnostics":
+                    params = msg.get("params") or {}
+                    uri = params.get("uri")
+                    if uri:
+                        self.diagnostics[uri] = params.get("diagnostics") or []
+                        ev = self._events.get(uri)
+                        if ev is None:
+                            ev = asyncio.Event()
+                            self._events[uri] = ev
+                        ev.set()
+        except Exception:
+            self.dead = True
+
+    def push_text(self, uri, text, language_id):
+        """didOpen the first time we touch a file, didChange with the full
+        text afterwards (servers not told about incremental sync must accept
+        full-document changes)."""
+        if uri in self._opened:
+            self._opened[uri] += 1
+            self._notify("textDocument/didChange", {
+                "textDocument": {"uri": uri, "version": self._opened[uri]},
+                "contentChanges": [{"text": text}],
+            })
+        else:
+            self._opened[uri] = 1
+            self._notify("textDocument/didOpen", {
+                "textDocument": {"uri": uri, "languageId": language_id, "version": 1, "text": text},
+            })
+
+    async def wait_diagnostics(self, uri, timeout=4.0):
+        ev = self._events.get(uri)
+        if ev is None:
+            ev = asyncio.Event()
+            self._events[uri] = ev
+        ev.clear()
+        try:
+            await asyncio.wait_for(ev.wait(), timeout)
+        except asyncio.TimeoutError:
+            pass
+        await asyncio.sleep(0.3)  # settle window for servers that publish in waves
+        return self.diagnostics.get(uri) or []
+
+_lsp_clients: dict = {}
+
+async def _lsp_client_for(suffix: str):
+    registry = _lsp_registry()
+    if not registry:
+        return None
+    name = next((n for n, spec in registry.items() if suffix in spec.get("extensions", [])), None)
+    if not name:
+        return None
+    spec = registry[name]
+    client = _lsp_clients.get(name)
+    if client and not client.dead:
+        return client
+    cmd0 = spec["command"][0]
+    if cmd0 not in ("npx", "node") and not shutil.which(cmd0):
+        return None  # binary genuinely missing — don't try to spawn it every edit
+    try:
+        client = await _LspClient(name, spec["command"], spec.get("initialization")).start()
+        _lsp_clients[name] = client
+        return client
+    except Exception:
+        return None
+
+async def _lsp_feedback_for_path(path_str: str) -> str:
+    """Diagnostics for the file the agent just touched, formatted for the
+    tool result. Empty string when LSP is off, no server matches, the server
+    can't start, or the file is clean — silence means success."""
+    if not path_str:
+        return ""
+    try:
+        base = Path(BASE_PROJECTS).resolve()
+        target = (base / path_str).resolve()
+        if not target.is_relative_to(base) or not target.is_file():
+            return ""
+        suffix = target.suffix.lower()
+        client = await _lsp_client_for(suffix)
+        if not client:
+            return ""
+        uri = target.as_uri()
+        text = target.read_text(encoding="utf-8", errors="replace")
+        client.push_text(uri, text, LSP_LANGUAGE_IDS.get(suffix, ""))
+        diags = await client.wait_diagnostics(uri)
+        problems = [d for d in diags if d.get("severity") in (1, 2)]  # errors + warnings
+        if not problems:
+            return ""
+        lines = [f"\n\nLSP diagnostics ({client.name}) — fix these before finishing:"]
+        for d in problems[:20]:
+            pos = (d.get("range") or {}).get("start") or {}
+            sev = {1: "error", 2: "warning"}.get(d.get("severity"), "info")
+            lines.append(f"  [{sev}] line {pos.get('line', 0) + 1}: {str(d.get('message', ''))[:300]}")
+        return "\n".join(lines)
+    except Exception:
+        return ""  # LSP feedback is best-effort — never break the agent turn
+
+@app.get("/api/lsp/status")
+async def lsp_status():
+    registry = _lsp_registry()
+    if not registry:
+        return {"enabled": False, "servers": []}
+    servers = []
+    for name, spec in registry.items():
+        client = _lsp_clients.get(name)
+        cmd0 = spec["command"][0]
+        available = cmd0 in ("npx", "node") or bool(shutil.which(cmd0))
+        servers.append({
+            "name": name, "command": spec["command"], "extensions": spec.get("extensions", []),
+            "state": "running" if (client and not client.dead) else ("available" if available else "missing"),
+        })
+    return {"enabled": True, "servers": servers}
+
+
 async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str = "",
                        allow_sudo: bool = True, allow_subagents: bool = True):
     """Runs the tool-use agent loop, yielding structured event dicts. Shared by
@@ -3528,6 +3809,16 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
     it to."""
     response_text = ""
     usage = None
+    # Auto-skill discovery: match the incoming request against the skill/
+    # agent directory once, and nudge the model toward the best-fitting
+    # entries every turn — skills/agents get used because the system prompt
+    # names them, not only when the user asks.
+    _hint = ""
+    for _m in reversed(conv):
+        if (_m.get("role") == "user" and _m.get("content")
+                and not str(_m["content"]).startswith(_COMPACT_MARKER)):
+            _hint = _relevant_skills_hint(str(_m["content"]))
+            break
     # Set the moment a search or code tool actually runs — gates the
     # end-of-session auto-skill distillation below so a plain Q&A turn (no
     # tool use at all) never fires an extra LLM call for nothing.
@@ -3550,7 +3841,9 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
             except Exception:
                 pass  # best-effort — never kill the turn over a failed compaction
 
-        system_msg = {"role": "system", "content": build_system_prompt(system or UNCENSORED_SYSTEM) + "\n\n" + _agent_tool_instructions()}
+        system_msg = {"role": "system", "content":
+                      build_system_prompt(system or UNCENSORED_SYSTEM) + "\n\n" + _agent_tool_instructions()
+                      + (("\n\n" + _hint) if _hint else "")}
         messages = [system_msg] + conv
 
         # turn 0's user message is already the last entry in `conv` (the caller
@@ -3687,6 +3980,13 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
                 password = None  # drop the reference now that we're done with it
         else:
             result = await execute_tool(tool_name, tool_args, model=model, allow_subagents=allow_subagents)
+        # opencode-style LSP feedback: after a file edit, the touched file's
+        # language-server diagnostics ride along on the tool result so the
+        # model sees its own type/syntax errors and self-corrects instead of
+        # declaring victory over broken code. Empty string when LSP is off or
+        # the file is clean.
+        if tool_name in ("edit_file", "write_file"):
+            result += await _lsp_feedback_for_path(str(tool_args.get("path", "")))
         yield {"type": "tool_result", "name": tool_name, "result": _clip_for_model(result)}
 
         # Truncate to just the matched call — a weaker model sometimes crams a
@@ -5589,6 +5889,190 @@ async def calendar_feed(token: str = ""):
 SKILLS_FILE = Path(__file__).parent.parent / "skills.json"
 LESSONS_FILE = Path(__file__).parent.parent / "core_lessons.json"
 
+# ── humanizer_academic (vendored skill, MIT, github.com/matsuikentaro1/
+# humanizer_academic) ──────────────────────────────────────────────────────────
+# The full SKILL.md ships in skills/humanizer_academic/SKILL.md and is
+# registered into the user's skill library at startup below — that's what
+# get_skill serves for on-demand "humanize this text" requests. The automatic
+# pre-save pass (write_file/edit_file on prose) uses _HUMANIZER_CORE instead:
+# the full skill is ~13k tokens and would crowd out the text being edited on
+# local models, so the distilled core carries the operational rules.
+
+HUMANIZER_SKILL_FILE = Path(__file__).parent.parent / "skills" / "humanizer_academic" / "SKILL.md"
+
+PROSE_EXTS = {".md", ".txt", ".rst", ".tex"}
+
+_HUMANIZER_CORE = """You are a prose editor that removes signs of AI-generated writing so the text reads as naturally and professionally human-written. Apply these rules, in order:
+
+1. SENTENCE RHYTHM FIRST (highest impact): mix short (<15 words) and long (>30 words) sentences. Vary how sentences open — prepositional phrases, subordinate clauses, connectives — instead of starting every sentence with the subject.
+2. ZERO em dashes: replace with commas, parentheses, or split sentences. No exceptions. No curly quotes, no Title Case headings.
+3. Remove AI-tell vocabulary: pivotal, crucial, landscape, evolving landscape, groundbreaking, showcases, profound, comprehensive, holistic, multifaceted, underscore(s), delve, foster, navigate (metaphorical), leverage (as a verb), realm, tapestry, testament to, "It is important to note", "In conclusion". "Additionally" at most once per paragraph.
+4. Copula avoidance becomes "is": "serves as / standing as / representing" -> "is".
+5. No "not only X but also Y" (write "X and Y") and no decorative rule-of-three lists.
+6. Term consistency: the same construct keeps the same term throughout.
+7. Filler becomes plain: "in order to"->"to", "due to the fact that"->"because", "despite the fact that"->"although".
+8. Hedge sensibly: keep one or two real hedges, remove stacked ones ("may suggest ... have the potential to").
+9. Vague attributions ("studies have shown", "experts argue") without a citation become specific or are cut. Cut significance inflation ("a pivotal challenge in the evolving landscape") and content-free verdicts ("this is a noteworthy finding").
+10. Ornamental intensifiers out (markedly, critically, remarkably, strikingly); functional ones stay (slightly, consistently, approximately). Remove intensifiers only as part of rhythm restructuring, never alone.
+11. State each claim once: cut "in other words / that is / essentially" restatements.
+12. PRESERVE real writing: However, Although, Whereas, Thus, Notably, Furthermore, "Based on these results"; citations; legitimate hedging; correct terminology. This is editing, not flattening — do not over-trim.
+13. Keep facts, numbers, citations, and the author's meaning EXACTLY. Rewrite style, never content.
+
+Return ONLY the fully rewritten text — no commentary, no before/after, no markdown fences."""
+
+def _humanize_enabled() -> bool:
+    """config.json "humanize_on_save": false turns the automatic pre-save
+    pass off. Default on — the skill runs on every prose save."""
+    return load_config().get("humanize_on_save", True) is not False
+
+async def _humanize_text(model: str, text: str) -> str:
+    """One LLM pass applying the humanizer_academic skill's core rules.
+    Returns the ORIGINAL text on any failure or implausible output — the
+    humanizer is best-effort and must never block or corrupt a save."""
+    if not text.strip() or len(text) > 60_000 or not model:
+        return text
+    try:
+        out = (await _llm_complete(model, [
+            {"role": "system", "content": _HUMANIZER_CORE},
+            {"role": "user", "content":
+                "Rewrite this text to remove AI-writing patterns. "
+                "Return ONLY the rewritten text, nothing else:\n\n" + text},
+        ], timeout=180)).strip()
+        if out and len(out) > len(text) * 0.5:
+            return out
+        return text
+    except Exception:
+        return text
+
+async def _register_builtin_skills():
+    """Registers the vendored humanizer_academic skill, then bulk-imports
+    every Claude-format SKILL.md found under skills/vendor/ (cloned
+    third-party collections; the dir is gitignored). Idempotent by name —
+    restart after dropping a new repo in, and its skills appear. Called from
+    the lifespan (this app's @app.on_event handlers never fire)."""
+    try:
+        if HUMANIZER_SKILL_FILE.is_file():
+            body = HUMANIZER_SKILL_FILE.read_text(encoding="utf-8")
+            skills = _load_json_list(SKILLS_FILE)
+            if not any(s.get("name") == "humanizer_academic" for s in skills):
+                skills.append({
+                    "id": uuid.uuid4().hex[:12],
+                    "name": "humanizer_academic",
+                    "description": "Remove signs of AI-generated writing from prose (34-pattern skill, auto-applied to prose saves). Use when editing or reviewing any text that must not read as AI-written.",
+                    "instructions": body,
+                    "source": "builtin",
+                })
+                _save_json_list(SKILLS_FILE, skills)
+    except Exception:
+        pass
+    _import_vendor_skills()
+
+# Import preference order — first repo to define a skill name wins, so the
+# focused collections take precedence over the big aggregates.
+_VENDOR_ORDER = ["agent-skills", "superpowers", "skills", "marketingskills",
+                 "scientific-agent-skills", "awesome-llm-apps", "awesome-claude-skills"]
+
+def _parse_skill_md(path: Path):
+    """Tolerant Claude-skills frontmatter parser: name/description when the
+    YAML cooperates, sensible fallbacks (parent dir name, first body line)
+    when it doesn't. Returns (name, description, full_text)."""
+    text = path.read_text(encoding="utf-8", errors="replace")
+    name, desc = "", ""
+    m = re.match(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", text, re.DOTALL)
+    if m:
+        fm, _ = m.group(1), m.group(2)
+        nm = re.search(r"^name:\s*(.+)$", fm, re.MULTILINE)
+        if nm:
+            name = nm.group(1).strip().strip("\"'")
+        dm = re.search(r"^description:\s*(.+?)(?=^\s*\w[\w-]*:|\Z)", fm, re.MULTILINE | re.DOTALL)
+        if dm:
+            raw = dm.group(1).strip()
+            if raw in ("|", ">", "|-", ">-", "|+", ">+"):
+                block = []
+                for ln in fm[dm.end():].splitlines():
+                    if ln.strip() and not ln.startswith((" ", "\t")):
+                        break
+                    block.append(ln.strip())
+                desc = " ".join(x for x in block if x)
+            else:
+                desc = " ".join(x.strip() for x in raw.splitlines() if x.strip())
+    if not name:
+        name = (path.stem if path.parent.name == "agents" or path.name.endswith(".agent.md")
+                else path.parent.name)
+    if not desc:
+        for ln in text.splitlines():
+            s = ln.strip().lstrip("#").strip()
+            if s and not s.startswith("---"):
+                desc = s
+                break
+    return name.strip()[:120], desc.strip()[:500], text
+
+def _import_vendor_skills() -> int:
+    """Scans skills/vendor/ for Claude-format SKILL.md files (kind=skill)
+    and agent definition .md files (kind=agent: */agents/*.md, *.agent.md)
+    and registers any name not already in the library. Returns the number
+    added (0 on a repeat boot)."""
+    vendor = Path(__file__).parent.parent / "skills" / "vendor"
+    if not vendor.is_dir():
+        return 0
+
+    def _repo_md(repo: Path):
+        if not repo.is_dir():
+            return []
+        return [p for p in repo.rglob("*.md") if "/.git/" not in str(p)]
+
+    def _is_agent_md(p: Path) -> bool:
+        return (p.name.endswith(".agent.md") or p.parent.name == "agents") \
+            and p.name != "SKILL.md" and not p.name.lower().startswith("readme")
+
+    skill_paths, agent_paths = [], []
+    repos = [vendor / r for r in _VENDOR_ORDER]
+    repos += [d for d in sorted(vendor.iterdir())
+              if d.is_dir() and d.name not in _VENDOR_ORDER and d.name != ".git"]
+    for repo in repos:
+        skill_paths += [p for p in _repo_md(repo) if p.name == "SKILL.md"]
+    for repo in repos:
+        agent_paths += [p for p in _repo_md(repo) if _is_agent_md(p)]
+    if not skill_paths and not agent_paths:
+        return 0
+
+    skills = _load_json_list(SKILLS_FILE)
+    existing = {str(s.get("name", "")).lower() for s in skills}
+    added = 0
+
+    def _register(path: Path, kind: str):
+        nonlocal added
+        if added >= 3000:
+            return
+        try:
+            name, desc, text = _parse_skill_md(path)
+        except Exception:
+            return
+        if kind == "agent" and not re.search(r"^name:", text[:600], re.MULTILINE):
+            name = path.name[:-len(".agent.md")] if path.name.endswith(".agent.md") else path.stem
+        if not name or name.lower() in existing or len(text) < 80:
+            return
+        skills.append({
+            "id": uuid.uuid4().hex[:12],
+            "name": name,
+            "description": desc or "(imported skill — fetch instructions for details)",
+            "instructions": text,
+            "kind": kind,
+            "source": f"agent:{path.relative_to(vendor).parts[0]}" if kind == "agent"
+                      else f"imported:{path.relative_to(vendor).parts[0]}",
+            "created_at": datetime.now().isoformat(),
+        })
+        existing.add(name.lower())
+        added += 1
+
+    for path in skill_paths:
+        _register(path, "skill")
+    for path in agent_paths:
+        _register(path, "agent")
+    if added:
+        _save_json_list(SKILLS_FILE, skills)
+    return added
+
 class Lesson(BaseModel):
     id: str = ""
     title: str
@@ -5804,13 +6288,69 @@ def build_system_prompt(base: str) -> str:
     skills = _load_json_list(SKILLS_FILE)
     if not skills:
         return base
-    directory = "\n".join(f"- {s['name']}: {s['description']}" for s in skills if s.get("name"))
+    # The library can hold 1000+ skills (imported collections live in
+    # skills/vendor/) — listing every one in the prompt would eat the local
+    # models' 16k window. Show a bounded, prioritized slice (manual > builtin
+    # > imported > auto, newest first) and hint the rest exist by name: the
+    # full library is always reachable through get_skill.
+    _prio = {"manual": 3, "builtin": 2, "": 2, "imported": 1}
+    ranked = sorted(
+        skills,
+        key=lambda s: (_prio.get(str(s.get("source", "")).split(":")[0], 1),
+                       str(s.get("created_at", "")), s.get("name", "")),
+        reverse=True)
+    agents = [s for s in ranked if s.get("kind") == "agent"][:40]
+    shown = [s for s in ranked if s.get("kind") != "agent"][:80]
+    directory = "\n".join(
+        f"- {s['name']}: {str(s.get('description', ''))[:160]}"
+        for s in shown if s.get("name"))
+    agent_dir = "\n".join(
+        f"- {s['name']}: {str(s.get('description', ''))[:160]}"
+        for s in agents if s.get("name"))
+    more = len(skills) - len(shown) - len(agents)
+    more_note = f"\n(and {more} more — call get_skill with an exact name if you know one)" if more > 0 else ""
+    agents_section = ""
+    if agent_dir:
+        agents_section = f"""
+
+Specialist subagents: call the task tool with {{"description": "...", "agent": "<exact name>"}} and that specialist's persona will drive a fresh subagent with the same tools (no sudo). Delegate to one whenever the request matches its specialty instead of doing it yourself.
+Available agents:
+{agent_dir}"""
     return f"""{base}
 
 You have access to a library of saved skills (reusable playbooks). If the user's request matches one, call the get_skill tool with its exact name to fetch full instructions before proceeding.
 
 Available skills:
-{directory}"""
+{directory}{more_note}{agents_section}"""
+
+
+def _relevant_skills_hint(text: str) -> str:
+    """Cheap keyword-overlap match between the user's request and the skill/
+    agent directory — surfaces the most relevant entries by name so the
+    model fetches (get_skill) or delegates (task agent=) without being told
+    to. No LLM call, just substring matching over names+descriptions."""
+    if not text:
+        return ""
+    skills = _load_json_list(SKILLS_FILE)
+    if len(skills) > 3000:
+        skills = skills[-3000:]
+    words = set(re.findall(r"[a-z][a-z0-9-]{2,}", text.lower()))
+    if not words:
+        return ""
+    scored = []
+    for s in skills:
+        hay = f"{s.get('name', '')} {s.get('description', '')}".lower()
+        if len(hay) < 5:
+            continue
+        score = sum(1 for w in words if w in hay)
+        if score >= 3:
+            scored.append((score, s.get("kind", "skill"), s.get("name", "")))
+    if not scored:
+        return ""
+    scored.sort(key=lambda x: -x[0])
+    lines = ["The request seems related to these library entries — fetch them (get_skill) before starting, or delegate to the agent ones (task with agent=):"]
+    lines += [f"- {name} ({kind})" for _, kind, name in scored[:3]]
+    return "\n".join(lines)
 
 
 # ── Routines: scheduled AI tasks ────────────────────────────────────────────────
