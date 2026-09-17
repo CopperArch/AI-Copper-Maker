@@ -58,6 +58,12 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     _load_and_schedule_routines()
     scheduler.add_job(_check_new_mail, IntervalTrigger(minutes=5), id="mail-poll", replace_existing=True)
+    # Runs once now (fire-and-forget — 3 network calls to provider APIs
+    # shouldn't delay the app actually starting to serve requests) and every
+    # 24h after, so a configured cloud default silently going stale gets
+    # caught automatically instead of sitting unnoticed for months.
+    asyncio.create_task(_validate_cloud_defaults())
+    scheduler.add_job(_validate_cloud_defaults, IntervalTrigger(hours=24), id="cloud-model-check", replace_existing=True)
     # NOTE: this app uses a custom lifespan, which means @app.on_event
     # handlers never fire — anything that must run at boot (skill/vendor
     # import) or shutdown (LSP client cleanup) has to be wired in HERE.
@@ -95,10 +101,10 @@ LMS_BIN = shutil.which("lms") or str(
 )
 API_KEYS_FILE = Path(__file__).parent.parent / "api_keys.json"
 CLOUD_PROVIDERS = {
-    "anthropic": {"label": "Claude (Anthropic)", "default_model": "claude-sonnet-4-6"},
-    "openai": {"label": "ChatGPT (OpenAI)", "default_model": "gpt-4o"},
-    "google": {"label": "Gemini (Google)", "default_model": "gemini-2.5-flash"},
-    "openrouter": {"label": "OpenRouter (any model)", "default_model": "anthropic/claude-sonnet-4.5"},
+    "anthropic": {"label": "Claude (Anthropic)", "default_model": "claude-sonnet-5"},
+    "openai": {"label": "ChatGPT (OpenAI)", "default_model": "gpt-6-astra"},
+    "google": {"label": "Gemini (Google)", "default_model": "gemini-3.8-flash"},
+    "openrouter": {"label": "OpenRouter (any model)", "default_model": "anthropic/claude-sonnet-5"},
 }
 
 # OpenRouter proxies hundreds of models behind one key/endpoint, unlike the
@@ -107,11 +113,24 @@ CLOUD_PROVIDERS = {
 # of being stuck on a single hardcoded model. The choice persists in
 # config.json ("openrouter_model") so it survives a reload/poll rather than
 # resetting to the hardcoded default.
+#
+# These model ids (and the CLOUD_PROVIDERS defaults above) go stale — this
+# session alone found the previous defaults were 1-2 full generations behind
+# (gpt-4o vs. gpt-6-astra, claude-sonnet-4.6 vs. claude-sonnet-5, gemini-2.0
+# vs. 3.8) with no mechanism to notice. _validate_cloud_defaults() below runs
+# at startup and every 24h to at least catch a default silently vanishing
+# from its provider's live model list; it can't invent the correct name of a
+# brand-new release on its own; keeping this list current is still a manual
+# edit when a provider ships something new. Bump `MODEL_LIST_LAST_CHECKED`
+# below whenever this list itself is deliberately updated, so it's obvious at
+# a glance how stale it might be.
+MODEL_LIST_LAST_CHECKED = "2026-09-17"
 OPENROUTER_MODEL_CHOICES = [
-    {"model": "anthropic/claude-sonnet-4.5", "label": "Claude Sonnet 4.5"},
-    {"model": "anthropic/claude-opus-4", "label": "Claude Opus 4"},
-    {"model": "openai/gpt-4o", "label": "GPT-4o"},
-    {"model": "openai/gpt-4o-mini", "label": "GPT-4o mini"},
+    {"model": "anthropic/claude-sonnet-5", "label": "Claude Sonnet 5"},
+    {"model": "anthropic/claude-opus-5", "label": "Claude Opus 5"},
+    {"model": "openai/gpt-6-astra", "label": "GPT-6 Astra"},
+    {"model": "google/gemini-3.8-flash", "label": "Gemini 3.8 Flash"},
+    {"model": "deepseek/deepseek-v4-pro", "label": "DeepSeek V4 Pro"},
     {"model": "deepseek/deepseek-chat", "label": "DeepSeek V3 (deepseek-chat)"},
     {"model": "deepseek/deepseek-r1", "label": "DeepSeek R1 (reasoning)"},
 ]
@@ -129,7 +148,9 @@ def _openrouter_model() -> str:
 # awareness, not a bill.
 PRICING = {
     "anthropic": {
-        "default": {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75},
+        "default": {"input": 2.0, "output": 10.0, "cache_read": 0.20, "cache_write": 2.50},
+        "claude-sonnet-5": {"input": 2.0, "output": 10.0, "cache_read": 0.20, "cache_write": 2.50},
+        "claude-opus-5": {"input": 5.0, "output": 25.0, "cache_read": 0.50, "cache_write": 6.25},
         "claude-sonnet-4-6": {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75},
         "claude-sonnet-4-5": {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75},
         "claude-opus-4-6": {"input": 15.0, "output": 75.0, "cache_read": 1.50, "cache_write": 18.75},
@@ -138,7 +159,8 @@ PRICING = {
         "claude-haiku-4-5": {"input": 1.0, "output": 5.0, "cache_read": 0.10, "cache_write": 1.25},
     },
     "openai": {
-        "default": {"input": 2.50, "output": 10.0, "cache_read": 1.25},
+        "default": {"input": 10.0, "output": 50.0, "cache_read": 5.0},
+        "gpt-6-astra": {"input": 10.0, "output": 50.0, "cache_read": 5.0},
         "gpt-4o": {"input": 2.50, "output": 10.0, "cache_read": 1.25},
         "gpt-4o-mini": {"input": 0.15, "output": 0.60, "cache_read": 0.075},
         "gpt-4.1": {"input": 2.0, "output": 8.0, "cache_read": 0.50},
@@ -146,19 +168,25 @@ PRICING = {
         "gpt-4.1-nano": {"input": 0.10, "output": 0.40, "cache_read": 0.025},
     },
     "google": {
-        "default": {"input": 0.10, "output": 0.40, "cache_read": 0.025},
+        "default": {"input": 0.75, "output": 3.75, "cache_read": 0.19},
+        "gemini-3.8-flash": {"input": 0.75, "output": 3.75, "cache_read": 0.19},
         "gemini-2.0-flash": {"input": 0.10, "output": 0.40, "cache_read": 0.025},
         "gemini-2.5-flash": {"input": 0.30, "output": 2.50, "cache_read": 0.075},
         "gemini-2.5-pro": {"input": 1.25, "output": 10.0, "cache_read": 0.31},
 },
     "openrouter": {
-        "default": {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75},
+        "default": {"input": 2.0, "output": 10.0, "cache_read": 0.20, "cache_write": 2.50},
+        "anthropic/claude-sonnet-5": {"input": 2.0, "output": 10.0, "cache_read": 0.20, "cache_write": 2.50},
+        "anthropic/claude-opus-5": {"input": 5.0, "output": 25.0, "cache_read": 0.50, "cache_write": 6.25},
         "anthropic/claude-sonnet-4.5": {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75},
         "anthropic/claude-opus-4": {"input": 15.0, "output": 75.0, "cache_read": 1.50, "cache_write": 18.75},
+        "openai/gpt-6-astra": {"input": 10.0, "output": 50.0, "cache_read": 5.0},
         "openai/gpt-4o": {"input": 2.50, "output": 10.0, "cache_read": 1.25},
         "openai/gpt-4o-mini": {"input": 0.15, "output": 0.60, "cache_read": 0.075},
-        "deepseek/deepseek-chat": {"input": 0.27, "output": 1.10, "cache_read": 0.07},
-        "deepseek/deepseek-r1": {"input": 0.55, "output": 2.19, "cache_read": 0.14},
+        "google/gemini-3.8-flash": {"input": 0.75, "output": 3.75},
+        "deepseek/deepseek-v4-pro": {"input": 1.60, "output": 3.20},
+        "deepseek/deepseek-chat": {"input": 0.2574, "output": 1.0287, "cache_read": 0.07},
+        "deepseek/deepseek-r1": {"input": 0.70, "output": 2.50, "cache_read": 0.14},
     },
 }
 
@@ -3369,6 +3397,19 @@ async def cloud_model_details():
         out.append(entry)
     return {"models": out}
 
+@app.get("/api/models/staleness")
+async def get_model_staleness():
+    """Result of the startup/24h check (_validate_cloud_defaults) — any
+    configured provider default that no longer appears in that provider's
+    own live model list. The frontend surfaces this as a warning banner so
+    it doesn't take a broken chat request to notice."""
+    if CLOUD_MODEL_STALENESS_FILE.exists():
+        try:
+            return json.loads(CLOUD_MODEL_STALENESS_FILE.read_text())
+        except Exception:
+            pass
+    return {"checked_at": None, "stale": []}
+
 
 async def _fetch_ollama_pulls(model_name: str) -> int:
     """Scrape ollama.com search results for pull count of a model name."""
@@ -3458,6 +3499,74 @@ async def _openrouter_live_pricing() -> dict:
     return prices
 
 
+CLOUD_MODEL_STALENESS_FILE = Path(__file__).parent.parent / "model_staleness_cache.json"
+
+async def _provider_live_model_ids(provider: str, key: str) -> set | None:
+    """Query a provider's OWN models-list endpoint for the ids it currently
+    serves. Returns None (not an empty set) when the check itself couldn't
+    complete — network error, bad key, unrecognized provider — so callers
+    can tell "couldn't verify" apart from "verified, and it's genuinely
+    gone", and never flag a false staleness warning from a fetch failure."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            if provider == "anthropic":
+                r = await client.get("https://api.anthropic.com/v1/models",
+                                      headers={"x-api-key": key, "anthropic-version": "2023-06-01"})
+                if r.status_code != 200:
+                    return None
+                return {m["id"] for m in r.json().get("data", [])}
+            if provider == "openai":
+                r = await client.get("https://api.openai.com/v1/models",
+                                      headers={"Authorization": f"Bearer {key}"})
+                if r.status_code != 200:
+                    return None
+                return {m["id"] for m in r.json().get("data", [])}
+            if provider == "google":
+                r = await client.get("https://generativelanguage.googleapis.com/v1beta/models",
+                                      params={"key": key})
+                if r.status_code != 200:
+                    return None
+                # Google's ids come back prefixed "models/gemini-3.8-flash".
+                return {m["name"].split("/", 1)[-1] for m in r.json().get("models", [])}
+    except Exception:
+        return None
+    return None
+
+async def _validate_cloud_defaults() -> list:
+    """Checked at startup and every 24h (see lifespan() and the scheduled
+    job below it) — confirms each configured provider's default_model still
+    exists in THAT PROVIDER'S OWN live model list, so a default going stale
+    gets noticed automatically instead of silently sitting there for months.
+    (This session found gpt-4o, claude-sonnet-4-6, and gemini-2.0-flash all
+    stale at once, with nothing having ever flagged it — the direct reason
+    this check exists.) It can only detect drift, not fix it: there's no
+    reliable way to auto-pick "the correct new flagship" from a bare model
+    list, so a hit here just surfaces what needs a manual look, via a
+    desktop notification and /api/models/staleness for the UI to show.
+    OpenRouter isn't checked here — it's already re-validated live on every
+    /api/models/cloud/details call via _openrouter_live_pricing()."""
+    keys = _load_api_keys()
+    stale = []
+    for p, meta in CLOUD_PROVIDERS.items():
+        if p == "openrouter":
+            continue
+        key = keys.get(p)
+        if not key:
+            continue  # can't check without a key — unverifiable, not an error
+        live_ids = await _provider_live_model_ids(p, key)
+        if live_ids is None:
+            continue  # the check itself failed — never flag a false positive from that
+        if meta["default_model"] not in live_ids:
+            stale.append({"provider": p, "label": meta["label"], "configured_model": meta["default_model"]})
+    try:
+        CLOUD_MODEL_STALENESS_FILE.write_text(json.dumps({"checked_at": time.time(), "stale": stale}))
+    except Exception:
+        pass
+    if stale:
+        names = ", ".join(f"{s['label']} ({s['configured_model']})" for s in stale)
+        _notify("AI Copper Maker — model check", f"No longer listed by the provider: {names}")
+    return stale
+
 
 # Public, stable domain knowledge about which model FAMILIES are strongest at
 # code generation — used as a fallback signal for models the curated CATALOG
@@ -3471,10 +3580,11 @@ _CODING_FAMILY_TIERS = [
     ("coder", 1.0), ("codestral", 1.0), ("starcoder", 1.0), ("deepseek-coder", 1.0),
     ("qwen2.5-coder", 1.0), ("qwen3-coder", 1.0), ("codegemma", 0.95), ("codellama", 0.9),
     ("opus", 0.95), ("sonnet", 0.9), ("claude", 0.85),
-    ("deepseek-r1", 0.85), ("deepseek-v3", 0.8), ("deepseek", 0.75),
-    ("gpt-5", 0.9), ("gpt-4.1", 0.85), ("gpt-4o", 0.75), ("o1", 0.85), ("o3", 0.88),
+    ("deepseek-v4", 0.85), ("deepseek-r1", 0.85), ("deepseek-v3", 0.8), ("deepseek", 0.75),
+    ("astra", 0.95), ("gpt-6", 0.92), ("gpt-5", 0.9), ("gpt-4.1", 0.85), ("gpt-4o", 0.75),
+    ("o1", 0.85), ("o3", 0.88),
     ("qwen3", 0.65), ("qwen2.5", 0.6),
-    ("gemini-2.5-pro", 0.75), ("gemini", 0.6),
+    ("gemini-3.8-flash", 0.8), ("gemini-2.5-pro", 0.75), ("gemini-3", 0.75), ("gemini", 0.6),
     ("llama-3.3", 0.55), ("llama", 0.45),
 ]
 _CODING_KEYWORDS = {"coding", "programming", "software engineering", "agentic coding",
@@ -3513,7 +3623,7 @@ def _catalog_entry_for(name: str) -> dict | None:
             return c
     return None
 
-RANKINGS_CACHE_VERSION = 2  # bump whenever the scoring formula changes, so a stale on-disk cache from before that change doesn't keep serving old ranks for up to 24h
+RANKINGS_CACHE_VERSION = 3  # bump whenever the scoring formula (or _CODING_FAMILY_TIERS) changes, so a stale on-disk cache from before that change doesn't keep serving old ranks for up to 24h
 
 @app.get("/api/models/rankings")
 async def list_model_rankings():

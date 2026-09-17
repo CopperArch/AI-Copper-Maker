@@ -4169,7 +4169,7 @@ else if (catalogFilter === 'free') {
    }
 
   else if (catalogFilter === 'paid') {
-    html += sectionTitle('💳', 'Paid', 'cloud providers — metered per million tokens, budget-capped');
+    html += sectionTitle('💳', 'Paid', 'cloud providers, budget-capped — "in" is what you send it (your message + history), "out" is what it writes back; out usually costs several times more per token than in');
     const rows = cloudModelDetails.filter(r => matchesSearch(`${r.provider} ${r.model}`));
     html += rows.length
       ? rows.map(r => {
