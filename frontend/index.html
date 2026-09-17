@@ -360,17 +360,6 @@
   .todo-pending .todo-icon, .todo-pending .todo-text { opacity: .6; }
   .todo-progress { margin-top: 6px; font-size: 10px; text-transform: uppercase; letter-spacing: .4px; color: var(--muted); }
 
-  /* Command bar above the chat input (opencode-style quick commands) */
-  .chat-command-bar {
-    display: flex; gap: 6px; flex-wrap: wrap; padding: 4px 0 8px;
-  }
-  .cmd-btn {
-    font-size: 11px; padding: 4px 10px; border-radius: 999px; cursor: pointer;
-    border: 1px solid var(--border); background: var(--surface); color: var(--text);
-    font-family: inherit; transition: border-color .15s ease, background .15s ease;
-  }
-  .cmd-btn:hover { border-color: var(--accent, #58a6ff); background: rgba(127,127,127,.12); }
-
   /* Slash-command autocomplete popup, anchored above the input row */
   .slash-popup {
     display: none; position: absolute; bottom: 100%; left: 0; right: 0; z-index: 500;
@@ -894,15 +883,6 @@
           <textarea id="system-prompt" placeholder="System instructions for the AI..."></textarea>
         </div>
         <div id="file-attachments" class="file-attachments" style="display:none"></div>
-        <div class="chat-command-bar" id="chat-command-bar">
-          <button class="cmd-btn" onclick="runSlashCommand('new')" title="/new — start a new conversation">➕ New Chat</button>
-          <button class="cmd-btn" onclick="runSlashCommand('compact')" title="/compact — summarize older messages to free context">🗜 Compact</button>
-          <button class="cmd-btn" onclick="runSlashCommand('skills')" title="/skills — view the skill library">🧠 Skills</button>
-          <button class="cmd-btn" onclick="runSlashCommand('agent')" title="/agent — switch to autonomous Agent mode">🤖 Agent</button>
-          <button class="cmd-btn" onclick="runSlashCommand('model')" title="/model — pick the model">📦 Model</button>
-          <button class="cmd-btn" onclick="runSlashCommand('clear')" title="/clear — clear this conversation's messages">🧹 Clear</button>
-          <button class="cmd-btn" onclick="runSlashCommand('help')" title="/help — list all commands">❓ Help</button>
-        </div>
         <div class="input-row">
           <textarea id="chat-input" placeholder="Ask the AI to build something... (Shift+Enter for new line)" rows="1"></textarea>
           <button class="btn btn-primary" id="send-btn" onclick="sendMessage()">Send</button>
@@ -2671,9 +2651,9 @@ function setChatStatus(convId, thinking) {
 }
 
 // ── Slash commands (opencode-style) ───────────────────────────────────────────
-// Everything lands in runSlashCommand(): the button row above the chat input
-// (chat-command-bar), typing "/" in the input (autocomplete popup), or a raw
-// message starting with "/". sendMessage() intercepts those before the model.
+// Everything lands in runSlashCommand(): typing "/" in the input (autocomplete
+// popup) or a raw message starting with "/". sendMessage() intercepts those
+// before the model.
 
 const SLASH_COMMANDS = [
   { cmd: 'new',     icon: '➕', label: 'New chat',  desc: 'Start a fresh conversation' },
