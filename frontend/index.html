@@ -2335,9 +2335,11 @@ function toggleTokenUsageMenu(btnEl) {
 async function loadConversations() {
   try {
     const r = await fetch(`${API}/api/conversations`);
-    conversations = await r.json();
+    const data = await r.json();
+    conversations = Array.isArray(data) ? data : [];
   } catch {
-    conversations = JSON.parse(localStorage.getItem('llm_conversations') || '[]');
+    const stored = JSON.parse(localStorage.getItem('llm_conversations') || '[]');
+    conversations = Array.isArray(stored) ? stored : [];
   }
   renderConvList();
   if (conversations.length) loadConversation(conversations[0].id);
@@ -4036,6 +4038,10 @@ function renderModelsTab() {
 
   const emptyNote = (msg) =>
     `<p style="font-size:13px;color:var(--muted)">${msg}</p>`;
+  // Rank badges (#1, #2, ...) are only meaningful if the list is actually
+  // sorted by rank — otherwise a lower-numbered badge can render below a
+  // higher-numbered one. Unranked models (rank 0) sort last.
+  const byRank = (a, b) => (modelRankMap[a.name] || Infinity) - (modelRankMap[b.name] || Infinity);
   let html = '';
 
   if (catalogFilter === 'local') {
@@ -4048,7 +4054,7 @@ function renderModelsTab() {
     for (const n of installedModelsLmstudio) {
       rows.push({ name: n, desc: 'LM Studio model (local, on this machine)', size_gb: null, category: 'general', provider: 'lmstudio' });
     }
-    const filtered = rows.filter(r => matchesSearch(r.name, r.desc));
+    const filtered = rows.filter(r => matchesSearch(r.name, r.desc)).sort(byRank);
     html += sectionTitle('💾', 'Local', 'installed on this machine — private, no per-token cost');
     html += filtered.length
       ? filtered.map(card).join('')
@@ -4077,8 +4083,8 @@ function renderModelsTab() {
 else if (catalogFilter === 'free') {
      const rows = catalog.filter(c => c.category !== 'uncensored');
      const filtered = rows.filter(r => matchesSearch(r.name, r.desc));
-     const localRows = filtered.filter(r => r.source === 'local' || r.provider === 'ollama');
-     const onlineRows = filtered.filter(r => r.source === 'online' || r.provider === 'openrouter');
+     const localRows = filtered.filter(r => r.source === 'local' || r.provider === 'ollama').sort(byRank);
+     const onlineRows = filtered.filter(r => r.source === 'online' || r.provider === 'openrouter').sort(byRank);
      html += sectionTitle('🆓', 'Free', 'open-weight models — free to download, free to run, yours forever');
      // Local Install subsection
      if (localRows.length) {
