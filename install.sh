@@ -253,16 +253,73 @@ pip install --quiet --upgrade pip
 pip install --quiet -r requirements.txt
 success "Python dependencies installed"
 
-# ── 5. Optional: systemd user service ───────────────────────────────────────────
+# ── 5. Optional: auto-start service ─────────────────────────────────────────────
 # Running as a service (rather than launching launch.sh by hand) means the app
 # survives logout/login and Routines actually fire on schedule instead of only
-# while a terminal happens to be open.
+# while a terminal happens to be open. Linux uses a systemd --user unit; macOS
+# has no systemd, so it gets a launchd LaunchAgent doing the same job.
 echo ""
-read -rp "Install AI Copper Maker as a systemd user service (auto-start, keeps Routines running)? [y/N]: " install_service
-if [[ "$install_service" =~ ^[Yy]$ ]]; then
-    SERVICE_DIR="$HOME/.config/systemd/user"
-    mkdir -p "$SERVICE_DIR"
-    cat > "$SERVICE_DIR/llm-coder.service" <<SERVICEEOF
+if [ "$(uname -s)" = "Darwin" ]; then
+    read -rp "Install AI Copper Maker as a launchd agent (auto-start, keeps Routines running)? [y/N]: " install_service
+    if [[ "$install_service" =~ ^[Yy]$ ]]; then
+        PLIST_LABEL="com.llmcoder.app"
+        PLIST_DIR="$HOME/Library/LaunchAgents"
+        PLIST_PATH="$PLIST_DIR/$PLIST_LABEL.plist"
+        LOG_DIR="$HOME/Library/Logs/LLMCoder"
+        mkdir -p "$PLIST_DIR" "$LOG_DIR"
+        cat > "$PLIST_PATH" <<PLISTEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>$PLIST_LABEL</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>$SCRIPT_DIR/backend/venv/bin/uvicorn</string>
+		<string>main:app</string>
+		<string>--host</string>
+		<string>127.0.0.1</string>
+		<string>--port</string>
+		<string>8081</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>$SCRIPT_DIR/backend</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>StandardOutPath</key>
+	<string>$LOG_DIR/stdout.log</string>
+	<key>StandardErrorPath</key>
+	<string>$LOG_DIR/stderr.log</string>
+</dict>
+</plist>
+PLISTEOF
+        # launchctl load/unload are deprecated since 10.11 but still the most
+        # broadly-compatible way to (re)register an agent across macOS versions;
+        # bootstrap is the modern replacement, tried second on systems where the
+        # legacy path fails (e.g. because the label is already bootstrapped).
+        launchctl unload "$PLIST_PATH" &>/dev/null || true
+        if launchctl load -w "$PLIST_PATH" 2>/dev/null || launchctl bootstrap "gui/$(id -u)" "$PLIST_PATH" 2>/dev/null; then
+            success "Installed and started $PLIST_LABEL — will auto-start on login"
+            info "Manage it with: launchctl {stop,start} $PLIST_LABEL"
+            info "View logs at: $LOG_DIR/stdout.log and stderr.log"
+        else
+            warn "Could not load the launch agent — try manually: launchctl load -w $PLIST_PATH"
+        fi
+    else
+        info "Skipping launch agent — run ./launch.sh manually when you want to use LLM Coder"
+    fi
+else
+    read -rp "Install AI Copper Maker as a systemd user service (auto-start, keeps Routines running)? [y/N]: " install_service
+    if [[ "$install_service" =~ ^[Yy]$ ]]; then
+        SERVICE_DIR="$HOME/.config/systemd/user"
+        mkdir -p "$SERVICE_DIR"
+        cat > "$SERVICE_DIR/llm-coder.service" <<SERVICEEOF
 [Unit]
 Description=LLM Coder - Uncensored Edition
 After=network.target
@@ -277,16 +334,17 @@ RestartSec=5
 [Install]
 WantedBy=default.target
 SERVICEEOF
-    systemctl --user daemon-reload
-    if systemctl --user enable --now llm-coder.service; then
-        success "Installed and started llm-coder.service — will auto-start on login"
-        info "Manage it with: systemctl --user {status,stop,start,restart} llm-coder.service"
-        info "View logs with: journalctl --user -u llm-coder.service -f"
+        systemctl --user daemon-reload
+        if systemctl --user enable --now llm-coder.service; then
+            success "Installed and started llm-coder.service — will auto-start on login"
+            info "Manage it with: systemctl --user {status,stop,start,restart} llm-coder.service"
+            info "View logs with: journalctl --user -u llm-coder.service -f"
+        else
+            warn "Could not enable the service (is systemd user linger enabled? try: loginctl enable-linger \$USER)"
+        fi
     else
-        warn "Could not enable the service (is systemd user linger enabled? try: loginctl enable-linger \$USER)"
+        info "Skipping systemd service — run ./launch.sh manually when you want to use LLM Coder"
     fi
-else
-    info "Skipping systemd service — run ./launch.sh manually when you want to use LLM Coder"
 fi
 
 # ── 6. Done ────────────────────────────────────────────────────────────────────
@@ -294,5 +352,5 @@ echo ""
 echo -e "${GREEN}╔══════════════════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║  AI Copper Maker — Uncensored Edition REV 1.1            ║${NC}"
 echo -e "${GREEN}║  Installation complete!                             ║${NC}"
-echo -e "${GREEN}║  Run: ./launch.sh (or the systemd service, if set up)║${NC}"
+echo -e "${GREEN}║  Run: ./launch.sh (or the auto-start service, if set up)║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════════════╝${NC}"
