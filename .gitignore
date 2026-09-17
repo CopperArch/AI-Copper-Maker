@@ -21,6 +21,8 @@ usage_cost.json
 model_rankings_cache.json
 model_rankings_full.json
 openrouter_pricing_cache.json
+nanogpt_pricing_cache.json
+haimaker_pricing_cache.json
 model_staleness_cache.json
 backend/venv-imagegen/
 imagegen_local_state.json

@@ -105,15 +105,11 @@ CLOUD_PROVIDERS = {
     "openai": {"label": "ChatGPT (OpenAI)", "default_model": "gpt-6-astra"},
     "google": {"label": "Gemini (Google)", "default_model": "gemini-3.8-flash"},
     "openrouter": {"label": "OpenRouter (any model)", "default_model": "anthropic/claude-sonnet-5"},
+    "nanogpt": {"label": "NanoGPT (any model)", "default_model": "anthropic/claude-sonnet-5"},
+    "haimaker": {"label": "haimaker.ai (any model)", "default_model": "anthropic/claude-sonnet-5"},
+    "perplexity": {"label": "Perplexity (Sonar)", "default_model": "sonar-pro"},
 }
 
-# OpenRouter proxies hundreds of models behind one key/endpoint, unlike the
-# other providers here which each expose one fixed default_model — the Paid
-# section's OpenRouter card lets the user pick from this curated list instead
-# of being stuck on a single hardcoded model. The choice persists in
-# config.json ("openrouter_model") so it survives a reload/poll rather than
-# resetting to the hardcoded default.
-#
 # These model ids (and the CLOUD_PROVIDERS defaults above) go stale — this
 # session alone found the previous defaults were 1-2 full generations behind
 # (gpt-4o vs. gpt-6-astra, claude-sonnet-4.6 vs. claude-sonnet-5, gemini-2.0
@@ -125,18 +121,51 @@ CLOUD_PROVIDERS = {
 # below whenever this list itself is deliberately updated, so it's obvious at
 # a glance how stale it might be.
 MODEL_LIST_LAST_CHECKED = "2026-09-17"
-OPENROUTER_MODEL_CHOICES = [
-    {"model": "anthropic/claude-sonnet-5", "label": "Claude Sonnet 5"},
-    {"model": "anthropic/claude-opus-5", "label": "Claude Opus 5"},
-    {"model": "openai/gpt-6-astra", "label": "GPT-6 Astra"},
-    {"model": "google/gemini-3.8-flash", "label": "Gemini 3.8 Flash"},
-    {"model": "deepseek/deepseek-v4-pro", "label": "DeepSeek V4 Pro"},
-    {"model": "deepseek/deepseek-chat", "label": "DeepSeek V3 (deepseek-chat)"},
-    {"model": "deepseek/deepseek-r1", "label": "DeepSeek R1 (reasoning)"},
-]
 
-def _openrouter_model() -> str:
-    return load_config().get("openrouter_model") or CLOUD_PROVIDERS["openrouter"]["default_model"]
+# OpenRouter, NanoGPT, and haimaker.ai each proxy hundreds of models behind
+# one key, unlike anthropic/openai/google which expose exactly one model per
+# request. Perplexity isn't a multi-vendor gateway, but still offers several
+# Sonar tiers with real price/capability tradeoffs — grouped in here too so
+# it gets the same picker instead of being hardcoded to one tier. Each
+# provider's Paid card lets the user choose from its list here rather than
+# being stuck on the hardcoded default; the choice persists in config.json
+# as "<provider>_model" (see _gateway_model) so it survives a reload/poll.
+GATEWAY_MODEL_CHOICES = {
+    "openrouter": [
+        {"model": "anthropic/claude-sonnet-5", "label": "Claude Sonnet 5"},
+        {"model": "anthropic/claude-opus-5", "label": "Claude Opus 5"},
+        {"model": "openai/gpt-6-astra", "label": "GPT-6 Astra"},
+        {"model": "google/gemini-3.8-flash", "label": "Gemini 3.8 Flash"},
+        {"model": "deepseek/deepseek-v4-pro", "label": "DeepSeek V4 Pro"},
+        {"model": "deepseek/deepseek-chat", "label": "DeepSeek V3 (deepseek-chat)"},
+        {"model": "deepseek/deepseek-r1", "label": "DeepSeek R1 (reasoning)"},
+    ],
+    "nanogpt": [
+        {"model": "anthropic/claude-sonnet-5", "label": "Claude Sonnet 5"},
+        {"model": "anthropic/claude-opus-5", "label": "Claude Opus 5"},
+        {"model": "openai/gpt-6-astra", "label": "GPT-6 Astra"},
+        {"model": "google/gemini-3.8-flash", "label": "Gemini 3.8 Flash"},
+        {"model": "deepseek/deepseek-v4-pro", "label": "DeepSeek V4 Pro"},
+        {"model": "deepseek/deepseek-v4.1-flash", "label": "DeepSeek V4.1 Flash"},
+    ],
+    "haimaker": [
+        {"model": "anthropic/claude-sonnet-5", "label": "Claude Sonnet 5"},
+        {"model": "anthropic/claude-opus-5", "label": "Claude Opus 5"},
+        {"model": "openai/gpt-6-astra", "label": "GPT-6 Astra"},
+        {"model": "google/gemini-3.8-flash", "label": "Gemini 3.8 Flash"},
+        {"model": "deepseek/deepseek-v4-pro", "label": "DeepSeek V4 Pro"},
+        {"model": "deepseek/deepseek-flash", "label": "DeepSeek V4.1 Flash"},
+    ],
+    "perplexity": [
+        {"model": "sonar", "label": "Sonar"},
+        {"model": "sonar-pro", "label": "Sonar Pro"},
+        {"model": "sonar-reasoning-pro", "label": "Sonar Reasoning Pro"},
+        {"model": "sonar-deep-research", "label": "Sonar Deep Research"},
+    ],
+}
+
+def _gateway_model(provider: str) -> str:
+    return load_config().get(f"{provider}_model") or CLOUD_PROVIDERS[provider]["default_model"]
 
 # ── Cloud-model pricing + spend tracking ──────────────────────────────────────
 # USD per MILLION tokens, from each provider's published price page. "cache_read"
@@ -187,6 +216,37 @@ PRICING = {
         "deepseek/deepseek-v4-pro": {"input": 1.60, "output": 3.20},
         "deepseek/deepseek-chat": {"input": 0.2574, "output": 1.0287, "cache_read": 0.07},
         "deepseek/deepseek-r1": {"input": 0.70, "output": 2.50, "cache_read": 0.14},
+    },
+    "nanogpt": {
+        "default": {"input": 2.0, "output": 10.0},
+        "anthropic/claude-sonnet-5": {"input": 2.0, "output": 10.0},
+        "anthropic/claude-opus-5": {"input": 5.0, "output": 25.0},
+        "openai/gpt-6-astra": {"input": 10.0, "output": 50.0},
+        "google/gemini-3.8-flash": {"input": 0.75, "output": 3.75},
+        "deepseek/deepseek-v4-pro": {"input": 1.10, "output": 2.20},
+        "deepseek/deepseek-v4.1-flash": {"input": 0.10, "output": 0.40},
+    },
+    "haimaker": {
+        "default": {"input": 2.0, "output": 10.0},
+        "anthropic/claude-sonnet-5": {"input": 2.0, "output": 10.0},
+        "anthropic/claude-opus-5": {"input": 5.0, "output": 25.0},
+        "openai/gpt-6-astra": {"input": 10.0, "output": 50.0},
+        "google/gemini-3.8-flash": {"input": 0.75, "output": 3.75},
+        "deepseek/deepseek-v4-pro": {"input": 0.66, "output": 1.98},
+        "deepseek/deepseek-flash": {"input": 0.15, "output": 0.60},
+    },
+    # Published pricing page (docs.perplexity.ai/getting-started/pricing) —
+    # no live endpoint available, see GATEWAY_LIVE_PRICING_FETCHERS. Sonar
+    # (non-Deep-Research) also carries a $5-14 per 1,000-request search fee,
+    # and Deep Research bills citation/reasoning tokens and search queries
+    # separately — none of that fits this simple input/output shape, so
+    # these are a floor, not the full bill.
+    "perplexity": {
+        "default": {"input": 1.0, "output": 1.0},
+        "sonar": {"input": 1.0, "output": 1.0},
+        "sonar-pro": {"input": 3.0, "output": 15.0},
+        "sonar-reasoning-pro": {"input": 2.0, "output": 8.0},
+        "sonar-deep-research": {"input": 2.0, "output": 8.0},
     },
 }
 
@@ -3294,6 +3354,24 @@ async def _test_cloud_key(provider: str, key: str) -> None:
         elif provider == "openrouter":
             r = await client.get("https://openrouter.ai/api/v1/models",
                                   headers={"Authorization": f"Bearer {key}"})
+        elif provider == "nanogpt":
+            # NanoGPT's /v1/models is public/unauthenticated (returns 200 for
+            # any key, even a bogus one) — confirmed live, not useful for
+            # validation. check-balance requires auth and rejects a bad key
+            # with a clean 401 before touching a real balance.
+            r = await client.post("https://nano-gpt.com/api/check-balance",
+                                   headers={"Authorization": f"Bearer {key}"})
+        elif provider == "haimaker":
+            r = await client.get("https://api.haimaker.ai/v1/models",
+                                  headers={"Authorization": f"Bearer {key}"})
+        elif provider == "perplexity":
+            # No models-list endpoint on Perplexity's public (non-preview)
+            # API — auth is checked before any tokens are billed, so a 1-
+            # token completion request validates the key at effectively zero
+            # cost, confirmed live: a bogus key 401s immediately.
+            r = await client.post("https://api.perplexity.ai/chat/completions",
+                                   headers={"Authorization": f"Bearer {key}", "content-type": "application/json"},
+                                   json={"model": "sonar", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1})
         else:
             return
     if r.status_code != 200:
@@ -3351,7 +3429,7 @@ async def set_expo_key(req: ExpoTokenRequest):
     return {"ok": True}
 
 def _cloud_model_for(provider: str, meta: dict) -> str:
-    return _openrouter_model() if provider == "openrouter" else meta["default_model"]
+    return _gateway_model(provider) if provider in GATEWAY_MODEL_CHOICES else meta["default_model"]
 
 @app.get("/api/models/cloud")
 async def list_cloud_models():
@@ -3363,36 +3441,47 @@ async def list_cloud_models():
 @app.get("/api/models/cloud/details")
 async def cloud_model_details():
     """Cards for the Models tab's Paid section: per-provider default model
-    (the user's persisted pick for OpenRouter, since it isn't fixed to one
-    model like the others), key status, and the estimated per-million-token
-    rates. OpenRouter's rate (both for the currently-selected model and every
-    option in `models`, the curated picker list) comes from OpenRouter's own
-    live pricing API rather than the hardcoded PRICING table — those numbers
-    drift (see _openrouter_live_pricing's docstring) and OpenRouter is the one
-    provider here with a public endpoint that reports current prices
-    directly. The other providers stay on PRICING (their published price
-    pages), same as before."""
+    (the user's persisted pick for gateway providers — OpenRouter, NanoGPT,
+    haimaker.ai, Perplexity — since those aren't fixed to one model like
+    Anthropic/OpenAI/Google are), key status, month-to-date spend against the
+    shared budget (_cost_summary — same figure Chat's cost line shows), and
+    the estimated per-million-token rates. A gateway's rate (both for the
+    currently-selected model and every option in `models`, its curated picker
+    list) comes from that provider's own live pricing endpoint where one
+    exists (see GATEWAY_LIVE_PRICING_FETCHERS) rather than the hardcoded
+    PRICING table — those numbers drift, confirmed live on this session's own
+    first attempt at typing in DeepSeek's rates by hand. Providers without a
+    live endpoint (the three native SDKs, and Perplexity — see
+    GATEWAY_LIVE_PRICING_FETCHERS's docstring) stay on PRICING."""
     keys = _load_api_keys()
-    live_prices = await _openrouter_live_pricing()
+    provider_names = list(GATEWAY_LIVE_PRICING_FETCHERS.keys())
+    results = await asyncio.gather(*(fetcher() for fetcher in GATEWAY_LIVE_PRICING_FETCHERS.values()))
+    live_prices_by_provider = dict(zip(provider_names, results))
+    cost = _cost_summary()
     out = []
     for p, meta in CLOUD_PROVIDERS.items():
         model = _cloud_model_for(p, meta)
-        if p == "openrouter":
-            rates = live_prices.get(model) or PRICING.get(p, {}).get(model) or PRICING.get(p, {}).get("default", {})
-        else:
-            rates = PRICING.get(p, {}).get(model) or PRICING.get(p, {}).get("default", {})
+        live_prices = live_prices_by_provider.get(p, {})
+        rates = live_prices.get(model) or PRICING.get(p, {}).get(model) or PRICING.get(p, {}).get("default", {})
         entry = {
             "provider": p, "label": meta["label"], "model": model,
             "configured": bool(keys.get(p)),
             "input_per_mtok": rates.get("input"), "output_per_mtok": rates.get("output"),
         }
-        if p == "openrouter":
+        if keys.get(p):
+            entry["budget"] = cost  # {period, budget, spent, remaining, percent_left, by_model}
+        if p in GATEWAY_MODEL_CHOICES:
             entry["models"] = [
                 {**choice, **({"input_per_mtok": live_prices[choice["model"]]["input"],
                                "output_per_mtok": live_prices[choice["model"]]["output"],
                                "is_free": live_prices[choice["model"]]["is_free"]}
-                              if choice["model"] in live_prices else {"is_free": choice["model"].endswith(":free")})}
-                for choice in OPENROUTER_MODEL_CHOICES
+                              if choice["model"] in live_prices
+                              else (PRICING.get(p, {}).get(choice["model"])
+                                    and {"input_per_mtok": PRICING[p][choice["model"]]["input"],
+                                         "output_per_mtok": PRICING[p][choice["model"]]["output"],
+                                         "is_free": PRICING[p][choice["model"]]["input"] == 0}
+                                    or {"is_free": choice["model"].endswith(":free")}))}
+                for choice in GATEWAY_MODEL_CHOICES[p]
             ]
         out.append(entry)
     return {"models": out}
@@ -3457,29 +3546,35 @@ async def _fetch_openrouter_models() -> list:
     return []
 
 
-OPENROUTER_PRICING_CACHE_FILE = Path(__file__).parent.parent / "openrouter_pricing_cache.json"
-OPENROUTER_PRICING_CACHE_TTL = 86400  # 24h — matches the rankings cache below
+GATEWAY_PRICING_CACHE_TTL = 86400  # 24h — matches the rankings cache below
 
-async def _openrouter_live_pricing() -> dict:
-    """Per-token prices hand-typed into PRICING drift out of date (caught one
-    on the DeepSeek entries added alongside this: input was off by ~8%, output
-    by ~14%, against OpenRouter's own public API). This fetches that API —
-    unauthenticated, no key needed — and caches the result for
-    OPENROUTER_PRICING_CACHE_TTL so every request doesn't refetch it, but a
-    session that runs longer than that always picks up current prices rather
-    than trusting a hardcoded number indefinitely. Returns {model_id:
-    {"input": $/Mtok, "output": $/Mtok, "is_free": bool}}."""
+async def _cached_gateway_pricing(cache_file: Path, fetcher) -> dict:
+    """Generic disk-cache-then-fetch wrapper shared by every gateway
+    provider's live-pricing function below — same 24h-cache shape (hand-typed
+    prices drift: the DeepSeek entries in PRICING were off by 8-27% against
+    live data before this existed), only the fetch-and-parse logic differs
+    per provider's response format. Returns {model_id: {"input": $/Mtok,
+    "output": $/Mtok, "is_free": bool}}."""
     try:
-        if OPENROUTER_PRICING_CACHE_FILE.exists():
-            cached = json.loads(OPENROUTER_PRICING_CACHE_FILE.read_text())
-            if time.time() - cached.get("fetched_at", 0) < OPENROUTER_PRICING_CACHE_TTL:
+        if cache_file.exists():
+            cached = json.loads(cache_file.read_text())
+            if time.time() - cached.get("fetched_at", 0) < GATEWAY_PRICING_CACHE_TTL:
                 return cached["prices"]
     except Exception:
         pass
+    prices = await fetcher()
+    if prices:  # don't overwrite a good cache with an empty one from a failed fetch
+        try:
+            cache_file.write_text(json.dumps({"fetched_at": time.time(), "prices": prices}))
+        except Exception:
+            pass
+    return prices
 
-    models = await _fetch_openrouter_models()
+OPENROUTER_PRICING_CACHE_FILE = Path(__file__).parent.parent / "openrouter_pricing_cache.json"
+
+async def _fetch_openrouter_prices() -> dict:
     prices = {}
-    for m in models:
+    for m in await _fetch_openrouter_models():
         mid = m.get("id")
         pricing = m.get("pricing") or {}
         try:
@@ -3490,13 +3585,80 @@ async def _openrouter_live_pricing() -> dict:
         if mid:
             prices[mid] = {"input": round(input_ppm, 4), "output": round(output_ppm, 4),
                             "is_free": input_ppm == 0 and output_ppm == 0}
-
-    if prices:  # don't overwrite a good cache with an empty one from a failed fetch
-        try:
-            OPENROUTER_PRICING_CACHE_FILE.write_text(json.dumps({"fetched_at": time.time(), "prices": prices}))
-        except Exception:
-            pass
     return prices
+
+async def _openrouter_live_pricing() -> dict:
+    return await _cached_gateway_pricing(OPENROUTER_PRICING_CACHE_FILE, _fetch_openrouter_prices)
+
+
+NANOGPT_PRICING_CACHE_FILE = Path(__file__).parent.parent / "nanogpt_pricing_cache.json"
+
+async def _fetch_nanogpt_prices() -> dict:
+    # Unlike OpenRouter/haimaker, NanoGPT's public catalog already reports
+    # price per MILLION tokens directly — no per-token conversion needed.
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get("https://nano-gpt.com/api/models")
+            if r.status_code != 200:
+                return {}
+            data = r.json()
+    except Exception:
+        return {}
+    prices = {}
+    for mid, m in (data.get("models", {}).get("text") or {}).items():
+        input_ppm, output_ppm = m.get("input_price_per_million"), m.get("output_price_per_million")
+        if input_ppm is None or output_ppm is None:
+            continue
+        try:
+            input_ppm, output_ppm = float(input_ppm), float(output_ppm)
+        except (TypeError, ValueError):
+            continue
+        prices[mid] = {"input": round(input_ppm, 4), "output": round(output_ppm, 4),
+                        "is_free": input_ppm == 0 and output_ppm == 0}
+    return prices
+
+async def _nanogpt_live_pricing() -> dict:
+    return await _cached_gateway_pricing(NANOGPT_PRICING_CACHE_FILE, _fetch_nanogpt_prices)
+
+
+HAIMAKER_PRICING_CACHE_FILE = Path(__file__).parent.parent / "haimaker_pricing_cache.json"
+
+async def _fetch_haimaker_prices() -> dict:
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get("https://api.haimaker.ai/public/model_hub")
+            if r.status_code != 200:
+                return {}
+            data = r.json()
+    except Exception:
+        return {}
+    prices = {}
+    for m in data:
+        mid = m.get("model_group")
+        try:
+            input_ppm = float(m.get("input_cost_per_token", 0)) * 1_000_000
+            output_ppm = float(m.get("output_cost_per_token", 0)) * 1_000_000
+        except (TypeError, ValueError):
+            continue
+        if mid:
+            prices[mid] = {"input": round(input_ppm, 4), "output": round(output_ppm, 4),
+                            "is_free": input_ppm == 0 and output_ppm == 0}
+    return prices
+
+async def _haimaker_live_pricing() -> dict:
+    return await _cached_gateway_pricing(HAIMAKER_PRICING_CACHE_FILE, _fetch_haimaker_prices)
+
+
+# perplexity has no confirmed public/unauthenticated live-pricing endpoint —
+# its new Router/Gateway API (which does report live prices) is private-
+# preview only as of this writing, and the legacy Sonar API this app calls
+# has no equivalent. Falls back to PRICING (from Perplexity's published
+# pricing page) for its picker instead of a live fetch.
+GATEWAY_LIVE_PRICING_FETCHERS = {
+    "openrouter": _openrouter_live_pricing,
+    "nanogpt": _nanogpt_live_pricing,
+    "haimaker": _haimaker_live_pricing,
+}
 
 
 CLOUD_MODEL_STALENESS_FILE = Path(__file__).parent.parent / "model_staleness_cache.json"
@@ -3543,12 +3705,16 @@ async def _validate_cloud_defaults() -> list:
     reliable way to auto-pick "the correct new flagship" from a bare model
     list, so a hit here just surfaces what needs a manual look, via a
     desktop notification and /api/models/staleness for the UI to show.
-    OpenRouter isn't checked here — it's already re-validated live on every
-    /api/models/cloud/details call via _openrouter_live_pricing()."""
+    The gateway providers (OpenRouter, NanoGPT, haimaker.ai, Perplexity)
+    aren't checked here — OpenRouter/NanoGPT/haimaker are already
+    re-validated live on every /api/models/cloud/details call via
+    GATEWAY_LIVE_PRICING_FETCHERS, and Perplexity's tiny fixed Sonar lineup
+    has no live endpoint to check against anyway (see PRICING["perplexity"]'s
+    comment)."""
     keys = _load_api_keys()
     stale = []
     for p, meta in CLOUD_PROVIDERS.items():
-        if p == "openrouter":
+        if p in GATEWAY_MODEL_CHOICES:
             continue
         key = keys.get(p)
         if not key:
@@ -3949,6 +4115,47 @@ async def _call_gemini(model: str, messages: list, system: str, api_key: str) ->
         return "".join(p.get("text", "") for p in parts), usage
 
 
+# base URL (no trailing slash, no /chat/completions) for every cloud provider
+# whose API is OpenAI-compatible — OpenRouter, NanoGPT, and haimaker.ai are
+# all multi-model gateways proxying hundreds of underlying models behind one
+# key; Perplexity is single-vendor but happens to share the same request/
+# response shape on its long-standing public Sonar endpoint. Anthropic/OpenAI/
+# Google keep their own native call functions above (different auth headers,
+# response shapes) rather than going through this table.
+OPENAI_COMPATIBLE_BASE_URLS = {
+    "openrouter": "https://openrouter.ai/api/v1",
+    "nanogpt": "https://nano-gpt.com/api/v1",
+    "haimaker": "https://api.haimaker.ai/v1",
+    "perplexity": "https://api.perplexity.ai",
+}
+
+async def _call_openai_compatible_cloud(provider: str, model: str, messages: list, system: str, api_key: str) -> tuple[str, dict]:
+    """Shared call path for every OPENAI_COMPATIBLE_BASE_URLS entry — same
+    request/response shape, only the base URL (and provider name, for the
+    cost ledger) differ."""
+    base_url = OPENAI_COMPATIBLE_BASE_URLS[provider]
+    async with httpx.AsyncClient(timeout=120) as client:
+        r = await client.post(
+            f"{base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "content-type": "application/json"},
+            json={
+                "model": model,
+                "messages": [{"role": "system", "content": system}] + _messages_for_cloud(messages, slim=len(messages) > 8),
+            },
+        )
+        if r.status_code != 200:
+            return f"{CLOUD_PROVIDERS.get(provider, {}).get('label', provider)} API error ({r.status_code}): {r.text[:500]}", {}
+        data = r.json()
+        u = data.get("usage", {}) or {}
+        usage = _usage_with_cost(
+            provider, model,
+            input_tokens=u.get("prompt_tokens", 0),
+            output_tokens=u.get("completion_tokens", 0),
+            cached_tokens=(u.get("prompt_tokens_details") or {}).get("cached_tokens", 0),
+        )
+        return data["choices"][0]["message"]["content"] or "", usage
+
+
 async def _call_cloud_model(model_ref: str, messages: list, system: str, slim_history: bool = False) -> tuple[str, dict]:
     """model_ref is "<provider>/<model>", e.g. "anthropic/claude-sonnet-4-6" —
     the same slash convention Ollama itself uses for community model tags
@@ -3971,28 +4178,8 @@ async def _call_cloud_model(model_ref: str, messages: list, system: str, slim_hi
         text, usage = await _call_openai(model, messages, system, api_key)
     elif provider == "google":
         text, usage = await _call_gemini(model, messages, system, api_key)
-    elif provider == "openrouter":
-        async with httpx.AsyncClient(timeout=120) as client:
-            r = await client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}", "content-type": "application/json"},
-                json={
-                    "model": model,
-                    "messages": [{"role": "system", "content": system}] + _messages_for_cloud(messages, slim=len(messages) > 8),
-                },
-            )
-            if r.status_code != 200:
-                return f"OpenRouter API error ({r.status_code}): {r.text[:500]}", {}
-            data = r.json()
-            u = data.get("usage", {}) or {}
-            usage = _usage_with_cost(
-                "openrouter", model,
-                input_tokens=u.get("prompt_tokens", 0),
-                output_tokens=u.get("completion_tokens", 0),
-                cached_tokens=(u.get("prompt_tokens_details") or {}).get("cached_tokens", 0),
-            )
-            _record_spend(model_ref, usage.get("cost", 0.0))
-            return data["choices"][0]["message"]["content"] or "", usage
+    elif provider in OPENAI_COMPATIBLE_BASE_URLS:
+        text, usage = await _call_openai_compatible_cloud(provider, model, messages, system, api_key)
     else:
         return f"Unknown cloud provider '{provider}'.", {}
     _record_spend(model_ref, usage.get("cost", 0.0))
@@ -5347,10 +5534,14 @@ async def router_teacher():
     }
 
 
-@app.post("/api/cost/summary")
+@app.get("/api/cost/summary")
 async def cost_summary():
     """Month-to-date cloud spend vs. the configured budget — powers the
-    '≈$X.XX used · N% left' line under the token count for paid models."""
+    '≈$X.XX used · N% left' line under the token count for paid models, and
+    the same figure on each configured Paid-section card. Was @app.post while
+    the frontend's refreshCostSummary() always called it with a bare fetch()
+    (GET) — every request 404'd/405'd silently (try/catch swallowed it), so
+    this line had never actually rendered."""
     return _cost_summary()
 
 
