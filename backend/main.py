@@ -5917,7 +5917,7 @@ def _test_imap_login(host: str, port: int, username: str, password: str) -> None
     """Raises with the real IMAP error on failure. Runs in a worker thread —
     imaplib is blocking — so the add-account request doesn't stall the event
     loop while it connects."""
-    with imaplib.IMAP4_SSL(host, port) as imap:
+    with imaplib.IMAP4_SSL(host, port, timeout=30) as imap:
         imap.login(username, password)
 
 @app.post("/api/email/accounts")
@@ -6022,7 +6022,7 @@ def _imap_login(imap: imaplib.IMAP4_SSL, account: dict, access_token: str = ""):
 
 def _imap_fetch(account: dict, folder: str, limit: int, access_token: str = "") -> list:
     messages = []
-    with imaplib.IMAP4_SSL(account["imap_host"], account.get("imap_port", 993)) as imap:
+    with imaplib.IMAP4_SSL(account["imap_host"], account.get("imap_port", 993), timeout=30) as imap:
         _imap_login(imap, account, access_token)
         imap.select(folder or "INBOX")
         status, data = imap.search(None, "ALL")
@@ -6058,7 +6058,7 @@ async def get_email_messages(account_id: str, folder: str = "INBOX", limit: int 
 
 
 def _imap_delete(account: dict, folder: str, uid: str, access_token: str = ""):
-    with imaplib.IMAP4_SSL(account["imap_host"], account.get("imap_port", 993)) as imap:
+    with imaplib.IMAP4_SSL(account["imap_host"], account.get("imap_port", 993), timeout=30) as imap:
         _imap_login(imap, account, access_token)
         imap.select(folder or "INBOX")
         imap.store(uid, "+FLAGS", "\\Deleted")
@@ -6078,7 +6078,7 @@ async def delete_email_message(account_id: str, uid: str, folder: str = "INBOX")
 def _imap_count_new(account: dict, last_seen_uid, access_token: str = "") -> tuple:
     """Cheap poll: just counts UIDs greater than the last one we saw, no
     fetch of message bodies. Returns (new_count, latest_uid_str)."""
-    with imaplib.IMAP4_SSL(account["imap_host"], account.get("imap_port", 993)) as imap:
+    with imaplib.IMAP4_SSL(account["imap_host"], account.get("imap_port", 993), timeout=30) as imap:
         _imap_login(imap, account, access_token)
         imap.select("INBOX")
         status, data = imap.search(None, "ALL")

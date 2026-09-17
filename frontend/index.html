@@ -1269,6 +1269,7 @@
           <div class="runner-toolbar">
             <h2>🤖 Agent Mode</h2>
             <span style="font-size:12px;color:var(--muted)">Autonomous agent with tool access: code execution, web search, file ops, image gen</span>
+            <button class="btn btn-secondary btn-sm" onclick="newAgentConversation()" style="margin-left:auto" title="Start a fresh agent task — past ones stay in the sidebar">+ New Agent Task</button>
           </div>
           <div id="agent-conversation" style="flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:12px;padding:12px 0">
             <div class="analyze-placeholder" id="agent-placeholder">
@@ -1861,6 +1862,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (e.target.classList.contains('conv-menu-btn')) {
       e.stopPropagation();
       toggleConvMenu(e.target.dataset.cid, e.target);
+    } else if (item.dataset.mode === 'agent') {
+      loadAgentConversation(item.dataset.cid);
     } else {
       loadConversation(item.dataset.cid);
     }
@@ -2381,6 +2384,10 @@ function newConversation() {
 
 function loadConversation(id) {
   currentConvId = id;
+  // The sidebar now lists Agent-tab conversations alongside Chat ones (both
+  // share this list), so a click here may be arriving from a different tab —
+  // switch back to Chat, matching loadAgentConversation()'s equivalent switch.
+  switchTab('chat');
   renderConvList();
   renderMessages();
   const conv = conversations.find(c => c.id === id);
@@ -2400,11 +2407,16 @@ function loadConversation(id) {
 function deleteConversation(id) {
   const conv = conversations.find(c => c.id === id);
   if (conv && !confirm(`Delete "${conv.title}"? This can't be undone.`)) return;
+  if (conv?.mode === 'agent' && id === currentAgentConvId && agentAbortController) {
+    alert('This agent task is still running — stop it before deleting.');
+    return;
+  }
   const stream = activeStreams.get(id);
   if (stream && stream.abortController) stream.abortController.abort();
   turnQueues.delete(id);
   conversations = conversations.filter(c => c.id !== id);
   if (currentConvId === id) { currentConvId = null; renderMessages(); }
+  if (currentAgentConvId === id) { currentAgentConvId = null; renderAgentMessages(); }
   saveConvs();
   renderConvList();
 }
@@ -2493,12 +2505,18 @@ function renderConvList() {
     list.innerHTML = '<div style="padding:12px;font-size:12px;color:var(--muted);text-align:center">No conversations yet</div>';
     return;
   }
-  list.innerHTML = conversations.map(c => `
-    <div class="conv-item ${c.id === currentConvId ? 'active' : ''}" data-cid="${c.id}">
-      <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${activeStreams.has(c.id) ? '<span class="conv-streaming-dot" title="Still working…"></span>' : '💬'} ${escHtml(c.title)}</span>
+  list.innerHTML = conversations.map(c => {
+    const isAgent = c.mode === 'agent';
+    const isActive = isAgent ? c.id === currentAgentConvId : c.id === currentConvId;
+    const icon = activeStreams.has(c.id) ? '<span class="conv-streaming-dot" title="Still working…"></span>'
+      : isAgent ? '🤖' : '💬';
+    return `
+    <div class="conv-item ${isActive ? 'active' : ''}" data-cid="${c.id}" data-mode="${isAgent ? 'agent' : 'chat'}">
+      <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${icon} ${escHtml(c.title)}</span>
       <button class="conv-menu-btn" data-cid="${c.id}" title="More">⋮</button>
     </div>
-  `).join('');
+  `;
+  }).join('');
 }
 
 function currentConv() { return conversations.find(c => c.id === currentConvId); }
@@ -4500,6 +4518,14 @@ function switchTab(name) {
   if (name === 'lessons' && !lessonsInitedOnce) { lessonsInitedOnce = true; loadLessons(); }
   if (name === 'routines' && !routinesInitedOnce) { routinesInitedOnce = true; loadRoutines(); }
   if (name === 'search' && !searchIndexCheckedOnce) { searchIndexCheckedOnce = true; checkSearchIndexStatus(); }
+  // Resume the most recent agent task on first visit, same as reopening any
+  // other established agent surface drops you back into your last session
+  // instead of a blank slate — only when nothing has been typed/run yet.
+  if (name === 'agent' && !agentTabInitedOnce) {
+    agentTabInitedOnce = true;
+    const mostRecent = conversations.find(c => c.mode === 'agent');
+    if (mostRecent) { currentAgentConvId = mostRecent.id; renderAgentMessages(); renderConvList(); }
+  }
 }
 
 // ── Code Runner ─────────────────────────────────────────────────────────────────
@@ -6074,8 +6100,57 @@ function fileCloseEditor() {
 // ── Agent Mode ────────────────────────────────────────────────────────────────
 
 let agentAbortController = null;
-let agentMessages = [];
+let currentAgentConvId = null;
 let agentTier = 'free';  // 'free' | 'paid'
+let agentTabInitedOnce = false;
+
+// Agent-tab conversations live in the SAME `conversations` array/conversations.json
+// as Chat — before this, Agent mode kept its whole history in a bare in-memory
+// array (agentMessages) that vanished on page reload and never showed up
+// anywhere, so there was no way to see or return to a past agent run. Every
+// established multi-turn agent surface (Claude Code sessions, ChatGPT/Claude.ai
+// threads, Cursor's agent chats) persists and lists its sessions the same way
+// it lists regular conversations — `mode: 'agent'` is the only thing that
+// distinguishes one of these entries from a Chat-tab conversation; everything
+// else (save/load/rename/delete/search/auto-title) is the exact same code path.
+function currentAgentConv() { return conversations.find(c => c.id === currentAgentConvId); }
+
+function newAgentConversation() {
+  const id = Date.now().toString() + '-a';
+  conversations.unshift({ id, title: 'New agent task', mode: 'agent', messages: [], agentHistory: [], created: Date.now() });
+  currentAgentConvId = id;
+  saveConvs();
+  renderConvList();
+  renderAgentMessages();
+  document.getElementById('agent-input')?.focus();
+}
+
+// Rebuilds the whole #agent-conversation panel from a stored conversation —
+// used when switching to a past agent session (and after each turn settles).
+// Reuses renderMessageGroups()/addCopyButtons()/addBubbleActions(), the exact
+// same rendering Chat uses, so a saved agent run reads identically to a live
+// one: tool rows open, Copy/Download on every bubble.
+function renderAgentMessages() {
+  const container = document.getElementById('agent-conversation');
+  if (!container) return;
+  const conv = currentAgentConv();
+  if (!conv || !conv.messages.length) {
+    container.innerHTML = `<div class="analyze-placeholder" id="agent-placeholder"><p>Enter a task below and the agent will use its tools to complete it autonomously.</p></div>`;
+    return;
+  }
+  container.innerHTML = renderMessageGroups(conv.messages);
+  addCopyButtons(); addBubbleActions();
+  container.querySelectorAll('pre code').forEach(el => hljs.highlightElement(el));
+  container.scrollTop = container.scrollHeight;
+}
+
+function loadAgentConversation(id) {
+  if (agentAbortController) { alert('An agent task is still running — stop it before switching tasks.'); return; }
+  currentAgentConvId = id;
+  switchTab('agent');
+  renderConvList();
+  renderAgentMessages();
+}
 
 // Resolves true after `ms`, or false immediately if `signal` aborts first
 // (Stop button pressed while runAgent() is waiting out a reconnect backoff).
@@ -6095,11 +6170,13 @@ async function runAgent() {
   const model = document.getElementById('model-select').value;
   if (!model) { alert('Select a model first'); return; }
 
-  const conv = document.getElementById('agent-conversation');
+  if (!currentAgentConvId) newAgentConversation();
+  const conv = currentAgentConv();
+  const container = document.getElementById('agent-conversation');
   const placeholder = document.getElementById('agent-placeholder');
   if (placeholder) placeholder.remove();
 
-  conv.innerHTML += `
+  container.innerHTML += `
     <div class="message user" style="max-width:900px;width:100%;margin-left:auto;flex-direction:row-reverse;display:flex;gap:12px;animation:fadeIn .2s ease">
       <div class="avatar user-av" style="width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0;border:1px solid var(--border);background:var(--accent2)">👤</div>
       <div class="bubble" style="max-width:calc(100% - 50px);background:rgba(31,111,235,.15);border-color:rgba(31,111,235,.3)">
@@ -6120,8 +6197,15 @@ async function runAgent() {
   agentAbortController = new AbortController();
   // Append, don't reset — resetting here wiped the agent's memory of
   // everything it had already done on every single message, which is why
-  // follow-ups like "have you done that?" got nowhere.
-  agentMessages.push({ role: "user", content: text });
+  // follow-ups like "have you done that?" got nowhere. Persisted the same
+  // way Chat tracks a turn: conv.messages is the rendered transcript,
+  // conv.agentHistory is the raw API-format context sent to the model.
+  conv.messages.push({ role: 'user', content: text });
+  if (conv.title === 'New agent task') { conv.title = text.slice(0, 40); conv.titleIsDefault = true; }
+  const turnStartIdx = conv.messages.length; // where THIS turn's own entries begin — see retry reset below
+  ensureAgentHistory(conv).push({ role: 'user', content: text });
+  saveConvs();
+  renderConvList();
 
   let fullText = '';
   const thinkingId = 'agent-thinking-' + Date.now();
@@ -6130,7 +6214,7 @@ async function runAgent() {
   // reads as one continuous block, with the running/typed narration always
   // last (at the bottom) instead of ending up pinned above the tool rows it
   // was actually based on.
-  conv.innerHTML += `
+  container.innerHTML += `
     <div class="message" style="max-width:900px;width:100%;display:flex;gap:12px;animation:fadeIn .2s ease" id="${thinkingId}">
       <div class="avatar ai-av" style="width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0;border:1px solid var(--border);background:var(--surface)">🤖</div>
       <div class="bubble" style="max-width:calc(100% - 50px)">
@@ -6157,9 +6241,9 @@ async function runAgent() {
   // had already done real work (tool calls, files edited) that the user had
   // no way to resume short of retyping the whole request. Retry with capped
   // backoff instead, indefinitely, until it reconnects or Stop is pressed —
-  // agentMessages already holds everything up to the last successful event,
-  // and /api/agent dedupes a resent user message, so replaying the same
-  // request is always safe.
+  // conv.agentHistory already holds everything up to the last successful
+  // event, and /api/agent dedupes a resent user message, so replaying the
+  // same request is always safe.
   retryLoop: while (true) {
   try {
     // Resolve teacher model if paid tier is selected
@@ -6177,7 +6261,7 @@ async function runAgent() {
     const res = await fetch(`${API}/api/agent`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: effectiveModel, message: text, conversation: agentMessages, tier: agentTier }),
+      body: JSON.stringify({ model: effectiveModel, message: text, conversation: conv.agentHistory, tier: agentTier }),
       signal: agentAbortController.signal
     });
 
@@ -6194,28 +6278,30 @@ async function runAgent() {
             fullText += data.content;
             const textEl = agentTextEl();
             if (textEl) textEl.innerHTML = renderMarkdown(fullText);
-            conv.scrollTop = conv.scrollHeight;
+            container.scrollTop = container.scrollHeight;
           } else if (data.type === 'tool_call') {
             fullText = ''; // that much of the response was just the tool-call fence, not real narration
+            conv.messages.push({ role: 'tool_call', name: data.name, arguments: data.arguments });
             const textEl = agentTextEl();
             if (textEl) {
               pendingToolRowId = 'agent-tool-row-' + Math.random().toString(36).slice(2);
               textEl.insertAdjacentHTML('beforebegin', renderToolRow({ name: data.name, arguments: data.arguments }, null, pendingToolRowId));
               textEl.innerHTML = '<div class="thinking"><span></span><span></span><span></span></div>';
             }
-            conv.scrollTop = conv.scrollHeight;
+            container.scrollTop = container.scrollHeight;
           } else if (data.type === 'tool_result') {
+            conv.messages.push({ role: 'tool_result', name: data.name, result: data.result });
             const row = pendingToolRowId ? document.getElementById(pendingToolRowId) : null;
             completeToolRow(row, data.result);
             pendingToolRowId = null;
-            conv.scrollTop = conv.scrollHeight;
+            container.scrollTop = container.scrollHeight;
           } else if (data.type === 'sudo_required') {
             const textEl = agentTextEl();
             if (textEl) textEl.insertAdjacentHTML('beforebegin', `
               <div class="tool-row" style="padding:6px 10px;display:flex;align-items:center;gap:6px;font-family:'JetBrains Mono','Fira Code',monospace;color:var(--muted)">
                 🔒 Waiting for your sudo password to run: <code>${escHtml(data.command)}</code>
               </div>`);
-            conv.scrollTop = conv.scrollHeight;
+            container.scrollTop = container.scrollHeight;
             handleSudoRequired(data);
           } else if (data.type === 'done') {
             receivedTerminalEvent = true;
@@ -6223,7 +6309,7 @@ async function runAgent() {
             // Adopt the server's authoritative conversation state — it
             // includes every tool call/result from this run, so the next
             // message actually has full context instead of starting blind.
-            if (data.conversation) agentMessages = data.conversation;
+            if (data.conversation) conv.agentHistory = data.conversation;
             if (data.usage) {
               const totalTokens = data.usage.prompt_eval_count + (data.usage.eval_count || 0);
               addToWeeklyTokenUsage(totalTokens);
@@ -6234,24 +6320,30 @@ async function runAgent() {
             receivedTerminalEvent = true;
             const textEl = agentTextEl();
             if (textEl) textEl.innerHTML = 'Error: ' + escHtml(data.content);
-            if (data.conversation) agentMessages = data.conversation;
+            if (data.conversation) conv.agentHistory = data.conversation;
           }
         } catch {}
       }
-      conv.scrollTop = conv.scrollHeight;
+      container.scrollTop = container.scrollHeight;
     }
 
     if (fullText) {
+      conv.messages.push({ role: 'assistant', content: fullText });
       const textEl = agentTextEl();
       if (textEl) {
         textEl.innerHTML = renderMarkdown(fullText);
         textEl.querySelectorAll('pre code').forEach(el => hljs.highlightElement(el));
       }
+      const bubbleEl = document.getElementById(thinkingId)?.querySelector('.bubble');
+      if (bubbleEl) bubbleEl.dataset.msgIdx = conv.messages.length - 1;
     } else if (receivedTerminalEvent) {
       // Turn ended right after a tool call with no further narration — drop
       // the stale dots instead of leaving them bouncing forever.
       agentTextEl()?.remove();
     }
+    saveConvs();
+    renderConvList();
+    maybeAutoTitle(conv.id);
     break retryLoop; // stream completed (success or a handled backend 'error' event) — don't retry those
   } catch (err) {
     if (err.name === 'AbortError') {
@@ -6277,10 +6369,12 @@ async function runAgent() {
     }
     // Reset this attempt's transient state — a retry replays the whole turn
     // from scratch server-side, so anything partially rendered (tool rows,
-    // partial narration) from the failed attempt is stale.
+    // partial narration, and any tool_call/tool_result already pushed into
+    // conv.messages) from the failed attempt is stale.
     fullText = '';
     pendingToolRowId = null;
     receivedTerminalEvent = false;
+    conv.messages.length = turnStartIdx;
     // Clear stale tool rows and narration only — replacing the whole bubble
     // would also wipe out its Copy/Download buttons.
     const bubble = document.getElementById(thinkingId)?.querySelector('.bubble');
