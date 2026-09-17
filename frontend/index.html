@@ -36,6 +36,7 @@
     --ai-bg:    #161b22;
     --danger:   #da3633;
     --warn:     #d29922;
+    --copper:   #B87333;
   }
 
   body {
@@ -59,7 +60,7 @@
     flex-shrink: 0;
   }
   header h1 { font-size: 16px; font-weight: 600; line-height: 1.2; }
-  header h1 span { color: var(--accent); }
+  header h1 span { color: var(--copper); }
   header h1 .byline { display: block; font-size: 10px; font-weight: 400; color: var(--muted); letter-spacing: .3px; }
   .header-right { margin-left: auto; display: flex; align-items: center; gap: 18px; }
   .status-group { display: flex; align-items: center; gap: 8px; }
@@ -219,7 +220,14 @@
   .tab.active { color: var(--text); border-bottom-color: var(--accent2); }
 
   /* ── Main Content ── */
-  .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; position: relative; }
+  /* Brand watermark — faint logo behind every tab's content */
+  .logo-watermark {
+    position: absolute; inset: 0; z-index: 0; display: flex;
+    align-items: center; justify-content: center; pointer-events: none; overflow: hidden;
+  }
+  .logo-watermark img { width: min(48%, 520px); opacity: .05; user-select: none; }
+  .main > *:not(.logo-watermark) { position: relative; z-index: 1; }
   .tab-panel { display: none; flex: 1; flex-direction: column; overflow: hidden; }
   .tab-panel.active { display: flex; }
 
@@ -835,7 +843,7 @@
 
 <header>
   <svg width="24" height="24" viewBox="0 0 24 24" fill="none" onclick="showAboutModal()" style="cursor:pointer" title="About AI Copper Maker">
-    <rect width="24" height="24" rx="6" fill="#238636"/>
+    <rect width="24" height="24" rx="6" fill="#B87333"/>
     <path d="M7 8h10M7 12h6M7 16h8" stroke="white" stroke-width="1.8" stroke-linecap="round"/>
   </svg>
   <h1>AI <span>Copper</span> Maker<span class="byline">A local AI coding studio — by CopperArch</span></h1>
@@ -904,6 +912,7 @@
 
   <!-- Main -->
   <div class="main">
+    <div class="logo-watermark"><img src="assets/logo.png" alt=""></div>
     <div id="update-banner" style="display:none;padding:8px 16px;background:rgba(35,134,54,.15);border-bottom:1px solid rgba(35,134,54,.3);font-size:13px;align-items:center;gap:10px"></div>
     <!-- Tabs -->
     <div class="tabs-row">
