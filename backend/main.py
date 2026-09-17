@@ -485,6 +485,7 @@ class AgentRequest(BaseModel):
     message: str
     conversation: list[dict] = []
     system: str = ""
+    tier: str = "free"  # "free" | "paid" — picks teacher model from config
 
 class SudoPasswordRequest(BaseModel):
     password: str = ""
@@ -2962,20 +2963,57 @@ async def execute_tool(name: str, args: dict, model: str = "", allow_subagents: 
 # ── Model Catalog ──────────────────────────────────────────────────────────────
 
 CATALOG = [
-    {"name": "qwen2.5-coder:7b",       "desc": "Fast coding assistant",                      "size_gb": 4.7,  "category": "coding",     "provider": "ollama"},
-    {"name": "qwen2.5-coder:14b",      "desc": "Best all-round coding model",                "size_gb": 9.0,  "category": "coding",     "provider": "ollama"},
-    {"name": "qwen2.5-coder:32b",      "desc": "Most capable coder",                         "size_gb": 19.0, "category": "coding",     "provider": "ollama"},
-    {"name": "deepseek-coder-v2:16b",  "desc": "Excellent reasoning + code generation",      "size_gb": 10.0, "category": "coding",     "provider": "ollama"},
-    {"name": "deepseek-coder:6.7b",    "desc": "Compact coder",                              "size_gb": 3.8,  "category": "coding",     "provider": "ollama"},
-    {"name": "codellama:13b",          "desc": "Meta's code model",                          "size_gb": 7.4,  "category": "coding",     "provider": "ollama"},
-    {"name": "huihui_ai/qwen2.5-coder-abliterate:14b", "desc": "Uncensored coding model (abliterated, no refusals)", "size_gb": 9.0, "category": "uncensored", "provider": "ollama"},
-    {"name": "mistral:7b",             "desc": "Fast European model",                         "size_gb": 4.1,  "category": "general",    "provider": "ollama"},
-    {"name": "llama3.1:8b",            "desc": "Meta mid-range",                             "size_gb": 4.7,  "category": "general",    "provider": "ollama"},
-    {"name": "llama3.3:70b",           "desc": "Meta large model",                           "size_gb": 43.0, "category": "general",    "provider": "ollama"},
-    {"name": "phi4:14b",               "desc": "Microsoft Phi-4",                            "size_gb": 9.1,  "category": "general",    "provider": "ollama"},
-    {"name": "llava:7b",               "desc": "Vision model for image analysis/gen",        "size_gb": 4.5,  "category": "vision",     "provider": "ollama"},
-    {"name": "llava:13b",              "desc": "Vision model, larger",                       "size_gb": 8.0,  "category": "vision",     "provider": "ollama"},
-    {"name": "minicpm-v:8b",           "desc": "Vision model",                               "size_gb": 5.5,  "category": "vision",     "provider": "ollama"},
+    {"name": "dagbs/qwen2.5-coder-14b-instruct-abliterated", "desc": "14B abliterated coding model — best all-round coding model, 9GB, fast inference", "size_gb": 9.0, "category": "coding", "provider": "ollama", "source": "local"},
+    {"name": "qwen2.5-coder:7b", "desc": "Fast coding assistant", "size_gb": 4.7, "category": "coding", "provider": "ollama", "source": "local"},
+    {"name": "qwen2.5-coder:32b", "desc": "Most capable coder", "size_gb": 19.0, "category": "coding", "provider": "ollama", "source": "local"},
+    {"name": "deepseek-coder-v2:16b", "desc": "Excellent reasoning + code generation", "size_gb": 10.0, "category": "coding", "provider": "ollama", "source": "local"},
+    {"name": "qwen2.5-coder:14b", "desc": "Best all-round coding model", "size_gb": 9.0, "category": "coding", "provider": "ollama", "source": "local"},
+    {"name": "codellama:13b", "desc": "Meta's code model", "size_gb": 7.4, "category": "coding", "provider": "ollama", "source": "local"},
+    {"name": "qwen3-coder:30b-a3b", "desc": "Qwen3 Coder 30B-A3B — excellent agentic coding", "size_gb": 5.5, "category": "coding", "provider": "ollama", "source": "local"},
+    {"name": "deepseek-coder:6.7b", "desc": "Compact coder", "size_gb": 3.8, "category": "coding", "provider": "ollama", "source": "local"},
+    {"name": "deepseek-r1:14b", "desc": "DeepSeek R1 14B — strong reasoning", "size_gb": 9.0, "category": "reasoning", "provider": "ollama", "source": "local"},
+    {"name": "deepseek-r1:7b", "desc": "DeepSeek R1 7B — distilled reasoning", "size_gb": 4.9, "category": "reasoning", "provider": "ollama", "source": "local"},
+    {"name": "satyam03/opdx-alpha:latest", "desc": "opdx-alpha — 8.5GB general assistant model, fast and capable", "size_gb": 8.5, "category": "general", "provider": "ollama", "source": "local"},
+    {"name": "llama3.3:70b", "desc": "Meta large model", "size_gb": 43.0, "category": "general", "provider": "ollama", "source": "local"},
+    {"name": "qwen3:32b", "desc": "Qwen3 32B — powerful reasoning", "size_gb": 19.0, "category": "general", "provider": "ollama", "source": "local"},
+    {"name": "phi4:14b", "desc": "Microsoft Phi-4", "size_gb": 9.1, "category": "general", "provider": "ollama", "source": "local"},
+    {"name": "qwen3:14b", "desc": "Qwen3 14B — strong reasoning + coding", "size_gb": 9.0, "category": "general", "provider": "ollama", "source": "local"},
+    {"name": "qwen3:8b", "desc": "Qwen3 8B — fast general assistant", "size_gb": 4.9, "category": "general", "provider": "ollama", "source": "local"},
+    {"name": "llama3.1:8b", "desc": "Meta mid-range", "size_gb": 4.7, "category": "general", "provider": "ollama", "source": "local"},
+    {"name": "mistral:7b", "desc": "Fast European model", "size_gb": 4.1, "category": "general", "provider": "ollama", "source": "local"},
+    {"name": "gemma2:2b-it", "desc": "Google Gemma 2 2B — fast assistant", "size_gb": 2.4, "category": "general", "provider": "ollama", "source": "local"},
+    {"name": "gemma3:1b-it", "desc": "Google Gemma 3 1B — lightweight assistant", "size_gb": 1.4, "category": "general", "provider": "ollama", "source": "local"},
+    {"name": "gemma3:12b-it", "desc": "Google Gemma 3 12B — strong multimodal", "size_gb": 10.0, "category": "vision", "provider": "ollama", "source": "local"},
+    {"name": "llava:13b", "desc": "Vision model, larger", "size_gb": 8.0, "category": "vision", "provider": "ollama", "source": "local"},
+    {"name": "minicpm-v:8b", "desc": "Vision model", "size_gb": 5.5, "category": "vision", "provider": "ollama", "source": "local"},
+    {"name": "llava:7b", "desc": "Vision model for image analysis/gen", "size_gb": 4.5, "category": "vision", "provider": "ollama", "source": "local"},
+    {"name": "gemma3:4b-it", "desc": "Google Gemma 3 4B — multimodal assistant", "size_gb": 4.5, "category": "vision", "provider": "ollama", "source": "local"},
+    {"name": "stable-diffusion-xl-base-1.0", "desc": "Stable Diffusion XL image generation", "size_gb": 6.5, "category": "image-gen", "provider": "ollama", "source": "local"},
+    {"name": "flux-schnell", "desc": "Flux Schnell — fast image generation", "size_gb": 4.5, "category": "image-gen", "provider": "ollama", "source": "local"},
+    {"name": "z-ai/glm-5.2:free", "desc": "Large-scale reasoning model from Z.ai. Supports text input/output with 1M-token context window. Best for long-horizon agent workflows, project-level software engineering, and complex reasoning tasks.", "size_gb": None, "category": "coding", "provider": "openrouter", "source": "online", "hf_id": "z-ai/glm-5.2", "rank": 1, "good_at": ["reasoning", "agentic workflows", "software engineering", "long-context tasks"], "context_length": 32768},
+    {"name": "thinkingmachines/inkling:free", "desc": "Open-weight multimodal MoE model with 41B active parameters out of 975B total. Designed for general-purpose reasoning, coding, agentic and tool-use systems.", "size_gb": None, "category": "general", "provider": "openrouter", "source": "online", "hf_id": "thinkingmachines/inkling", "rank": 2, "good_at": ["coding", "reasoning", "agentic workflows", "multimodal", "general-purpose"], "context_length": 1048576},
+    {"name": "openrouter/free", "desc": "Router that selects free models at random from available free models. Smartly filters for models supporting features needed (image understanding, tool calling, structured outputs).", "size_gb": None, "category": "general", "provider": "openrouter", "source": "online", "hf_id": "openrouter/free", "rank": 3, "good_at": ["general use", "multimodal"], "context_length": 200000},
+    {"name": "poolside/laguna-xs-2.1:free", "desc": "Latest coding agent model in the 33B-A3B category. Combines speed and coding performance for agentic workflows.", "size_gb": None, "category": "coding", "provider": "openrouter", "source": "online", "hf_id": "poolside/laguna-xs-2.1", "rank": 4, "good_at": ["coding", "agentic workflows"], "context_length": 262144},
+    {"name": "poolside/laguna-s-2.1:free", "desc": "Latest coding agent model from Poolside. 118B total parameters with 8B active, scoring 70.2% on Terminal-Bench 2.1.", "size_gb": None, "category": "coding", "provider": "openrouter", "source": "online", "hf_id": "poolside/laguna-s-2.1", "rank": 5, "good_at": ["coding", "agentic workflows", "terminal tasks"], "context_length": 262144},
+    {"name": "cohere/north-mini-code:free", "desc": "Cohere's first agentic coding model and debut of the North family. Sparse MoE with 30B total parameters and 3B active, optimized for agentic coding.", "size_gb": None, "category": "coding", "provider": "openrouter", "source": "online", "hf_id": "cohere/north-mini-code", "rank": 6, "good_at": ["coding", "agentic workflows"], "context_length": 256000},
+    {"name": "nvidia/nemotron-3.5-lightning:free", "desc": "Open MoE model from NVIDIA with 3B active parameters out of 30B total. Suited for high-throughput agentic workloads and specialized tasks.", "size_gb": None, "category": "coding", "provider": "openrouter", "source": "online", "hf_id": "nvidia/nemotron-3.5-lightning", "rank": 7, "good_at": ["agentic workflows", "high-throughput"], "context_length": 1000000},
+    {"name": "nvidia/nemotron-3-super-120b-a12b:free", "desc": "120B-parameter open hybrid MoE model, activating just 12B parameters. Built on hybrid Mamba-Transformer architecture for complex multi-agent applications.", "size_gb": None, "category": "reasoning", "provider": "openrouter", "source": "online", "hf_id": "nvidia/nemotron-3-super-120b-a12b", "rank": 8, "good_at": ["agentic workflows", "multi-agent"], "context_length": 262144},
+    {"name": "thinkingmachines/inkling-small:free", "desc": "Open-weight multimodal MoE model with 12B active parameters out of 276B total. Positioned as the smaller, more efficient member of the Inkling family.", "size_gb": None, "category": "general", "provider": "openrouter", "source": "online", "hf_id": "thinkingmachines/inkling-small", "rank": 9, "good_at": ["multimodal", "general-purpose"], "context_length": 1048576},
+    {"name": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", "desc": "30B-A3B open multimodal model designed as perception and context sub-agent in enterprise agent systems. Accepts text, image, video, and audio.", "size_gb": None, "category": "vision", "provider": "openrouter", "source": "online", "hf_id": "nvidia/nemotron-3-nano-omni-30b-a3b", "rank": 10, "good_at": ["agentic workflows", "multimodal/vision", "enterprise"], "context_length": 256000},
+    {"name": "nvidia/nemotron-3-ultra-550b-a55b:free", "desc": "Open frontier-reasoning and orchestration model with 55B active parameters out of 550B total. Hybrid Transformer-Mamba MoE architecture.", "size_gb": None, "category": "reasoning", "provider": "openrouter", "source": "online", "hf_id": "nvidia/nemotron-3-ultra-550b-a55b", "rank": 11, "good_at": ["reasoning", "frontier tasks"], "context_length": 1000000},
+    {"name": "liquid/lfm-2.5-2.6b:free", "desc": "Compact reasoning model from Liquid AI. Suited for agent workflows, data extraction, RAG, and long-context processing.", "size_gb": None, "category": "general", "provider": "openrouter", "source": "online", "hf_id": "liquid/lfm-2.5-2.6b", "rank": 12, "good_at": ["agentic workflows", "data extraction", "RAG"], "context_length": 65536},
+    {"name": "nex-agi/nex-n2.5-mini:free", "desc": "Agentic model built to turn goals into working, verified outcomes. Core strength is agentic coding within a visual feedback loop.", "size_gb": None, "category": "coding", "provider": "openrouter", "source": "online", "hf_id": "nex-agi/nex-n2.5-mini", "rank": 13, "good_at": ["coding", "agentic workflows", "visual feedback"], "context_length": 262144},
+    {"name": "nex-agi/nex-n2.5-pro:free", "desc": "Agentic model built to turn goals into working, verified outcomes. Core strength is agentic coding within a visual feedback loop.", "size_gb": None, "category": "coding", "provider": "openrouter", "source": "online", "hf_id": "nex-agi/nex-n2.5-pro", "rank": 14, "good_at": ["coding", "agentic workflows", "visual feedback"], "context_length": 262144},
+    {"name": "inclusionai/ling-3.0-flash-vl:free", "desc": "Ling 3.0 Flash VL builds on Ling 3.0 Flash (124B total / 5.5B active MoE), strengthening language capabilities with native visual perception.", "size_gb": None, "category": "vision", "provider": "openrouter", "source": "online", "hf_id": "inclusionai/ling-3.0-flash-vl", "rank": 15, "good_at": ["general use", "multimodal", "vision"], "context_length": 262144},
+    {"name": "inclusionai/ling-3.0-flash-fin:free", "desc": "Finance-focused MoE model from InclusionAI built on Ling 3.0 Flash. Designed for real-world investment analysis and financial tasks.", "size_gb": None, "category": "general", "provider": "openrouter", "source": "online", "hf_id": "inclusionai/ling-3.0-flash-fin", "rank": 16, "good_at": ["finance", "investment analysis"], "context_length": 262144},
+    {"name": "inclusionai/ling-3.0-flash-sante:free", "desc": "Health and medicine-focused MoE model from InclusionAI built on Ling 3.0 Flash. Designed for medical and health analysis tasks.", "size_gb": None, "category": "general", "provider": "openrouter", "source": "online", "hf_id": "inclusionai/ling-3.0-flash-sante", "rank": 17, "good_at": ["health", "medicine", "medical analysis"], "context_length": 262144},
+    {"name": "dots-studio/dots-3-note-preview:free", "desc": "Open-weight MoE model from Dots Studio with 16B active parameters out of 280B total. Lightest model in the Dots 3 family.", "size_gb": None, "category": "general", "provider": "openrouter", "source": "online", "hf_id": "dots-studio/dots-3-note-preview", "rank": 18, "good_at": ["general use", "long-context"], "context_length": 512000},
+    {"name": "stealth/union-alpha", "desc": "Multimodal model built for research, coding, and agentic workflows, delivering frontier-level performance across general-purpose tasks.", "size_gb": None, "category": "coding", "provider": "openrouter", "source": "online", "hf_id": "stealth/union-alpha", "rank": 19, "good_at": ["coding", "research", "agentic workflows", "multimodal"], "context_length": 262144},
+    {"name": "google/gemma-4-26b-a4b-it:free", "desc": "MoE model from Google DeepMind. Despite 25.2B total parameters, only 3.8B activate per token — delivering near-31B quality at half the compute.", "size_gb": None, "category": "general", "provider": "openrouter", "source": "online", "hf_id": "google/gemma-4-26b-a4b-it", "rank": 20, "good_at": ["general use", "reasoning"], "context_length": 262144},
+    {"name": "google/gemma-4-31b-it:free", "desc": "30.7B dense multimodal model from Google DeepMind supporting text and image input with text output. Features 256K context window and configurable thinking.", "size_gb": None, "category": "general", "provider": "openrouter", "source": "online", "hf_id": "google/gemma-4-31b-it", "rank": 21, "good_at": ["reasoning", "multimodal", "vision"], "context_length": 262144},
+    {"name": "google/lyria-3-pro-preview", "desc": "Full-length song generation model from Google's Lyria family. Generates high-quality 48kHz audio. Per-song pricing applies.", "size_gb": None, "category": "audio", "provider": "openrouter", "source": "online", "hf_id": "google/lyria-3-pro-preview", "rank": 22, "good_at": ["audio/music generation"], "context_length": 1048576},
+    {"name": "google/lyria-3-clip-preview", "desc": "30-second music clip generation from Google's Lyria family. Generates high-quality 48kHz audio clips. Per-clip pricing applies.", "size_gb": None, "category": "audio", "provider": "openrouter", "source": "online", "hf_id": "google/lyria-3-clip-preview", "rank": 23, "good_at": ["audio/music generation"], "context_length": 1048576},
+    {"name": "nvidia/nemotron-3.5-content-safety:free", "desc": "Compact 4B-parameter multimodal guardrail model from NVIDIA, fine-tuned from Google Gemma-3-4B. Moderates inputs and responses for LLMs and VLMs.", "size_gb": None, "category": "general", "provider": "openrouter", "source": "online", "hf_id": "nvidia/nemotron-3.5-content-safety", "rank": 24, "good_at": ["content safety", "moderation", "multimodal"], "context_length": 128000}
 ]
 
 @app.get("/api/models/catalog")
@@ -4326,7 +4364,7 @@ async def lsp_status():
 
 
 async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str = "",
-                       allow_sudo: bool = True, allow_subagents: bool = True):
+                       allow_sudo: bool = True, allow_subagents: bool = True, tier: str = "free"):
     """Runs the tool-use agent loop, yielding structured event dicts. Shared by
     the interactive /api/agent endpoint (streamed to the browser), scheduled
     routine execution (collected into a final result), and the `task` tool's
@@ -4335,7 +4373,13 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
     tool calls/results) for the next turn. `allow_sudo=False` turns the sudo
     human-gate into a plain refusal — used by subagents, which must never put
     a password prompt in front of the user with no visible step to attribute
-    it to."""
+    it to.
+    tier="paid" swaps in the paid frontier teacher model from config."""
+    # Resolve teacher model if a paid tier is requested
+    if tier == "paid":
+        paid_model = _get_teacher_model("paid")
+        if paid_model:
+            model = paid_model
     response_text = ""
     usage = None
     # Auto-skill discovery: match the incoming request against the skill/
@@ -4560,7 +4604,7 @@ async def agent_loop(req: AgentRequest):
         conv.append({"role": "user", "content": req.message})
 
     async def stream():
-        async for event in _agent_turns(req.model, conv, system=req.system):
+        async for event in _agent_turns(req.model, conv, system=req.system, tier=req.tier):
             yield json.dumps(event) + "\n"
 
     return StreamingResponse(stream(), media_type="application/x-ndjson")
@@ -4952,7 +4996,7 @@ async def save_conversations(request: Request):
 def load_config() -> dict:
     if CONFIG_FILE.exists():
         return json.loads(CONFIG_FILE.read_text())
-    return {"save_dir": DEFAULT_SAVE_DIR}
+    return {"save_dir": DEFAULT_SAVE_DIR, "teacher_model": "", "teacher_tiers": {"free": "", "paid": ""}}
 
 def write_config(cfg: dict):
     try:
@@ -4970,7 +5014,7 @@ async def set_config(cfg: dict):
         raise HTTPException(422, detail="Expected a JSON object")
     existing = load_config()
     # cloud_budget is the monthly paid-model spend ceiling; validate it as a
-    # positive number (or null to disable the meter) before it lands.
+    # positive number (or None to disable the meter) before it lands.
     if "cloud_budget" in cfg:
         try:
             v = cfg["cloud_budget"]
@@ -4978,13 +5022,50 @@ async def set_config(cfg: dict):
                 raise ValueError
             cfg["cloud_budget"] = None if v is None else float(v)
         except (TypeError, ValueError):
-            raise HTTPException(422, detail="cloud_budget must be a non-negative number or null")
+            raise HTTPException(422, detail="cloud_budget must be a non-negative number or None")
     existing.update(cfg)
+    # teacher_tiers: free/paid model slugs for the tiered teacher system
+    if "teacher_tiers" in cfg:
+        tiers = cfg["teacher_tiers"]
+        if isinstance(tiers, dict):
+            for t in ("free", "paid"):
+                if t in tiers and not isinstance(tiers[t], str):
+                    raise HTTPException(422, detail=f"teacher_tiers.{t} must be a string")
     write_config(existing)
     return {"ok": True}
 
 
-@app.get("/api/cost/summary")
+def _get_teacher_model(tier: str = "free") -> str:
+    """Return the teacher model slug for the given tier from config.
+    Falls back to the default_model if no teacher_tiers config exists."""
+    cfg = load_config()
+    tiers = cfg.get("teacher_tiers", {})
+    model = tiers.get(tier, "") or cfg.get("teacher_model", "")
+    if not model:
+        model = cfg.get("default_model", "")
+    return model
+
+
+@app.post("/api/router/escalate")
+async def router_escalate(req: dict):
+    """Return the appropriate teacher model based on tier.
+    Body: {"tier": "free" | "paid"} — returns {"model": <slug>, "tier": <tier>, "configured": bool}"""
+    tier = req.get("tier", "free")
+    model = _get_teacher_model(tier)
+    return {"model": model, "tier": tier, "configured": bool(model)}
+
+
+@app.get("/api/router/teacher")
+async def router_teacher():
+    """Return current teacher model configuration."""
+    cfg = load_config()
+    return {
+        "teacher_model": cfg.get("teacher_model", ""),
+        "teacher_tiers": cfg.get("teacher_tiers", {"free": "", "paid": ""}),
+    }
+
+
+@app.post("/api/cost/summary")
 async def cost_summary():
     """Month-to-date cloud spend vs. the configured budget — powers the
     '≈$X.XX used · N% left' line under the token count for paid models."""
@@ -6514,8 +6595,12 @@ async def _register_builtin_skills():
 
 # Import preference order — first repo to define a skill name wins, so the
 # focused collections take precedence over the big aggregates.
-_VENDOR_ORDER = ["agent-skills", "superpowers", "skills", "marketingskills",
-                 "scientific-agent-skills", "awesome-llm-apps", "awesome-claude-skills"]
+_VENDOR_ORDER = ["agent-skills", "superpowers", "marketingskills", "nvidia-skills",
+                 "scientific-agent-skills", "awesome-llm-apps", "awesome-claude-skills",
+                 "wondelai-skills", "browser-act-skills", "gsap-skills", "expo-skills",
+                 "finance-skills", "openskills", "ai-marketing-skills",
+                 "supabase-agent-skills", "binance-skills-hub", "agentHack-skills",
+                 "heckit"]
 
 def _parse_skill_md(path: Path):
     """Tolerant Claude-skills frontmatter parser: name/description when the

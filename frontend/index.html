@@ -262,15 +262,16 @@
   .avatar.user-av { background: var(--accent2); }
   .avatar.ai-av { background: var(--surface); }
 
-  .bubble {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 12px 16px;
-    max-width: calc(100% - 50px);
-    line-height: 1.6;
-    font-size: 14px;
-  }
+.bubble {
+     background: var(--surface);
+     border: 1px solid var(--border);
+     border-radius: 12px;
+     padding: 12px 16px;
+     max-width: calc(100% - 50px);
+     line-height: 1.6;
+     font-size: 14px;
+     position: relative;
+   }
   .message.user .bubble {
     background: rgba(31,111,235,.15);
     border-color: rgba(31,111,235,.3);
@@ -294,17 +295,38 @@
     position: relative;
   }
   .bubble pre code { font-size: 13px; padding: 14px !important; }
-  .pre-actions {
-    position: absolute; top: 6px; right: 8px; display: flex; gap: 6px;
-    opacity: 0; transition: opacity .2s;
-  }
-  .bubble pre:hover .pre-actions { opacity: 1; }
-  .pre-actions button {
-    background: rgba(255,255,255,.1); border: 1px solid rgba(255,255,255,.15);
-    color: #fff; border-radius: 4px; padding: 2px 8px;
-    font-size: 11px; cursor: pointer;
-  }
-  .pre-actions button:hover { background: rgba(255,255,255,.2); }
+.pre-actions {
+     position: absolute; top: 6px; right: 8px; display: flex; gap: 6px;
+     opacity: 0; transition: opacity .2s;
+   }
+   .bubble pre:hover .pre-actions { opacity: 1; }
+   .pre-actions button {
+     background: rgba(255,255,255,.1); border: 1px solid rgba(255,255,255,.15);
+     color: #fff; border-radius: 4px; padding: 2px 8px;
+     font-size: 11px; cursor: pointer;
+   }
+   .pre-actions button:hover { background: rgba(255,255,255,.2); }
+
+/* Bubble-level actions (copy/download entire AI response) */
+    .bubble-actions {
+      position: absolute; bottom: 6px; right: 8px; display: flex; gap: 4px;
+      opacity: 1;
+    }
+    .bubble-actions button {
+      background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.12);
+      color: var(--muted); border-radius: 4px; padding: 2px 7px;
+      font-size: 11px; cursor: pointer; transition: all .15s;
+    }
+    .bubble-actions button:hover {
+      background: rgba(255,255,255,.15); color: #fff;
+      border-color: rgba(255,255,255,.25);
+    }
+    .bubble-actions .action-download { color: #4ade80; }
+    .bubble-actions .action-download:hover { background: rgba(74,222,128,.15); color: #4ade80; }
+
+   .bubble {
+     padding-bottom: 24px;
+   }
 
   /* Tool-use rows — nested inside the same reply bubble as the narration
      around them (Claude-style: a small collapsed row per tool call, inline,
@@ -1254,11 +1276,13 @@
             </div>
           </div>
           <div class="chat-input-area" style="border-top-color:var(--border)">
-            <div class="input-row">
-              <textarea id="agent-input" placeholder="Describe what you want the agent to do... (Shift+Enter for new line)" rows="2" style="flex:1;resize:none;min-height:44px;max-height:120px;padding:10px 14px;border-radius:8px;font-size:14px;font-family:inherit;background:var(--bg);border:1px solid var(--border);color:var(--text)"></textarea>
-              <button class="btn btn-accent" id="agent-run-btn" onclick="runAgent()" style="height:44px">▶ Run Agent</button>
-              <button class="btn btn-secondary" id="agent-stop-btn" onclick="stopAgent()" style="display:none">■ Stop</button>
-            </div>
+<div class="input-row">
+               <textarea id="agent-input" placeholder="Describe what you want the agent to do... (Shift+Enter for new line)" rows="2" style="flex:1;resize:none;min-height:44px;max-height:120px;padding:10px 14px;border-radius:8px;font-size:14px;font-family:inherit;background:var(--bg);border:1px solid var(--border);color:var(--text)"></textarea>
+               <span id="agent-tier-indicator" style="font-size:11px;color:var(--muted);align-self:center;white-space:nowrap">free</span>
+               <button class="btn btn-sm" id="agent-tier-btn" onclick="toggleAgentTier()" style="height:44px;font-size:11px">⚡ free</button>
+               <button class="btn btn-accent" id="agent-run-btn" onclick="runAgent()" style="height:44px">▶ Run Agent</button>
+               <button class="btn btn-secondary" id="agent-stop-btn" onclick="stopAgent()" style="display:none">■ Stop</button>
+             </div>
           </div>
         </div>
       </div>
@@ -2329,19 +2353,20 @@ function saveConvs() {
 }
 
 function newConversation() {
-  const id = Date.now().toString();
-  conversations.unshift({ id, title: 'New Chat', messages: [], created: Date.now() });
-  currentConvId = id;
-  saveConvs();
-  renderConvList();
-  renderMessages();
-  document.getElementById('empty-state').style.display = 'flex';
-  setStreamingUI(false); // brand new conversation, can't already be streaming
-  setChatStatus(id, false);
-  document.getElementById('turn-token-count').textContent = '';
-  updateQueueIndicator(id);
-  closeCodeEditor();
-}
+   const id = Date.now().toString();
+   conversations.unshift({ id, title: 'New Chat', messages: [], created: Date.now() });
+   currentConvId = id;
+   switchTab('chat');
+   saveConvs();
+   renderConvList();
+   renderMessages();
+   document.getElementById('empty-state').style.display = 'flex';
+   setStreamingUI(false); // brand new conversation, can't already be streaming
+   setChatStatus(id, false);
+   document.getElementById('turn-token-count').textContent = '';
+   updateQueueIndicator(id);
+   closeCodeEditor();
+ }
 
 function loadConversation(id) {
   currentConvId = id;
@@ -2509,7 +2534,7 @@ function renderMessages() {
     return;
   }
   container.innerHTML = renderMessageGroups(conv.messages);
-  addCopyButtons();
+  addCopyButtons(); addBubbleActions();
   container.querySelectorAll('pre code').forEach(el => hljs.highlightElement(el));
   // If this conversation is still streaming in the background, restore its
   // in-progress bubble — sendMessage() only creates one at send time, but
@@ -2713,13 +2738,18 @@ function renderMessageGroups(messages) {
           i++; // stray tool_result with no preceding call — shouldn't happen, skip it
         }
       }
-      const idxAttr = assistantIdx >= 0 ? ` data-msg-idx="${assistantIdx}"` : '';
-      html.push(`
-        <div class="message">
-          <div class="avatar ai-av">🤖</div>
-          <div class="bubble"${idxAttr}>${toolsHtml}<div class="agent-turn-text">${assistantMsg ? renderMarkdown(assistantMsg.content) : ''}</div></div>
-        </div>
-      `);
+const idxAttr = assistantIdx >= 0 ? ` data-msg-idx="${assistantIdx}"` : '';
+       const bubbleActions = assistantIdx >= 0 ? `
+         <div class="bubble-actions">
+           <button data-action="copy-bubble" title="Copy response">📋 Copy</button>
+           <button data-action="download-bubble" title="Download as .md">⬇ Download</button>
+         </div>` : '';
+       html.push(`
+         <div class="message">
+           <div class="avatar ai-av">🤖</div>
+           <div class="bubble"${idxAttr}>${bubbleActions}${toolsHtml}<div class="agent-turn-text">${assistantMsg ? renderMarkdown(assistantMsg.content) : ''}</div></div>
+         </div>
+       `);
     } else {
       html.push(renderMsg(messages[i], i));
       i++;
@@ -2749,13 +2779,18 @@ function renderMsg(msg, idx) {
   // data-msg-idx lets addCopyButtons() offer an Edit button on assistant code
   // blocks — it maps a rendered <pre> back to conv.messages[idx] so edits can
   // be written back into the stored conversation.
-  const idxAttr = !isUser ? ` data-msg-idx="${idx}"` : '';
-  return `
-    <div class="message ${isUser ? 'user' : ''}">
-      <div class="avatar ${isUser ? 'user-av' : 'ai-av'}">${isUser ? '👤' : '🤖'}</div>
-      <div class="bubble"${idxAttr}>${attachmentsHtml}${content}</div>
-    </div>
-  `;
+const idxAttr = !isUser ? ` data-msg-idx="${idx}"` : '';
+   const bubbleActions = !isUser ? `
+     <div class="bubble-actions">
+       <button data-action="copy-bubble" title="Copy response">📋 Copy</button>
+       <button data-action="download-bubble" title="Download as .md">⬇ Download</button>
+     </div>` : '';
+   return `
+     <div class="message ${isUser ? 'user' : ''}">
+       <div class="avatar ${isUser ? 'user-av' : 'ai-av'}">${isUser ? '👤' : '🤖'}</div>
+       <div class="bubble"${idxAttr}>${bubbleActions}${attachmentsHtml}${content}</div>
+     </div>
+   `;
 }
 
 function renderAttachmentPill(f) {
@@ -2800,10 +2835,45 @@ function addCopyButtons() {
       actions.appendChild(editBtn);
     }
 
-    pre.style.position = 'relative';
-    pre.appendChild(actions);
-  });
-}
+pre.style.position = 'relative';
+     pre.appendChild(actions);
+   });
+ }
+
+ function addBubbleActions() {
+   document.querySelectorAll('.message:not(.user) .bubble').forEach(bubble => {
+     const copyBtn = bubble.querySelector('[data-action="copy-bubble"]');
+     const downloadBtn = bubble.querySelector('[data-action="download-bubble"]');
+     if (!copyBtn && !downloadBtn) return;
+     const msgIdx = bubble.dataset.msgIdx;
+     const conv = currentConv();
+     const msg = msgIdx !== undefined ? conv?.messages[parseInt(msgIdx, 10)] : null;
+     const text = msg?.content || bubble.querySelector('.agent-turn-text')?.textContent || bubble.textContent.replace(/📋 Copy|⬇ Download/g, '').trim();
+     const escaped = text.replace(/<[^>]*>/g, ''); // strip markdown HTML
+
+     if (copyBtn) {
+       copyBtn.onclick = e => {
+         e.stopPropagation();
+         navigator.clipboard.writeText(escaped).then(() => {
+           copyBtn.textContent = '✅ Copied';
+           setTimeout(() => copyBtn.textContent = '📋 Copy', 1500);
+         }).catch(() => alert('Could not copy to clipboard.'));
+       };
+     }
+     if (downloadBtn) {
+       downloadBtn.onclick = e => {
+         e.stopPropagation();
+         const blob = new Blob([escaped], { type: 'text/markdown' });
+         const url = URL.createObjectURL(blob);
+         const a = document.createElement('a');
+         a.href = url;
+         a.download = `response-${msgIdx !== undefined ? msgIdx : Date.now()}.md`;
+         document.body.appendChild(a); a.click(); a.remove();
+         URL.revokeObjectURL(url);
+       };
+     }
+   });
+ }
 
 function sendQuick(text) {
   if (!currentConvId) newConversation();
@@ -3223,7 +3293,7 @@ async function runNextTurn(convId) {
     const textEl = textElIfViewing();
     if (!textEl) return;
     textEl.innerHTML = streamState.fullText ? renderMarkdown(streamState.fullText) : '<div class="thinking"><span></span><span></span><span></span></div>';
-    addCopyButtons();
+    addCopyButtons(); addBubbleActions();
     const container = document.getElementById('chat-messages');
     container.scrollTop = container.scrollHeight;
   }
@@ -3367,7 +3437,7 @@ async function runNextTurn(convId) {
       // index right away, without needing a full renderMessages() re-render.
       bubbleEl.dataset.msgIdx = conv.messages.length - 1;
       textEl.innerHTML = renderMarkdown(streamState.fullText);
-      addCopyButtons();
+      addCopyButtons(); addBubbleActions();
       bubbleEl.querySelectorAll('pre code').forEach(el => hljs.highlightElement(el));
       document.getElementById('chat-messages').scrollTop = document.getElementById('chat-messages').scrollHeight;
     }
@@ -4004,14 +4074,28 @@ function renderModelsTab() {
       : emptyNote('No uncensored models match — try "Search Online" below for abliterated variants.');
   }
 
-  else if (catalogFilter === 'free') {
-    const rows = catalog.filter(c => c.category !== 'uncensored');
-    const filtered = rows.filter(r => matchesSearch(r.name, r.desc));
-    html += sectionTitle('🆓', 'Free', 'open-weight models — free to download, free to run, yours forever');
-    html += filtered.length
-      ? filtered.map(card).join('')
-      : emptyNote('No catalog models match your search.');
-  }
+else if (catalogFilter === 'free') {
+     const rows = catalog.filter(c => c.category !== 'uncensored');
+     const filtered = rows.filter(r => matchesSearch(r.name, r.desc));
+     const localRows = filtered.filter(r => r.source === 'local' || r.provider === 'ollama');
+     const onlineRows = filtered.filter(r => r.source === 'online' || r.provider === 'openrouter');
+     html += sectionTitle('🆓', 'Free', 'open-weight models — free to download, free to run, yours forever');
+     // Local Install subsection
+     if (localRows.length) {
+       html += `<h3 class="models-section-title">📥 Local Install <span>free to download, run locally on Ollama — no API key needed</span></h3>`;
+       html += localRows.map(card).join('');
+     }
+     // Online subsection
+     if (onlineRows.length) {
+       html += `<h3 class="models-section-title">☁️ Online Free <span>free via OpenRouter / cloud providers — need an API key</span></h3>`;
+       html += onlineRows.map(card).join('');
+     }
+     if (!filtered.length) {
+       html += emptyNote('No catalog models match your search.');
+     } else if (!localRows.length && !onlineRows.length) {
+       html += emptyNote('No free models match your search.');
+     }
+   }
 
   else if (catalogFilter === 'paid') {
     html += sectionTitle('💳', 'Paid', 'cloud providers — metered per million tokens, budget-capped');
@@ -5931,6 +6015,7 @@ function fileCloseEditor() {
 
 let agentAbortController = null;
 let agentMessages = [];
+let agentTier = 'free';  // 'free' | 'paid'
 
 async function runAgent() {
   const input = document.getElementById('agent-input');
@@ -5983,10 +6068,22 @@ async function runAgent() {
   let wasAborted = false;
 
   try {
+    // Resolve teacher model if paid tier is selected
+    let effectiveModel = model;
+    if (agentTier === 'paid') {
+      try {
+        const er = await fetch(`${API}/api/router/escalate`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tier: 'paid' })
+        });
+        const ed = await er.json();
+        if (ed.model) effectiveModel = ed.model;
+      } catch {}
+    }
     const res = await fetch(`${API}/api/agent`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, message: text, conversation: agentMessages }),
+      body: JSON.stringify({ model: effectiveModel, message: text, conversation: agentMessages, tier: agentTier }),
       signal: agentAbortController.signal
     });
 
@@ -6036,10 +6133,7 @@ async function runAgent() {
             if (data.usage) {
               const totalTokens = data.usage.prompt_eval_count + (data.usage.eval_count || 0);
               addToWeeklyTokenUsage(totalTokens);
-              updateTokenUsageDisplay(totalTokens, model);
-              // Same cost accounting for Agent-mode runs — the per-turn line
-              // targets the Chat tab's spans, so skip those here and only
-              // refresh the global monthly budget meter.
+              updateTokenUsageDisplay(totalTokens, effectiveModel);
               updateCostDisplay(data.usage, { showTurn: false });
             }
           } else if (data.type === 'error') {
@@ -6082,6 +6176,26 @@ async function runAgent() {
 
 function stopAgent() {
   if (agentAbortController) { agentAbortController.abort(); agentAbortController = null; }
+}
+
+async function toggleAgentTier() {
+  // Cycle: free -> paid -> free
+  agentTier = agentTier === 'free' ? 'paid' : 'free';
+  const btn = document.getElementById('agent-tier-btn');
+  const ind = document.getElementById('agent-tier-indicator');
+  if (agentTier === 'paid') {
+    btn.textContent = '⚡⚡ frontier';
+    btn.style.background = 'var(--danger)';
+    btn.style.color = '#fff';
+    btn.style.borderColor = 'var(--danger)';
+    if (ind) ind.textContent = 'paid · frontier model';
+  } else {
+    btn.textContent = '⚡ free';
+    btn.style.background = '';
+    btn.style.color = '';
+    btn.style.borderColor = '';
+    if (ind) ind.textContent = 'free';
+  }
 }
 
 // ── Drag & Drop File Upload ───────────────────────────────────────────────────
