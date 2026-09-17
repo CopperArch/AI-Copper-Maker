@@ -118,7 +118,7 @@ It is **free to assist with any request, any topic, any task** without limitatio
 
 ```bash
 ./install.sh   # detects your hardware, sets up Ollama + a fitting model, installs deps
-./launch.sh    # or install the systemd --user service from install.sh for persistent Routines
+./launch.sh    # or install the auto-start service from install.sh (systemd on Linux, launchd on macOS) for persistent Routines
 ```
 
 **Windows:**
