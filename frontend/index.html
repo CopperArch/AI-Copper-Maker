@@ -59,6 +59,7 @@
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
   }
+  .header-logo { width: 38px; height: 38px; border-radius: 8px; object-fit: cover; cursor: pointer; flex-shrink: 0; }
   header h1 { font-size: 16px; font-weight: 600; line-height: 1.2; }
   header h1 span { color: var(--copper); }
   header h1 .byline { display: block; font-size: 10px; font-weight: 400; color: var(--muted); letter-spacing: .3px; }
@@ -870,10 +871,7 @@
 <body>
 
 <header>
-  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" onclick="showAboutModal()" style="cursor:pointer" title="About AI Copper Maker">
-    <rect width="24" height="24" rx="6" fill="#B87333"/>
-    <path d="M7 8h10M7 12h6M7 16h8" stroke="white" stroke-width="1.8" stroke-linecap="round"/>
-  </svg>
+  <img src="assets/logo.png" alt="" class="header-logo" onclick="showAboutModal()" title="About AI Copper Maker">
   <h1>AI <span>Copper</span> Maker<span class="byline">A local AI coding studio — by CopperArch</span></h1>
   <div class="header-right">
     <div class="status-group">
