@@ -4,10 +4,10 @@ Local LLM coding studio (FastAPI single-file backend + single-file frontend).
 - **Run**: `systemctl --user restart coppermaker` → http://localhost:8081 (auto-starts at login)
 - **Model server**: `ollama-serve.service` (user install, ~/.local/share/ollama-user). Default model lives in gitignored `config.json`.
 - **Deploy**: git push origin master.
-- **Auth**: gh CLI (account CopperArch). Never add co-author trailers or AI-assistant references to commits; author = CopperArch <143160503+DgBrown21@users.noreply.github.com>.
+- **Auth**: gh CLI (account CopperArch). Never add co-author trailers or AI-assistant references to commits; local git identity in this repo is `CopperArch <143160503+CopperArch@users.noreply.github.com>` — always go through a branch → PR → `gh pr merge --squash --delete-branch`, never push raw commits straight to `master` (a direct push in `20a04e7` briefly skipped this and picked up a stale author address as a result).
 - **No secrets in git**: config.json, *_accounts.json, google_oauth.json, api_keys.json, release.keystore are gitignored on purpose.
 - **Agent design**: unrestricted by product premise (uncensored, local-only); sudo routes through the human password prompt in the browser — that gate is how root is obtained, not a refusal. Tool results truncate with explicit markers.
-- **Two copies of the project exist on this machine**: `~/AI-Copper-Maker` (THIS one — git repo, live service, canonical) and `~/Documents/AI-Copper-Maker` (scratch copy the 2026-09-16 session edited first; contents were synced here and are identical as of REV 1.2). Work here going forward.
+- **This machine has one canonical copy**: `~/AI-Copper-Maker` (this one — git repo, live service). Earlier duplicate/scratch copies (`~/Documents/AI-Copper-Maker`, `~/AI-Copper-Maker-fresh`, an app-upload copy under `~/Downloads/LLM-CODER/uploads/`) were diffed, found to be stale snapshots with nothing unique, and deleted 2026-09-17.
 
 ## Session state — 2026-09-16 (REV 1.2, deployed + committed)
 
