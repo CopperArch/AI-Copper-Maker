@@ -2623,8 +2623,9 @@ async function handleSudoRequired(data) {
 // Renders a tool result for the collapsed row body. ```diff fences (returned
 // by edit_file/write_file) get proper +/-/@@ coloring so file changes read
 // like opencode/Claude-Code diffs; everything else is escaped plain text.
-function renderToolResultHtml(result, limit = 900) {
-  const text = (result || '').slice(0, limit);
+function renderToolResultHtml(result, limit = 8000) {
+  const full = result || '';
+  const text = full.slice(0, limit);
   const parts = text.split(/```diff\n/);
   let html = '';
   parts.forEach((part, i) => {
@@ -2642,6 +2643,12 @@ function renderToolResultHtml(result, limit = 900) {
     }).join('\n') + `</code></pre>`;
     if (tail.trim()) html += `<pre><code>${escHtml(tail.trim())}</code></pre>`;
   });
+  // Only ever cut off pathologically large output (a full file dump, a huge
+  // grep) rather than silently hiding it — flag it plainly instead of just
+  // stopping mid-output with no indication anything was left out.
+  if (full.length > limit) {
+    html += `<div class="tool-row-label" style="color:var(--danger)">⚠ truncated — ${(full.length - limit).toLocaleString()} more characters not shown</div>`;
+  }
   return html || '<pre><code>(no output)</code></pre>';
 }
 
@@ -2701,7 +2708,7 @@ function renderToolRow(callMsg, resultMsg, id) {
     const done = todos.filter(t => t.status === 'completed').length;
     const summary = resultMsg ? `${done}/${todos.length} done` : 'planning…';
     return `
-      <details class="tool-row tool-row-todo"${idAttr}>
+      <details class="tool-row tool-row-todo" open${idAttr}>
         <summary>
           <span class="tool-row-name">📋 plan</span>
           <span class="tool-row-preview">${escHtml(summary)}</span>
@@ -2711,7 +2718,7 @@ function renderToolRow(callMsg, resultMsg, id) {
       </details>`;
   }
   return `
-    <details class="tool-row"${idAttr}>
+    <details class="tool-row" open${idAttr}>
       <summary>
         <span class="tool-row-name">${escHtml(callMsg.name)}</span>
         <span class="tool-row-preview">${escHtml(shortPreview)}</span>
@@ -2750,11 +2757,14 @@ function renderMessageGroups(messages) {
         }
       }
 const idxAttr = assistantIdx >= 0 ? ` data-msg-idx="${assistantIdx}"` : '';
-       const bubbleActions = assistantIdx >= 0 ? `
+       // Shown even for tool-only turns with no narration — addBubbleActions()
+       // falls back to the whole bubble's text (tool rows included) when there's
+       // no assistant message to resolve via data-msg-idx.
+       const bubbleActions = `
          <div class="bubble-actions">
            <button data-action="copy-bubble" title="Copy response">📋 Copy</button>
            <button data-action="download-bubble" title="Download as .md">⬇ Download</button>
-         </div>` : '';
+         </div>`;
        html.push(`
          <div class="message">
            <div class="avatar ai-av">🤖</div>
@@ -2788,14 +2798,15 @@ function renderMsg(msg, idx) {
     ? `<div class="file-attachments" style="padding:0 0 6px">${msg.attachments.map(renderAttachmentPill).join('')}</div>`
     : '';
   // data-msg-idx lets addCopyButtons() offer an Edit button on assistant code
-  // blocks — it maps a rendered <pre> back to conv.messages[idx] so edits can
-  // be written back into the stored conversation.
-const idxAttr = !isUser ? ` data-msg-idx="${idx}"` : '';
-   const bubbleActions = !isUser ? `
+  // blocks (it maps a rendered <pre> back to conv.messages[idx] so edits can
+  // be written back into the stored conversation) and lets addBubbleActions()
+  // resolve the source message for Copy/Download on every bubble, user or AI.
+const idxAttr = ` data-msg-idx="${idx}"`;
+   const bubbleActions = `
      <div class="bubble-actions">
-       <button data-action="copy-bubble" title="Copy response">📋 Copy</button>
+       <button data-action="copy-bubble" title="Copy message">📋 Copy</button>
        <button data-action="download-bubble" title="Download as .md">⬇ Download</button>
-     </div>` : '';
+     </div>`;
    return `
      <div class="message ${isUser ? 'user' : ''}">
        <div class="avatar ${isUser ? 'user-av' : 'ai-av'}">${isUser ? '👤' : '🤖'}</div>
@@ -2852,14 +2863,18 @@ pre.style.position = 'relative';
  }
 
  function addBubbleActions() {
-   document.querySelectorAll('.message:not(.user) .bubble').forEach(bubble => {
+   document.querySelectorAll('.message .bubble').forEach(bubble => {
      const copyBtn = bubble.querySelector('[data-action="copy-bubble"]');
      const downloadBtn = bubble.querySelector('[data-action="download-bubble"]');
      if (!copyBtn && !downloadBtn) return;
      const msgIdx = bubble.dataset.msgIdx;
      const conv = currentConv();
      const msg = msgIdx !== undefined ? conv?.messages[parseInt(msgIdx, 10)] : null;
-     const text = msg?.content || bubble.querySelector('.agent-turn-text')?.textContent || bubble.textContent.replace(/📋 Copy|⬇ Download/g, '').trim();
+     // User messages: prefer the same displayText renderMsg() shows (raw typed
+     // text, without attachment file contents appended) over the full content.
+     const text = (msg?.role === 'user' ? (msg.displayText ?? msg.content) : msg?.content)
+       || bubble.querySelector('.agent-turn-text')?.textContent
+       || bubble.textContent.replace(/📋 Copy|⬇ Download/g, '').trim();
      const escaped = text.replace(/<[^>]*>/g, ''); // strip markdown HTML
 
      if (copyBtn) {
