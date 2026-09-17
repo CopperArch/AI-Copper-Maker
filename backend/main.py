@@ -97,7 +97,7 @@ API_KEYS_FILE = Path(__file__).parent.parent / "api_keys.json"
 CLOUD_PROVIDERS = {
     "anthropic": {"label": "Claude (Anthropic)", "default_model": "claude-sonnet-4-6"},
     "openai": {"label": "ChatGPT (OpenAI)", "default_model": "gpt-4o"},
-    "google": {"label": "Gemini (Google)", "default_model": "gemini-2.0-flash"},
+    "google": {"label": "Gemini (Google)", "default_model": "gemini-2.5-flash"},
     "openrouter": {"label": "OpenRouter (any model)", "default_model": "anthropic/claude-sonnet-4.5"},
 }
 
