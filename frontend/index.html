@@ -4173,31 +4173,52 @@ else if (catalogFilter === 'free') {
     const rows = cloudModelDetails.filter(r => matchesSearch(`${r.provider} ${r.model}`));
     html += rows.length
       ? rows.map(r => {
-        // OpenRouter proxies hundreds of models behind one key, unlike the
-        // other providers here which each have exactly one fixed model — give
-        // it a picker instead of a static name, defaulting to whatever's
-        // currently selected (persisted server-side via setOpenrouterModel()).
-        const isOpenrouter = r.provider === 'openrouter' && Array.isArray(r.models);
-        // <option> can't hold rich markup, so price/Free goes straight into the
-        // label text — live from OpenRouter's own pricing API (see
-        // _openrouter_live_pricing on the backend), not a hardcoded guess.
+        // OpenRouter/NanoGPT/haimaker.ai/Perplexity each proxy multiple
+        // models behind one key, unlike Claude/ChatGPT/Gemini which have
+        // exactly one fixed model — give them a picker instead of a static
+        // name, defaulting to whatever's currently selected (persisted
+        // server-side via setGatewayModel()).
+        const isGateway = Array.isArray(r.models);
+        const selectId = `gateway-model-select-${r.provider}`;
+        // <option> can't hold rich markup, so price/Free goes straight into
+        // the label text — live pricing where the provider has an endpoint
+        // for it (see GATEWAY_LIVE_PRICING_FETCHERS on the backend), not a
+        // hardcoded guess.
         const optionLabel = (m) => m.is_free
           ? `${m.label} — Free`
           : `${m.label}${m.input_per_mtok != null ? ` — ≈$${m.input_per_mtok.toFixed(2)}/$${m.output_per_mtok.toFixed(2)} per M` : ''}`;
-        const modelField = isOpenrouter
-          ? `<select id="openrouter-model-select" onchange="setOpenrouterModel(this.value)" style="margin-top:4px;font-size:12px;padding:4px 6px">
+        const modelField = isGateway
+          ? `<select id="${selectId}" onchange="setGatewayModel('${r.provider}', this.value)" style="margin-top:4px;font-size:12px;padding:4px 6px">
               ${r.models.map(m => `<option value="${escHtml(m.model)}" ${m.model === r.model ? 'selected' : ''}>${escHtml(optionLabel(m))}</option>`).join('')}
             </select>`
           : `<span class="model-badge">${escHtml(r.model)}</span>`;
-        const useOnclick = isOpenrouter
-          ? `useCloudModel('openrouter/' + document.getElementById('openrouter-model-select').value)`
+        const useOnclick = isGateway
+          ? `useCloudModel('${r.provider}/' + document.getElementById('${selectId}').value)`
           : `useCloudModel('${escHtml(r.provider + '/' + r.model)}')`;
+        // Once a key is in, show what's actually left this month — this was
+        // silently broken before (see /api/cost/summary's fix note): the
+        // frontend called it with a GET, the backend only accepted POST, so
+        // it 404'd/405'd every time and nothing was ever shown.
+        const budgetHtml = r.budget && r.budget.budget > 0
+          ? (() => {
+              const b = r.budget;
+              const blendedPerTok = ((r.input_per_mtok || 0) + (r.output_per_mtok || 0) * 3) / 4 / 1_000_000;
+              const estTokens = blendedPerTok > 0 ? Math.floor(b.remaining / blendedPerTok) : null;
+              const resetLabel = b.period ? new Date(b.period + '-01T00:00:00').toLocaleString('default', { month: 'short', year: 'numeric' }) : '';
+              return `<div style="font-size:11px;color:var(--muted);margin-top:4px">
+                ≈$${b.spent.toFixed(2)} spent of $${b.budget.toFixed(2)} this month (${b.percent_left}% left)
+                ${estTokens != null ? `· ≈${estTokens.toLocaleString()} tokens left at this rate` : ''}
+                ${resetLabel ? ` · resets after ${resetLabel}` : ''}
+              </div>`;
+            })()
+          : '';
         return `
         <div class="model-card">
           <div class="model-info">
-            <div class="model-name">${escHtml(r.label)} ${isOpenrouter ? '' : modelField}</div>
-            ${isOpenrouter ? modelField : ''}
+            <div class="model-name">${escHtml(r.label)} ${isGateway ? '' : modelField}</div>
+            ${isGateway ? modelField : ''}
             <div class="model-desc">${r.input_per_mtok === 0 && r.output_per_mtok === 0 ? 'Free' : `≈$${r.input_per_mtok?.toFixed(2) ?? '—'} in / $${r.output_per_mtok?.toFixed(2) ?? '—'} out per 1M tokens`}</div>
+            ${budgetHtml}
           </div>
           <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">
             <span class="model-status ${r.configured ? '' : 'not-installed'}">${r.configured ? 'Key configured' : 'No API key'}</span>
@@ -4231,10 +4252,10 @@ function useCloudModel(name) {
   switchTab('chat');
 }
 
-async function setOpenrouterModel(model) {
+async function setGatewayModel(provider, model) {
   await fetch(`${API}/api/config`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ openrouter_model: model })
+    body: JSON.stringify({ [`${provider}_model`]: model })
   }).catch(() => {});
   try {
     const r = await fetch(`${API}/api/models/cloud/details`);
