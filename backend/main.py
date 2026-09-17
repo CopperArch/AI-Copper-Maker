@@ -1546,6 +1546,83 @@ async def generate_image(req: ImageGenRequest):
     return StreamingResponse(stream(), media_type="application/x-ndjson")
 
 
+# ── Image Generation: OpenRouter (real images, not a vision model's text
+# description) — text-to-image when no source image is given, image-to-image
+# editing when one is (drag-and-drop a photo, describe the change, get an
+# edited image back) ─────────────────────────────────────────────────────────
+
+class ImageEditRequest(BaseModel):
+    prompt: str
+    model: str = ""
+    image_b64: str = ""  # data URL ("data:image/png;base64,...") of a source image to alter; empty = pure generation
+
+OPENROUTER_IMAGE_GENERATE_MODEL = "google/gemini-2.5-flash-image"
+OPENROUTER_IMAGE_EDIT_MODEL = "openai/gpt-image-1"
+
+@app.post("/api/generate-image/openrouter")
+async def generate_image_openrouter(req: ImageEditRequest):
+    key = _load_api_keys().get("openrouter")
+    if not key:
+        raise HTTPException(400, "No OpenRouter API key configured — add one under Models → Paid.")
+    if not req.prompt.strip():
+        raise HTTPException(400, "Prompt is required.")
+
+    model = req.model or (OPENROUTER_IMAGE_EDIT_MODEL if req.image_b64 else OPENROUTER_IMAGE_GENERATE_MODEL)
+    body = {"model": model, "prompt": req.prompt}
+    if req.image_b64:
+        body["input_references"] = [{"type": "image_url", "image_url": {"url": req.image_b64}}]
+
+    try:
+        async with httpx.AsyncClient(timeout=120) as client:
+            r = await client.post(
+                "https://openrouter.ai/api/v1/images",
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                json=body,
+            )
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"Couldn't reach OpenRouter: {e}")
+    if r.status_code != 200:
+        raise HTTPException(r.status_code, f"OpenRouter image error: {r.text[:500]}")
+
+    data = r.json()
+    items = data.get("data") or []
+    if not items:
+        raise HTTPException(502, "OpenRouter returned no image data.")
+    cost = (data.get("usage") or {}).get("cost", 0.0)
+    _record_spend(f"openrouter/{model}", cost)
+    return {
+        "b64_json": items[0].get("b64_json", ""),
+        "media_type": items[0].get("media_type", "image/png"),
+        "cost": cost,
+    }
+
+
+class ImageSaveRequest(BaseModel):
+    b64_json: str
+    filename: str = ""
+    media_type: str = "image/png"
+
+IMAGE_SAVE_DIR = Path(os.path.expanduser("~")) / "Downloads" / "LLM-CODER" / "generated-images"
+
+@app.post("/api/generate-image/save")
+async def save_generated_image(req: ImageSaveRequest):
+    ext = "jpg" if "jpeg" in req.media_type else "png"
+    name = re.sub(r"[^\w\-.]", "_", req.filename.strip()) or f"generated-{int(time.time())}"
+    if not name.lower().endswith(f".{ext}"):
+        name = f"{name}.{ext}"
+    try:
+        raw = base64.b64decode(req.b64_json)
+    except Exception:
+        raise HTTPException(400, "Invalid image data.")
+    IMAGE_SAVE_DIR.mkdir(parents=True, exist_ok=True)
+    target = IMAGE_SAVE_DIR / name
+    try:
+        target.write_bytes(raw)
+    except OSError as e:
+        raise HTTPException(500, f"Couldn't save image: {e}")
+    return {"saved": True, "path": str(target)}
+
+
 # ── File Operations ────────────────────────────────────────────────────────────
 
 # Root for the file tools (read/write/list/search/find, semantic search, and

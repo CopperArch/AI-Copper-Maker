@@ -1337,10 +1337,15 @@
         <div class="runner-panel">
           <div class="runner-toolbar">
             <h2>🎨 Image Generation</h2>
-            <span style="font-size:12px;color:var(--muted)">Requires a vision model (llava:7b, minicpm-v, etc.)</span>
+            <span style="font-size:12px;color:var(--muted)">OpenRouter — drop an image below to alter it, or leave empty to generate from scratch</span>
           </div>
+          <div id="imagegen-dropzone" class="apk-dropzone" style="flex-shrink:0" ondragover="event.preventDefault(); this.classList.add('drag-over')" ondragleave="this.classList.remove('drag-over')" ondrop="handleImageGenDrop(event)" onclick="document.getElementById('imagegen-file-input').click()">
+            <span id="imagegen-dropzone-text">🖼️ Drop an image here to alter it, or click to browse (optional)</span>
+          </div>
+          <input type="file" id="imagegen-file-input" accept="image/*" style="display:none" onchange="handleImageGenFileSelect(event)">
+          <div id="imagegen-source-preview" style="display:none;flex-shrink:0"></div>
           <div style="display:flex;gap:8px;flex-shrink:0">
-            <input type="text" id="imagegen-prompt" placeholder="Describe the image to generate..." style="flex:1" onkeydown="if(event.key==='Enter')doImageGen()">
+            <input type="text" id="imagegen-prompt" placeholder="Describe the image to generate, or how to alter the dropped one..." style="flex:1" onkeydown="if(event.key==='Enter')doImageGen()">
             <button class="btn btn-accent" onclick="doImageGen()" id="imagegen-btn">Generate</button>
           </div>
           <div id="imagegen-output" class="runner-output" style="flex:1;overflow-y:auto;padding:12px 16px">
@@ -5328,49 +5333,107 @@ async function doSemanticSearch() {
   }
 }
 
-// ── Image Generation ──────────────────────────────────────────────────────────
+// ── Image Generation (OpenRouter: real images, generate or edit) ──────────────
+
+let imagegenSourceB64 = '';  // data URL of a dropped/selected source image to alter, '' = pure generation
+
+function handleImageGenDrop(event) {
+  event.preventDefault();
+  event.currentTarget.classList.remove('drag-over');
+  const file = event.dataTransfer.files[0];
+  if (file) loadImageGenSource(file);
+}
+
+function handleImageGenFileSelect(event) {
+  const file = event.target.files[0];
+  if (file) loadImageGenSource(file);
+  event.target.value = ''; // allow re-selecting the same file later
+}
+
+function loadImageGenSource(file) {
+  if (!file.type.startsWith('image/')) { alert('Not an image file.'); return; }
+  const reader = new FileReader();
+  reader.onload = () => {
+    imagegenSourceB64 = reader.result; // data:image/...;base64,...
+    document.getElementById('imagegen-source-preview').style.display = 'block';
+    document.getElementById('imagegen-source-preview').innerHTML = `
+      <div style="display:flex;align-items:center;gap:8px;margin:6px 0">
+        <img src="${imagegenSourceB64}" style="max-height:80px;border-radius:6px;border:1px solid var(--border)">
+        <span style="font-size:12px;color:var(--muted)">${escHtml(file.name)}</span>
+        <button class="btn btn-secondary btn-sm" onclick="clearImageGenSource()">✕ Remove</button>
+      </div>`;
+    document.getElementById('imagegen-dropzone-text').textContent = '🖼️ Image loaded — drop another to replace it';
+  };
+  reader.readAsDataURL(file);
+}
+
+function clearImageGenSource() {
+  imagegenSourceB64 = '';
+  document.getElementById('imagegen-source-preview').style.display = 'none';
+  document.getElementById('imagegen-source-preview').innerHTML = '';
+  document.getElementById('imagegen-dropzone-text').textContent = '🖼️ Drop an image here to alter it, or click to browse (optional)';
+}
 
 async function doImageGen() {
   const prompt = document.getElementById('imagegen-prompt').value.trim();
   if (!prompt) return;
   const output = document.getElementById('imagegen-output');
   const btn = document.getElementById('imagegen-btn');
-  btn.disabled = true; btn.textContent = 'Generating...';
-  output.innerHTML = '<div style="color:var(--muted)"><div class="thinking"><span></span><span></span><span></span></div> Generating image...</div>';
+  const altering = !!imagegenSourceB64;
+  btn.disabled = true; btn.textContent = altering ? 'Altering...' : 'Generating...';
+  output.innerHTML = `<div style="color:var(--muted)"><div class="thinking"><span></span><span></span><span></span></div> ${altering ? 'Altering image...' : 'Generating image...'}</div>`;
   try {
-    const res = await fetch(`${API}/api/generate-image`, {
+    const res = await fetch(`${API}/api/generate-image/openrouter`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt })
+      body: JSON.stringify({ prompt, image_b64: imagegenSourceB64 })
     });
+    const data = await res.json();
     if (!res.ok) {
-      const err = await res.json();
-      output.innerHTML = `<span class="stderr">Error: ${escHtml(err.detail || JSON.stringify(err))}</span>`;
+      output.innerHTML = `<span class="stderr">Error: ${escHtml(data.detail || JSON.stringify(data))}</span>`;
       return;
     }
-    let response = '';
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      for (const line of decoder.decode(value).split('\n').filter(Boolean)) {
-        try {
-          const data = JSON.parse(line);
-          if (data.error) { output.innerHTML = `<span class="stderr">Error: ${escHtml(data.error)}</span>`; return; }
-          if (data.response) response += data.response;
-        } catch {}
-      }
-    }
-    output.innerHTML = `<div style="white-space:pre-wrap;font-size:13px;line-height:1.6">${escHtml(response)}</div>`;
+    output.dataset.b64 = data.b64_json;
+    output.dataset.mediaType = data.media_type;
+    const costLine = data.cost ? `<div style="font-size:11px;color:var(--muted)">Cost: $${data.cost.toFixed(4)}</div>` : '';
+    output.innerHTML = `
+      <div style="display:flex;flex-direction:column;gap:10px;align-items:flex-start">
+        <img src="data:${data.media_type};base64,${data.b64_json}" style="max-width:100%;border-radius:8px;border:1px solid var(--border)">
+        <div style="display:flex;gap:8px;align-items:center">
+          <input type="text" id="imagegen-save-name" placeholder="filename (optional)" style="width:200px">
+          <button class="btn btn-accent btn-sm" onclick="saveGeneratedImage()">💾 Save</button>
+          <span id="imagegen-save-status" style="font-size:12px;color:var(--muted)"></span>
+        </div>
+        ${costLine}
+      </div>`;
   } catch (err) {
     output.innerHTML = `<span class="stderr">Error: ${err.message}</span>`;
   } finally {
-    // The !res.ok / data.error early returns above (e.g. "No vision model
-    // found") used to skip right past this, leaving the button stuck
-    // disabled on "Generating..." forever even though the real error was
-    // already shown in the output area.
+    // The !res.ok early return above (e.g. "No OpenRouter API key configured")
+    // used to skip right past this, leaving the button stuck disabled on
+    // "Generating..." forever even though the real error was already shown.
     btn.disabled = false; btn.textContent = 'Generate';
+  }
+}
+
+async function saveGeneratedImage() {
+  const output = document.getElementById('imagegen-output');
+  const b64 = output.dataset.b64;
+  if (!b64) return;
+  const status = document.getElementById('imagegen-save-status');
+  const filename = document.getElementById('imagegen-save-name').value.trim();
+  status.textContent = 'Saving...';
+  try {
+    const r = await fetch(`${API}/api/generate-image/save`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ b64_json: b64, filename, media_type: output.dataset.mediaType || 'image/png' })
+    });
+    const data = await r.json();
+    if (!r.ok) { status.textContent = 'Error: ' + (data.detail || 'unknown'); return; }
+    status.textContent = `✓ Saved to ${data.path}`;
+  } catch (err) {
+    status.textContent = 'Error: ' + err.message;
   }
 }
 
