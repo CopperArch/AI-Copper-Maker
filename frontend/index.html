@@ -5452,7 +5452,11 @@ function exInit() {
   const list = document.getElementById('file-list');
   const menu = document.getElementById('ex-context');
 
-  // Click: select the row (clicking empty space clears selection)
+  // Click: select the row (clicking empty space clears selection), and open
+  // it right away — a single click doing nothing but a faint highlight read
+  // as "broken" to users coming from web file browsers rather than a desktop
+  // Explorer, so click now opens too; double-click still works (harmlessly
+  // re-opens the same target).
   list.addEventListener('click', ev => {
     if (ev.target.closest('.ex-rename-input')) return;
     const row = ev.target.closest('.ex-row');
@@ -5463,6 +5467,7 @@ function exInit() {
     list.focus();
     exSelected = row.dataset.path;
     exRender();
+    exOpen(row.dataset.path, row.dataset.isdir === '1');
   });
 
   // Double-click: open (navigate into a folder, open a file in the editor)
