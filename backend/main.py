@@ -12,6 +12,7 @@ import shutil
 import smtplib
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -275,6 +276,64 @@ def _detect_environment() -> dict:
 
 
 HOST_ENV = _detect_environment()
+
+
+def _detect_gpu_backend() -> dict:
+    """Best-effort GPU probe for picking the right PyTorch wheel for local
+    image generation. Deliberately NOT part of HOST_ENV/startup — this only
+    runs on-demand from the Image Gen tab's local-setup flow, since most
+    installs will never touch it (heavy ML deps, opt-in only). Every check
+    here is generic hardware detection, not anything specific to the machine
+    this was written on — it has to work correctly on whatever GPU (or lack
+    of one) the next person running this app actually has."""
+    result = {"backend": "cpu", "gpu_name": "", "vram_gb": None}
+
+    if shutil.which("nvidia-smi"):
+        try:
+            out = subprocess.run(
+                ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"],
+                capture_output=True, text=True, timeout=5,
+            )
+            line = out.stdout.strip().splitlines()[0] if out.returncode == 0 and out.stdout.strip() else ""
+            if line:
+                name, _, mem = line.partition(",")
+                vram_mb = float(re.sub(r"[^\d.]", "", mem)) if re.search(r"\d", mem) else 0
+                result.update(backend="cuda", gpu_name=name.strip(), vram_gb=round(vram_mb / 1024, 1) or None)
+                return result
+        except (OSError, subprocess.TimeoutExpired, ValueError, IndexError):
+            pass
+
+    if platform.system() == "Darwin" and platform.machine() == "arm64":
+        result.update(backend="mps", gpu_name="Apple Silicon (unified memory)")
+        return result
+
+    # AMD/ROCm: /dev/kfd is the kernel compute-node device — present as soon
+    # as the amdgpu driver loads, well before any ROCm userspace tooling is
+    # installed, so this works as a pre-install probe. lspci fills in the
+    # name/VRAM; on a machine with both an iGPU and a discrete card we want
+    # the one with the bigger memory BAR, not whichever lspci lists first.
+    if Path("/dev/kfd").exists() and shutil.which("lspci"):
+        try:
+            out = subprocess.run(["lspci", "-v"], capture_output=True, text=True, timeout=5)
+            best = None
+            for block in out.stdout.split("\n\n"):
+                if not re.search(r"VGA compatible controller|Display controller|3D controller", block):
+                    continue
+                if "AMD" not in block and "ATI" not in block:
+                    continue
+                name_m = re.search(r"\[AMD/ATI\]\s+(.+?)(?:\s+\(rev|\n)", block)
+                vram_gb = 0.0
+                for size, unit in re.findall(r"Memory at \S+ \([^)]*\)\s*\[size=(\d+)([MG])\]", block):
+                    vram_gb = max(vram_gb, float(size) / (1 if unit == "G" else 1024))
+                if best is None or vram_gb > best[1]:
+                    best = (name_m.group(1).strip() if name_m else "AMD GPU", vram_gb)
+            if best:
+                result.update(backend="rocm", gpu_name=best[0], vram_gb=round(best[1], 1) or None)
+                return result
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+    return result
 
 
 def _detect_vram() -> dict:
@@ -1621,6 +1680,155 @@ async def save_generated_image(req: ImageSaveRequest):
     except OSError as e:
         raise HTTPException(500, f"Couldn't save image: {e}")
     return {"saved": True, "path": str(target)}
+
+
+# ── Image Generation: local GPU (opt-in — torch/diffusers live in their own
+# venv, never in the main app's requirements.txt) ──────────────────────────
+
+IMAGEGEN_VENV_DIR = Path(__file__).parent / "venv-imagegen"
+IMAGEGEN_VENV_PYTHON = IMAGEGEN_VENV_DIR / ("Scripts/python.exe" if platform.system() == "Windows" else "bin/python")
+IMAGEGEN_SCRIPT = Path(__file__).parent / "imagegen_local.py"
+IMAGEGEN_STATE_FILE = Path(__file__).parent.parent / "imagegen_local_state.json"
+
+# Ordered fallback candidates per backend — PyTorch's ROCm/CUDA wheel index
+# tags change over time and lag behind new Python releases (confirmed: as of
+# 2026 CUDA/ROCm wheels have trailed cp314 support, silently falling back to
+# CPU-only if `pip install torch` is run bare) — so several tags are tried in
+# order and the install is verified afterward rather than trusted blindly.
+# `None` means "plain PyPI, no special index" (CPU and Apple/MPS both ship
+# their accelerated build through plain `torch` already).
+TORCH_INDEX_CANDIDATES = {
+    "cuda": ["https://download.pytorch.org/whl/cu124", "https://download.pytorch.org/whl/cu121"],
+    "rocm": ["https://download.pytorch.org/whl/rocm6.2", "https://download.pytorch.org/whl/nightly/rocm7.2"],
+    "mps": [None],
+    "cpu": [None],
+}
+
+@app.get("/api/image-local/status")
+async def image_local_status():
+    gpu = _detect_gpu_backend()
+    installed = IMAGEGEN_VENV_PYTHON.exists()
+    verified = None
+    if installed:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                str(IMAGEGEN_VENV_PYTHON), "-c",
+                "import torch,json;print(json.dumps({'ok':True,'cuda':torch.cuda.is_available(),"
+                "'mps':getattr(torch.backends,'mps',None) and torch.backends.mps.is_available()}))",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            )
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+            verified = json.loads(out.decode()) if proc.returncode == 0 else {"ok": False}
+        except (OSError, asyncio.TimeoutError, json.JSONDecodeError):
+            verified = {"ok": False}
+    gpu_active = bool(verified and verified.get("ok") and (verified.get("cuda") or verified.get("mps")))
+    return {
+        "detected_backend": gpu["backend"], "gpu_name": gpu["gpu_name"], "vram_gb": gpu["vram_gb"],
+        "installed": installed, "gpu_active": gpu_active,
+        "cpu_only_fallback": installed and verified is not None and verified.get("ok") and not gpu_active,
+    }
+
+@app.post("/api/image-local/install")
+async def image_local_install():
+    gpu = _detect_gpu_backend()
+
+    vram_note = f", {gpu['vram_gb']} GB VRAM" if gpu["vram_gb"] else ""
+
+    async def stream():
+        yield json.dumps({"type": "status", "text": f"Detected: {gpu['gpu_name'] or 'no dedicated GPU'} "
+                                                      f"({gpu['backend']}{vram_note})"}) + "\n"
+        if not IMAGEGEN_VENV_PYTHON.exists():
+            yield json.dumps({"type": "log", "text": "Creating a dedicated venv (venv-imagegen)...\n"}) + "\n"
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, "-m", "venv", str(IMAGEGEN_VENV_DIR),
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            )
+            async for line in _iter_lines(proc.stdout):
+                yield json.dumps({"type": "log", "text": line}) + "\n"
+            if await proc.wait() != 0:
+                yield json.dumps({"type": "error", "text": "Couldn't create the venv.\n"}) + "\n"
+                return
+
+        torch_ok = False
+        for index_url in TORCH_INDEX_CANDIDATES.get(gpu["backend"], [None]):
+            cmd = [str(IMAGEGEN_VENV_PYTHON), "-m", "pip", "install", "--upgrade", "torch", "torchvision"]
+            if index_url:
+                cmd += ["--index-url", index_url]
+            yield json.dumps({"type": "log", "text": f"Installing torch{f' ({index_url})' if index_url else ''}...\n"}) + "\n"
+            proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+            async for line in _iter_lines(proc.stdout):
+                yield json.dumps({"type": "log", "text": line}) + "\n"
+            if await proc.wait() == 0:
+                torch_ok = True
+                break
+            yield json.dumps({"type": "log", "text": "That index didn't work, trying the next fallback...\n"}) + "\n"
+        if not torch_ok:
+            yield json.dumps({"type": "error", "text": "Couldn't install torch from any known index for this hardware.\n"}) + "\n"
+            return
+
+        yield json.dumps({"type": "log", "text": "Installing diffusers, transformers, accelerate, safetensors, pillow...\n"}) + "\n"
+        proc = await asyncio.create_subprocess_exec(
+            str(IMAGEGEN_VENV_PYTHON), "-m", "pip", "install",
+            "diffusers", "transformers", "accelerate", "safetensors", "pillow",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+        )
+        async for line in _iter_lines(proc.stdout):
+            yield json.dumps({"type": "log", "text": line}) + "\n"
+        if await proc.wait() != 0:
+            yield json.dumps({"type": "error", "text": "Couldn't install diffusers/transformers.\n"}) + "\n"
+            return
+
+        yield json.dumps({"type": "log", "text": "Verifying GPU acceleration actually came through...\n"}) + "\n"
+        verify = await asyncio.create_subprocess_exec(
+            str(IMAGEGEN_VENV_PYTHON), "-c",
+            "import torch;print('cuda' if torch.cuda.is_available() else "
+            "'mps' if getattr(torch.backends,'mps',None) and torch.backends.mps.is_available() else 'cpu')",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await verify.communicate()
+        active = out.decode().strip() or "cpu"
+        gpu_active = active in ("cuda", "mps")
+        try:
+            IMAGEGEN_STATE_FILE.write_text(json.dumps({
+                "backend": gpu["backend"], "gpu_name": gpu["gpu_name"], "vram_gb": gpu["vram_gb"],
+                "gpu_active": gpu_active, "installed_at": time.time(),
+            }))
+        except OSError:
+            pass
+        if gpu_active:
+            yield json.dumps({"type": "done", "text": f"Done — GPU acceleration confirmed working ({active}).\n"}) + "\n"
+        else:
+            yield json.dumps({"type": "done", "text": "Installed, but only CPU support came through for this "
+                               f"Python version (no {gpu['backend']} wheel available yet) — generation will work "
+                               "but be slow (minutes per image, not seconds).\n"}) + "\n"
+
+    return StreamingResponse(stream(), media_type="application/x-ndjson")
+
+@app.post("/api/generate-image/local")
+async def generate_image_local(req: ImageEditRequest):
+    if not IMAGEGEN_VENV_PYTHON.exists():
+        raise HTTPException(400, "Local image generation isn't set up yet — install it first.")
+    if not req.prompt.strip():
+        raise HTTPException(400, "Prompt is required.")
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            str(IMAGEGEN_VENV_PYTHON), str(IMAGEGEN_SCRIPT),
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        out, err = await asyncio.wait_for(
+            proc.communicate(json.dumps({"prompt": req.prompt, "image_b64": req.image_b64}).encode()),
+            timeout=600,  # first run downloads ~7GB of model weights; CPU-only inference is also slow
+        )
+    except asyncio.TimeoutError:
+        proc.kill()
+        raise HTTPException(504, "Local generation timed out after 10 minutes.")
+    try:
+        result = json.loads(out.decode().strip().splitlines()[-1]) if out.strip() else {}
+    except (json.JSONDecodeError, IndexError):
+        result = {}
+    if "error" in result or proc.returncode != 0:
+        raise HTTPException(500, result.get("error") or err.decode()[-500:] or "Local generation failed.")
+    return result
 
 
 # ── File Operations ────────────────────────────────────────────────────────────

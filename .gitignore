@@ -19,3 +19,5 @@ windows-installer/dist/
 usage_cost.json
 .backup-pre-rev1.2/
 model_rankings_cache.json
+backend/venv-imagegen/
+imagegen_local_state.json

@@ -1337,7 +1337,15 @@
         <div class="runner-panel">
           <div class="runner-toolbar">
             <h2>🎨 Image Generation</h2>
-            <span style="font-size:12px;color:var(--muted)">OpenRouter — drop an image below to alter it, or leave empty to generate from scratch</span>
+            <span style="font-size:12px;color:var(--muted)">Drop an image below to alter it, or leave empty to generate from scratch</span>
+          </div>
+          <div style="display:flex;gap:6px;flex-shrink:0">
+            <button class="btn btn-accent btn-sm" id="imagegen-src-openrouter" onclick="setImagegenSource('openrouter')">☁️ OpenRouter (cloud)</button>
+            <button class="btn btn-secondary btn-sm" id="imagegen-src-local" onclick="setImagegenSource('local')">🖥️ Local (this machine)</button>
+          </div>
+          <div id="imagegen-local-setup" style="display:none;flex-shrink:0;padding:10px;border:1px solid var(--border);border-radius:8px;font-size:12px">
+            <div id="imagegen-local-status" style="color:var(--muted)">Checking hardware...</div>
+            <div id="imagegen-local-log" style="display:none;max-height:120px;overflow-y:auto;margin-top:6px;font-family:monospace;font-size:11px;white-space:pre-wrap;color:var(--muted)"></div>
           </div>
           <div id="imagegen-dropzone" class="apk-dropzone" style="flex-shrink:0" ondragover="event.preventDefault(); this.classList.add('drag-over')" ondragleave="this.classList.remove('drag-over')" ondrop="handleImageGenDrop(event)" onclick="document.getElementById('imagegen-file-input').click()">
             <span id="imagegen-dropzone-text">🖼️ Drop an image here to alter it, or click to browse (optional)</span>
@@ -5333,9 +5341,71 @@ async function doSemanticSearch() {
   }
 }
 
-// ── Image Generation (OpenRouter: real images, generate or edit) ──────────────
+// ── Image Generation (OpenRouter or local GPU: real images, generate or edit) ──
 
 let imagegenSourceB64 = '';  // data URL of a dropped/selected source image to alter, '' = pure generation
+let imagegenSource = 'openrouter';  // 'openrouter' | 'local'
+let imagegenLocalReady = false;     // true once /api/image-local/status says installed+gpu_active (or installed at all)
+
+function setImagegenSource(src) {
+  imagegenSource = src;
+  document.getElementById('imagegen-src-openrouter').className = 'btn btn-sm ' + (src === 'openrouter' ? 'btn-accent' : 'btn-secondary');
+  document.getElementById('imagegen-src-local').className = 'btn btn-sm ' + (src === 'local' ? 'btn-accent' : 'btn-secondary');
+  document.getElementById('imagegen-local-setup').style.display = src === 'local' ? 'block' : 'none';
+  if (src === 'local') checkImagegenLocalStatus();
+}
+
+async function checkImagegenLocalStatus() {
+  const status = document.getElementById('imagegen-local-status');
+  status.textContent = 'Checking hardware...';
+  try {
+    const r = await fetch(`${API}/api/image-local/status`);
+    const d = await r.json();
+    const gpuLine = d.gpu_name
+      ? `${escHtml(d.gpu_name)} (${d.detected_backend}${d.vram_gb ? `, ${d.vram_gb} GB VRAM` : ''})`
+      : 'No dedicated GPU detected — CPU only';
+    if (d.installed && d.gpu_active) {
+      imagegenLocalReady = true;
+      status.innerHTML = `✓ Ready — ${gpuLine}, GPU acceleration confirmed.`;
+    } else if (d.installed && d.cpu_only_fallback) {
+      imagegenLocalReady = true;
+      status.innerHTML = `⚠ Installed, but running on CPU only (no ${d.detected_backend} wheel available for this Python version) — generation will be slow. ${gpuLine}`;
+    } else {
+      imagegenLocalReady = false;
+      status.innerHTML = `${gpuLine}<br><button class="btn btn-accent btn-sm" style="margin-top:6px" onclick="installImagegenLocal()" id="imagegen-install-btn">⬇ Install local image generation (~2-7 GB download)</button>`;
+    }
+  } catch (err) {
+    status.textContent = 'Error checking status: ' + err.message;
+  }
+}
+
+async function installImagegenLocal() {
+  const btn = document.getElementById('imagegen-install-btn');
+  const log = document.getElementById('imagegen-local-log');
+  if (btn) { btn.disabled = true; btn.textContent = 'Installing...'; }
+  log.style.display = 'block';
+  log.textContent = '';
+  try {
+    const res = await fetch(`${API}/api/image-local/install`, { method: 'POST' });
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      for (const line of decoder.decode(value).split('\n').filter(Boolean)) {
+        try {
+          const data = JSON.parse(line);
+          log.textContent += (data.text || '') + (data.text?.endsWith('\n') ? '' : '\n');
+          log.scrollTop = log.scrollHeight;
+        } catch {}
+      }
+    }
+  } catch (err) {
+    log.textContent += 'Error: ' + err.message + '\n';
+  } finally {
+    await checkImagegenLocalStatus();
+  }
+}
 
 function handleImageGenDrop(event) {
   event.preventDefault();
@@ -5377,13 +5447,18 @@ function clearImageGenSource() {
 async function doImageGen() {
   const prompt = document.getElementById('imagegen-prompt').value.trim();
   if (!prompt) return;
+  if (imagegenSource === 'local' && !imagegenLocalReady) {
+    alert('Local image generation isn\'t installed yet — click "Install local image generation" above first.');
+    return;
+  }
   const output = document.getElementById('imagegen-output');
   const btn = document.getElementById('imagegen-btn');
   const altering = !!imagegenSourceB64;
+  const endpoint = imagegenSource === 'local' ? '/api/generate-image/local' : '/api/generate-image/openrouter';
   btn.disabled = true; btn.textContent = altering ? 'Altering...' : 'Generating...';
-  output.innerHTML = `<div style="color:var(--muted)"><div class="thinking"><span></span><span></span><span></span></div> ${altering ? 'Altering image...' : 'Generating image...'}</div>`;
+  output.innerHTML = `<div style="color:var(--muted)"><div class="thinking"><span></span><span></span><span></span></div> ${altering ? 'Altering image...' : 'Generating image...'}${imagegenSource === 'local' ? ' (first run also downloads the model — can take a few minutes)' : ''}</div>`;
   try {
-    const res = await fetch(`${API}/api/generate-image/openrouter`, {
+    const res = await fetch(`${API}${endpoint}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ prompt, image_b64: imagegenSourceB64 })
