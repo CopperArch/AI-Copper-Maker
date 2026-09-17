@@ -5582,6 +5582,22 @@ async def delete_email_account(account_id: str):
     _save_json_list(EMAIL_ACCOUNTS_FILE, accounts)
     return {"ok": True}
 
+class ReorderAccounts(BaseModel):
+    order: list[str]  # account ids in the desired display order
+
+@app.put("/api/email/accounts/reorder")
+async def reorder_email_accounts(body: ReorderAccounts):
+    """Persist a new account order — list position controls both the
+    accounts-list display order and which account the dropdown/inbox
+    defaults to on load (the select's first <option> is whichever
+    account is first in this list)."""
+    accounts = _load_json_list(EMAIL_ACCOUNTS_FILE)
+    by_id = {a.get("id"): a for a in accounts}
+    reordered = [by_id[i] for i in body.order if i in by_id]
+    reordered += [a for a in accounts if a.get("id") not in body.order]  # anything unlisted keeps its place at the end
+    _save_json_list(EMAIL_ACCOUNTS_FILE, reordered)
+    return {"ok": True, "accounts": [_redact_account(a) for a in reordered]}
+
 def _get_email_account(account_id: str) -> dict:
     for a in _load_json_list(EMAIL_ACCOUNTS_FILE):
         if a.get("id") == account_id:
