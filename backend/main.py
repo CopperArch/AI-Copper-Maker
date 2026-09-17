@@ -3429,7 +3429,8 @@ async def set_expo_key(req: ExpoTokenRequest):
     return {"ok": True}
 
 def _cloud_model_for(provider: str, meta: dict) -> str:
-    return _gateway_model(provider) if provider in GATEWAY_MODEL_CHOICES else meta["default_model"]
+    # All providers now have dynamic model lists; use the default model from metadata
+    return meta["default_model"]
 
 @app.get("/api/models/cloud")
 async def list_cloud_models():
@@ -3445,24 +3446,204 @@ async def cloud_model_details():
     haimaker.ai, Perplexity — since those aren't fixed to one model like
     Anthropic/OpenAI/Google are), key status, month-to-date spend against the
     shared budget (_cost_summary — same figure Chat's cost line shows), and
-    the estimated per-million-token rates. A gateway's rate (both for the
-    currently-selected model and every option in `models`, its curated picker
-    list) comes from that provider's own live pricing endpoint where one
-    exists (see GATEWAY_LIVE_PRICING_FETCHERS) rather than the hardcoded
-    PRICING table — those numbers drift, confirmed live on this session's own
-    first attempt at typing in DeepSeek's rates by hand. Providers without a
-    live endpoint (the three native SDKs, and Perplexity — see
-    GATEWAY_LIVE_PRICING_FETCHERS's docstring) stay on PRICING."""
+    the estimated per-million-token rates. Each provider's picker lists
+    all currently-available models with live pricing where available."""
     keys = _load_api_keys()
-    provider_names = list(GATEWAY_LIVE_PRICING_FETCHERS.keys())
-    results = await asyncio.gather(*(fetcher() for fetcher in GATEWAY_LIVE_PRICING_FETCHERS.values()))
-    live_prices_by_provider = dict(zip(provider_names, results))
     cost = _cost_summary()
+
+    # ── Fetch live pricing from gateway providers ────────────────────────
+    try:
+        provider_names = list(GATEWAY_LIVE_PRICING_FETCHERS.keys())
+        pricing_results = await asyncio.gather(*(fetcher() for fetcher in GATEWAY_LIVE_PRICING_FETCHERS.values()))
+        live_prices_by_provider = dict(zip(provider_names, pricing_results))
+    except Exception:
+        live_prices_by_provider = {}
+
+    # ── Fetch full model lists from each provider ─────────────────────────
+    provider_models = {}  # provider -> {model_id: {"input_per_mtok", "output_per_mtok", "is_free", "label"}}
+    
+    # OpenRouter: fetch all models from API
+    if "openrouter" in live_prices_by_provider:
+        or_prices = live_prices_by_provider["openrouter"]
+        # Fetch model list
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                r = await client.get("https://openrouter.ai/api/v1/models")
+                if r.status_code == 200:
+                    or_data = r.json().get("data", [])
+                    or_models = {}
+                    for m in or_data:
+                        mid = m.get("id", "")
+                        pricing = m.get("pricing", {})
+                        input_ppm = float(pricing.get("prompt", "0")) * 1_000_000
+                        output_ppm = float(pricing.get("completion", "0")) * 1_000_000
+                        or_models[mid] = {
+                            "input_per_mtok": round(input_ppm, 4),
+                            "output_per_mtok": round(output_ppm, 4),
+                            "is_free": input_ppm == 0 and output_ppm == 0,
+                            "label": m.get("name", mid),
+                        }
+                    provider_models["openrouter"] = or_models
+        except Exception:
+            pass
+
+    # NanoGPT: fetch all models from API
+    if "nanogpt" in live_prices_by_provider:
+        ng_prices = live_prices_by_provider["nanogpt"]
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                r = await client.get("https://nano-gpt.com/api/models")
+                if r.status_code == 200:
+                    ng_data = r.json()
+                    ng_models = {}
+                    for mid, m in (ng_data.get("models", {}).get("text") or {}).items():
+                        input_ppm = m.get("input_price_per_million")
+                        output_ppm = m.get("output_price_per_million")
+                        if input_ppm is None or output_ppm is None:
+                            continue
+                        try:
+                            input_ppm = float(input_ppm)
+                            output_ppm = float(output_ppm)
+                        except (TypeError, ValueError):
+                            continue
+                        label = mid.replace("/", " ")
+                        ng_models[mid] = {
+                            "input_per_mtok": round(input_ppm, 4),
+                            "output_per_mtok": round(output_ppm, 4),
+                            "is_free": input_ppm == 0 and output_ppm == 0,
+                            "label": label,
+                        }
+                    provider_models["nanogpt"] = ng_models
+        except Exception:
+            pass
+
+    # Haimaker: fetch all models from API
+    if "haimaker" in live_prices_by_provider:
+        hk_prices = live_prices_by_provider["haimaker"]
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                r = await client.get("https://api.haimaker.ai/public/model_hub")
+                if r.status_code == 200:
+                    hk_data = r.json()
+                    hk_models = {}
+                    for m in hk_data:
+                        mid = m.get("model_group")
+                        if not mid:
+                            continue
+                        try:
+                            input_ppm = float(m.get("input_cost_per_token", 0)) * 1_000_000
+                            output_ppm = float(m.get("output_cost_per_token", 0)) * 1_000_000
+                        except (TypeError, ValueError):
+                            continue
+                        label = mid.replace("/", " ")
+                        hk_models[mid] = {
+                            "input_per_mtok": round(input_ppm, 4),
+                            "output_per_mtok": round(output_ppm, 4),
+                            "is_free": input_ppm == 0 and output_ppm == 0,
+                            "label": label,
+                        }
+                    provider_models["haimaker"] = hk_models
+        except Exception:
+            pass
+
+    # Perplexity: fixed Sonar tiers
+    perplexity_tiers = [
+        {"model": "sonar", "label": "Sonar"},
+        {"model": "sonar-pro", "label": "Sonar Pro"},
+        {"model": "sonar-reasoning-pro", "label": "Sonar Reasoning Pro"},
+        {"model": "sonar-deep-research", "label": "Sonar Deep Research"},
+    ]
+    pp_models = []
+    for tier in perplexity_tiers:
+        pp_models.append({
+            "model": tier["model"],
+            "label": tier["label"],
+            "input_per_mtok": PRICING["perplexity"].get(tier["model"], {}).get("input"),
+            "output_per_mtok": PRICING["perplexity"].get(tier["model"], {}).get("output"),
+            "is_free": PRICING["perplexity"].get(tier["model"], {}).get("input") == 0,
+        })
+    provider_models["perplexity"] = {tier["model"]: tier for tier in pp_models}
+
+    # Anthropic: fetch models when key is configured
+    if keys.get("anthropic"):
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                r = await client.get("https://api.anthropic.com/v1/models",
+                                      headers={"x-api-key": keys["anthropic"], "anthropic-version": "2023-06-01"})
+                if r.status_code == 200:
+                    am_data = r.json().get("data", [])
+                    am_models = {}
+                    for m in am_data:
+                        mid = m.get("id", "")
+                        # Use the model name as label, strip "anthropic/" prefix
+                        label = mid.replace("anthropic/", "")
+                        # Get pricing from PRICING if available
+                        pricing = PRICING.get("anthropic", {}).get(mid, {})
+                        am_models[mid] = {
+                            "input_per_mtok": pricing.get("input"),
+                            "output_per_mtok": pricing.get("output"),
+                            "is_free": pricing.get("input") == 0,
+                            "label": label,
+                        }
+                    provider_models["anthropic"] = am_models
+        except Exception:
+            provider_models["anthropic"] = {}
+
+    # OpenAI: fetch models when key is configured
+    if keys.get("openai"):
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                r = await client.get("https://api.openai.com/v1/models",
+                                      headers={"Authorization": f"Bearer {keys['openai']}"})
+                if r.status_code == 200:
+                    oi_data = r.json().get("data", [])
+                    oi_models = {}
+                    for m in oi_data:
+                        mid = m.get("id", "")
+                        # Extract model name after "openai/"
+                        label = mid.replace("openai/", "")
+                        pricing = PRICING.get("openai", {}).get(mid, {})
+                        oi_models[mid] = {
+                            "input_per_mtok": pricing.get("input"),
+                            "output_per_mtok": pricing.get("output"),
+                            "is_free": pricing.get("input") == 0,
+                            "label": label,
+                        }
+                    provider_models["openai"] = oi_models
+        except Exception:
+            provider_models["openai"] = {}
+
+    # Google: fetch models when key is configured
+    if keys.get("google"):
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                r = await client.get("https://generativelanguage.googleapis.com/v1beta/models",
+                                      params={"key": keys["google"]})
+                if r.status_code == 200:
+                    go_data = r.json().get("models", [])
+                    go_models = {}
+                    for m in go_data:
+                        mid = m.get("name", "")
+                        # Google names come back as "models/gemini-3.8-flash"
+                        label = mid.split("/", 1)[-1] if "/" in mid else mid
+                        pricing = PRICING.get("google", {}).get(mid, {})
+                        go_models[mid] = {
+                            "input_per_mtok": pricing.get("input"),
+                            "output_per_mtok": pricing.get("output"),
+                            "is_free": pricing.get("input") == 0,
+                            "label": label,
+                        }
+                    provider_models["google"] = go_models
+        except Exception:
+            provider_models["google"] = {}
+
+    # ── Build output entries ─────────────────────────────────────────────
     out = []
     for p, meta in CLOUD_PROVIDERS.items():
         model = _cloud_model_for(p, meta)
         live_prices = live_prices_by_provider.get(p, {})
         rates = live_prices.get(model) or PRICING.get(p, {}).get(model) or PRICING.get(p, {}).get("default", {})
+
         entry = {
             "provider": p, "label": meta["label"], "model": model,
             "configured": bool(keys.get(p)),
@@ -3470,20 +3651,16 @@ async def cloud_model_details():
         }
         if keys.get(p):
             entry["budget"] = cost  # {period, budget, spent, remaining, percent_left, by_model}
-        if p in GATEWAY_MODEL_CHOICES:
-            entry["models"] = [
-                {**choice, **({"input_per_mtok": live_prices[choice["model"]]["input"],
-                               "output_per_mtok": live_prices[choice["model"]]["output"],
-                               "is_free": live_prices[choice["model"]]["is_free"]}
-                              if choice["model"] in live_prices
-                              else (PRICING.get(p, {}).get(choice["model"])
-                                    and {"input_per_mtok": PRICING[p][choice["model"]]["input"],
-                                         "output_per_mtok": PRICING[p][choice["model"]]["output"],
-                                         "is_free": PRICING[p][choice["model"]]["input"] == 0}
-                                    or {"is_free": choice["model"].endswith(":free")}))}
-                for choice in GATEWAY_MODEL_CHOICES[p]
-            ]
+
+        # Add all available models for this provider
+        models_list = provider_models.get(p, [])
+        # Convert dict to list if we have a dict
+        if isinstance(models_list, dict):
+            models_list = list(models_list.values())
+        entry["models"] = models_list
+
         out.append(entry)
+
     return {"models": out}
 
 @app.get("/api/models/staleness")
@@ -3534,16 +3711,28 @@ async def _fetch_hf_model_meta(model_id: str) -> dict:
     return {"downloads": 0, "likes": 0, "tags": []}
 
 
-async def _fetch_openrouter_models() -> list:
-    """Fetch public OpenRouter models API — returns model list with pricing/context."""
+async def _fetch_openrouter_models_with_pricing() -> dict:
+    """Fetch all OpenRouter models with pricing, returns {model_id: {"input_per_mtok": float, "output_per_mtok": float, "is_free": bool, "label": str}}."""
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             r = await client.get("https://openrouter.ai/api/v1/models")
             if r.status_code == 200:
-                return r.json().get("data", [])
+                data = r.json().get("data", [])
+                prices = {}
+                for m in data:
+                    mid = m.get("id", "")
+                    pricing = m.get("pricing", {})
+                    input_ppm = float(pricing.get("prompt", "0")) * 1_000_000
+                    output_ppm = float(pricing.get("completion", "0")) * 1_000_000
+                    prices[mid] = {
+                        "input_per_mtok": round(input_ppm, 4),
+                        "output_per_mtok": round(output_ppm, 4),
+                        "is_free": input_ppm == 0 and output_ppm == 0,
+                        "label": m.get("name", mid),
+                    }
+                return prices
     except Exception:
-        pass
-    return []
+        return {}
 
 
 GATEWAY_PRICING_CACHE_TTL = 86400  # 24h — matches the rankings cache below
@@ -3593,9 +3782,8 @@ async def _openrouter_live_pricing() -> dict:
 
 NANOGPT_PRICING_CACHE_FILE = Path(__file__).parent.parent / "nanogpt_pricing_cache.json"
 
-async def _fetch_nanogpt_prices() -> dict:
-    # Unlike OpenRouter/haimaker, NanoGPT's public catalog already reports
-    # price per MILLION tokens directly — no per-token conversion needed.
+async def _fetch_nanogpt_models_with_pricing() -> dict:
+    """Fetch all NanoGPT models with pricing, returns {model_id: {"input_per_mtok": float, "output_per_mtok": float, "is_free": bool, "label": str}}."""
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             r = await client.get("https://nano-gpt.com/api/models")
@@ -3613,8 +3801,14 @@ async def _fetch_nanogpt_prices() -> dict:
             input_ppm, output_ppm = float(input_ppm), float(output_ppm)
         except (TypeError, ValueError):
             continue
-        prices[mid] = {"input": round(input_ppm, 4), "output": round(output_ppm, 4),
-                        "is_free": input_ppm == 0 and output_ppm == 0}
+        # Build a display label from the model ID
+        label = mid.replace("/", " ")
+        prices[mid] = {
+            "input_per_mtok": round(input_ppm, 4),
+            "output_per_mtok": round(output_ppm, 4),
+            "is_free": input_ppm == 0 and output_ppm == 0,
+            "label": label,
+        }
     return prices
 
 async def _nanogpt_live_pricing() -> dict:
@@ -3623,7 +3817,8 @@ async def _nanogpt_live_pricing() -> dict:
 
 HAIMAKER_PRICING_CACHE_FILE = Path(__file__).parent.parent / "haimaker_pricing_cache.json"
 
-async def _fetch_haimaker_prices() -> dict:
+async def _fetch_haimaker_models_with_pricing() -> dict:
+    """Fetch all Haimaker models with pricing, returns {model_group: {"input_per_mtok": float, "output_per_mtok": float, "is_free": bool, "label": str}}."""
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             r = await client.get("https://api.haimaker.ai/public/model_hub")
@@ -3641,19 +3836,53 @@ async def _fetch_haimaker_prices() -> dict:
         except (TypeError, ValueError):
             continue
         if mid:
-            prices[mid] = {"input": round(input_ppm, 4), "output": round(output_ppm, 4),
-                            "is_free": input_ppm == 0 and output_ppm == 0}
+            label = mid.replace("/", " ")
+            prices[mid] = {
+                "input_per_mtok": round(input_ppm, 4),
+                "output_per_mtok": round(output_ppm, 4),
+                "is_free": input_ppm == 0 and output_ppm == 0,
+                "label": label,
+            }
     return prices
 
 async def _haimaker_live_pricing() -> dict:
-    return await _cached_gateway_pricing(HAIMAKER_PRICING_CACHE_FILE, _fetch_haimaker_prices)
+    return await _cached_gateway_pricing(HAIMAKER_PRICING_CACHE_FILE, _fetch_haimaker_models_with_pricing)
 
 
-# perplexity has no confirmed public/unauthenticated live-pricing endpoint —
-# its new Router/Gateway API (which does report live prices) is private-
-# preview only as of this writing, and the legacy Sonar API this app calls
-# has no equivalent. Falls back to PRICING (from Perplexity's published
-# pricing page) for its picker instead of a live fetch.
+PERPLEXITY_MODEL_CHOICES = [
+    {"model": "sonar", "label": "Sonar"},
+    {"model": "sonar-pro", "label": "Sonar Pro"},
+    {"model": "sonar-reasoning-pro", "label": "Sonar Reasoning Pro"},
+    {"model": "sonar-deep-research", "label": "Sonar Deep Research"},
+]
+
+
+async def _fetch_perplexity_models_with_pricing() -> list:
+    """Return the fixed Perplexity Sonar tier list with pricing from PRICING."""
+    return [
+        {
+            "model": choice["model"],
+            "label": choice["label"],
+            "input_per_mtok": PRICING["perplexity"].get(choice["model"], {}).get("input"),
+            "output_per_mtok": PRICING["perplexity"].get(choice["model"], {}).get("output"),
+            "is_free": PRICING["perplexity"].get(choice["model"], {}).get("input") == 0,
+        }
+        for choice in PERPLEXITY_MODEL_CHOICES
+    ]
+
+
+async def _openrouter_live_pricing() -> dict:
+    return await _cached_gateway_pricing(OPENROUTER_PRICING_CACHE_FILE, _fetch_openrouter_models_with_pricing)
+
+
+async def _nanogpt_live_pricing() -> dict:
+    return await _cached_gateway_pricing(NANOGPT_PRICING_CACHE_FILE, _fetch_nanogpt_models_with_pricing)
+
+
+async def _haimaker_live_pricing() -> dict:
+    return await _cached_gateway_pricing(HAIMAKER_PRICING_CACHE_FILE, _fetch_haimaker_models_with_pricing)
+
+
 GATEWAY_LIVE_PRICING_FETCHERS = {
     "openrouter": _openrouter_live_pricing,
     "nanogpt": _nanogpt_live_pricing,
@@ -3714,8 +3943,6 @@ async def _validate_cloud_defaults() -> list:
     keys = _load_api_keys()
     stale = []
     for p, meta in CLOUD_PROVIDERS.items():
-        if p in GATEWAY_MODEL_CHOICES:
-            continue
         key = keys.get(p)
         if not key:
             continue  # can't check without a key — unverifiable, not an error
