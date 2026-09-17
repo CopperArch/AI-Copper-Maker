@@ -3527,11 +3527,29 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
     a password prompt in front of the user with no visible step to attribute
     it to."""
     response_text = ""
+    usage = None
     # Set the moment a search or code tool actually runs — gates the
     # end-of-session auto-skill distillation below so a plain Q&A turn (no
     # tool use at all) never fires an extra LLM call for nothing.
     used_learnable_tool = False
     for turn in range(max_turns):
+        # ── Always-on context management (opencode-style auto-compaction) ──
+        # `usage` still holds the previous turn's exact prompt+eval token
+        # counts here (it's reset just below before the next model call). When
+        # that crosses 75% of the model's effective window, fold everything
+        # but the last 6 messages into a model-generated summary and carry
+        # on — local and cloud, interactive chat and subagents alike, no
+        # config flag, nothing for the user to remember to run.
+        if turn > 0 and usage:
+            try:
+                window = await _model_context_window(model)
+                used = (usage.get("prompt_eval_count") or 0) + (usage.get("eval_count") or 0)
+                if window and used > window * 0.75 and len(conv) >= 10:
+                    new_conv, _summary = await _compact_conv(conv, keep_last=6, model=model)
+                    conv[:] = new_conv
+            except Exception:
+                pass  # best-effort — never kill the turn over a failed compaction
+
         system_msg = {"role": "system", "content": build_system_prompt(system or UNCENSORED_SYSTEM) + "\n\n" + _agent_tool_instructions()}
         messages = [system_msg] + conv
 
@@ -5680,6 +5698,56 @@ Content to learn from:
     raise HTTPException(502, "Could not parse a skill from the model's response — try again or edit manually.")
 
 
+_COMPACT_MARKER = "[Compacted conversation summary"
+
+async def _compact_conv(conv: list, keep_last: int, model: str):
+    """Core of /api/compact AND the agent loop's always-on auto-compaction:
+    summarize everything except the last `keep_last` messages into one dense
+    summary message (marked so the frontend renders it as a context divider,
+    not a user bubble). Returns (replacement_messages, short_summary or None
+    when the conversation was too short). Raises on model failure — the
+    endpoint maps that to a 502, the agent loop just skips this turn."""
+    msgs = [m for m in conv if m.get("content")]
+    if len(msgs) <= keep_last + 1:
+        return msgs, None
+    to_summarize, tail = msgs[:-keep_last], msgs[-keep_last:]
+    transcript = "\n".join(
+        f"{m['role']}: {str(m.get('content', ''))[:2000]}" for m in to_summarize[-40:]
+    )
+    prompt = f"""Summarize this AI-assistant conversation so work can continue seamlessly with only this summary in context. Keep: the user's actual goal(s), decisions made and by whom, files created/edited (with paths), commands run and their outcomes, bugs found/fixed, anything the model was mid-way through, and any explicitly stated preferences or constraints. Drop: pleasantries, narration, full file contents, and verbose tool output. Be dense — bullet points, no preamble.
+
+Conversation:
+{transcript}"""
+    summary = (await _llm_complete(model, [{"role": "user", "content": prompt}], timeout=120)).strip()
+    if not summary:
+        raise ValueError("compaction returned an empty summary")
+    summary_msg = {"role": "user", "content":
+        f"{_COMPACT_MARKER} — earlier messages were summarized to save context; "
+        f"treat this as established history, not a new request]\n\n{summary}"}
+    return [summary_msg] + tail, summary[:400]
+
+_MODEL_CTX_CACHE: dict = {}
+
+async def _model_context_window(model: str) -> int:
+    """Effective context window for auto-compaction. Local models: the agent
+    loop sends an explicit num_ctx of 16384, so that's the real budget even
+    when the model advertises more (fetched from Ollama's /api/show once and
+    cached). Cloud models: their provider's real window — big enough that
+    compaction almost never fires, but it's wired the same regardless."""
+    if "/" in model and model.split("/", 1)[0] in CLOUD_PROVIDERS:
+        return {"anthropic": 200_000, "openai": 128_000, "google": 1_000_000}.get(
+            model.split("/", 1)[0], 128_000)
+    if model in _MODEL_CTX_CACHE:
+        return _MODEL_CTX_CACHE[model]
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.post(f"{OLLAMA}/api/show", json={"name": model})
+            ctx = (r.json().get("details") or {}).get("context_length") or 16384
+    except Exception:
+        ctx = 16384
+    _MODEL_CTX_CACHE[model] = min(int(ctx), 16384)
+    return _MODEL_CTX_CACHE[model]
+
 class CompactRequest(BaseModel):
     model: str
     messages: list[dict] = []
@@ -5692,31 +5760,15 @@ async def compact_conversation(req: CompactRequest):
     return the replacement conversation. Tool call/result entries are folded
     into the summarized transcript (their results matter to the summary, but
     keeping them verbatim is exactly the context bloat compaction exists to
-    remove). The summary is returned as a user-role message prefixed with a
-    marker so it's obviously synthesized, not something the human typed."""
-    msgs = [m for m in req.messages if m.get("content")]
-    if len(msgs) <= req.keep_last + 1:
-        return {"messages": msgs, "summary": "(conversation too short to compact)"}
-
-    to_summarize, tail = msgs[:-req.keep_last], msgs[-req.keep_last:]
-    transcript = "\n".join(
-        f"{m['role']}: {str(m.get('content', ''))[:2000]}" for m in to_summarize[-40:]
-    )
-    prompt = f"""Summarize this AI-assistant conversation so work can continue seamlessly with only this summary in context. Keep: the user's actual goal(s), decisions made and by whom, files created/edited (with paths), commands run and their outcomes, bugs found/fixed, anything the model was mid-way through, and any explicitly stated preferences or constraints. Drop: pleasantries, narration, full file contents, and verbose tool output. Be dense — bullet points, no preamble.
-
-Conversation:
-{transcript}"""
+    remove). The agent loop now also calls this automatically when a turn
+    approaches the model's window — this endpoint stays as the manual /compact."""
     try:
-        summary = (await _llm_complete(req.model, [{"role": "user", "content": prompt}], timeout=120)).strip()
+        new_msgs, summary = await _compact_conv(req.messages, req.keep_last, req.model)
     except Exception as e:
         raise HTTPException(502, f"Model error during compaction: {e}")
-    if not summary:
-        raise HTTPException(502, "Compaction returned an empty summary — nothing changed.")
-
-    summary_msg = {"role": "user", "content":
-        f"[Compacted conversation summary — earlier messages were summarized to save context; "
-        f"treat this as established history, not a new request]\n\n{summary}"}
-    return {"messages": [summary_msg] + tail, "summary": summary[:400]}
+    if summary is None:
+        return {"messages": new_msgs, "summary": "(conversation too short to compact)"}
+    return {"messages": new_msgs, "summary": summary}
 
 
 class TitleRequest(BaseModel):

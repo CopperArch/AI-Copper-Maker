@@ -734,6 +734,16 @@
     font-size: 11px; font-weight: 600; color: var(--warn);
     padding: 2px 8px; border: 1px solid var(--warn); border-radius: 999px;
   }
+  /* Auto-compaction divider (opencode-style context separator) */
+  .compact-notice {
+    display: flex; flex-direction: column; gap: 6px; margin: 14px auto; max-width: 640px;
+    width: 100%; font-size: 11px; color: var(--muted); text-align: center;
+  }
+  .compact-notice > span {
+    padding: 5px 12px; border: 1px dashed var(--border); border-radius: 999px; align-self: center;
+  }
+  .compact-notice details { text-align: left; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; }
+  .compact-notice summary { cursor: pointer; color: var(--accent2); }
   .model-card {
     background: var(--surface); border: 1px solid var(--border);
     border-radius: 8px; padding: 14px 16px; margin-bottom: 10px;
@@ -2340,7 +2350,9 @@ function deleteConversation(id) {
 function conversationToText(conv) {
   const lines = [`# ${conv.title}`, ''];
   for (const m of conv.messages) {
-    if (m.role === 'user') {
+    if (m.role === 'user' && String(m.content).startsWith('[Compacted conversation summary')) {
+      lines.push('[context compacted — earlier turns summarized]', '');
+    } else if (m.role === 'user') {
       lines.push(`User: ${m.displayText !== undefined ? m.displayText : m.content}`, '');
     } else if (m.role === 'assistant') {
       lines.push(`Assistant: ${m.content}`, '');
@@ -2689,6 +2701,16 @@ function renderMessageGroups(messages) {
 
 function renderMsg(msg, idx) {
   const isUser = msg.role === 'user';
+  // Auto-compaction summary (backend _compact_conv): render as an
+  // opencode-style context divider, not a fake user bubble.
+  if (isUser && typeof msg.content === 'string' && msg.content.startsWith('[Compacted conversation summary')) {
+    const body = msg.content.split('\n\n').slice(1).join('\n\n');
+    return `
+      <div class="compact-notice">
+        <span>🗜 context compacted — older turns were summarized to stay within the model's window</span>
+        <details><summary>show summary</summary><div>${renderMarkdown(body)}</div></details>
+      </div>`;
+  }
   // Older saved messages have no displayText/attachments — fall back to the raw content.
   const displayText = isUser && msg.displayText !== undefined ? msg.displayText : msg.content;
   const content = isUser ? escHtml(displayText).replace(/\n/g, '<br>') : renderMarkdown(msg.content);
