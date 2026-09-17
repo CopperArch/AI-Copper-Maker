@@ -12,6 +12,28 @@ Licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE) — free to u
 
 ---
 
+## REV 1.2 (v1.2) — What's New
+
+### 💬 Chat, rebuilt around the opencode command model
+The chat bar now has a **command button row** (New Chat, Compact, Skills, Agent, Model, Clear, Help) plus full **slash-command autocomplete** — type `/` and pick from the list with the arrow keys, Tab, or Enter. `/compact` summarizes everything except the last few turns into one dense summary message (freeing context on long sessions, exactly like opencode/Claude Code compaction); `/agent <task>` jumps to Agent mode with the task pre-filled. Conversations get **automatic titles** generated after their first exchange, and a toast announces it whenever a session teaches the agent a new **auto-learned skill**.
+
+### 🤖 A professional agent loop (copied from the current top-tier coding agents)
+- **Plan tracking** — `todo_write` gives the agent a live task list it must seed before multi-step work and update as it goes; the chat renders it as a progress checklist (`◐` in-progress, `✓` done) inside the reply.
+- **Surgical edits with diffs** — new `edit_file` tool (exact old-string → new-string, uniqueness enforced, near-miss recovery hints). The agent is instructed to prefer it over whole-file rewrites; every edit/write returns a **unified diff** rendered red/green in the chat.
+- **Content search** — new `grep_files` tool (regex over file contents with `file:line` results, skipping junk/binary dirs), alongside the existing filename search.
+- **Subagents** — new `task` tool delegates self-contained research/exploration to a nested agent with a fresh context window; only the distilled report comes back (one nesting level, no sudo inside).
+
+### 🧠 Smarter auto-skills
+Skill distillation now fires on file edits/greps/subagent runs (not just web/code), rejects near-duplicate lessons by name/description similarity, and caps the auto library at 120 (evicting oldest) so the system-prompt skill directory stays small.
+
+### 🎯 Agent Suggestions (Projects tab)
+A **🤖 Agent Suggestions** button analyzes the currently open project and proposes its highest-value next tasks as one-click cards — each is a fully self-contained agent instruction (real files, real functions) with a **▶ Run in Agent** button that switches to Agent mode and starts it immediately.
+
+### 💸 Paid-model token savings + cost & budget metering
+When a cloud model is selected, every request now uses the standard token-saving stack: **prompt caching** (Anthropic explicit cache breakpoints on the system prompt and conversation prefix — the big one, ~90% off cached input; OpenAI/Gemini cache automatically and are read back the same way) and **history slimming** (older tool outputs are elided from re-sent history instead of paying for them again every turn). Every cloud call's exact token counts — including cached tokens — are priced against a built-in rate table and logged to a **monthly spend ledger**. The chat shows the estimated cost of each turn right after the token count, plus a running **"💳 $X of $Y budget · N% left"** line (budget configurable from the token-usage ⋮ menu, default $20/month, resets each month, colors warn at 35%/10% left). All costs are marked ≈ — awareness, not an invoice.
+
+---
+
 ## REV 1.1 (v1.1) — What's New
 
 ### 🔧 Fully offline Android APK builds

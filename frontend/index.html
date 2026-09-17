@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>AI Copper Maker</title>
-<link rel="stylesheet" id="hljs-theme-link" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/styles/github-dark.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/highlight.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.0/marked.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
@@ -34,31 +34,9 @@
     --muted:    #7d8590;
     --user-bg:  #1c2128;
     --ai-bg:    #161b22;
-    /* Brand mark only (logo + the word "Copper" in the header) — kept
-       separate from --accent, which still drives buttons/links/active
-       states everywhere else in the UI. Same value in both themes on
-       purpose: a brand color should stay recognizable regardless of theme. */
-    --copper:   #B87333;
     --danger:   #da3633;
     --warn:     #d29922;
-  }
-
-  /* Light theme — toggled via data-theme="light" on <html>, persisted to
-     localStorage('theme'). Kept as a full token override (not a handful of
-     tweaks) so every surface — including ones added later — stays correct
-     under both themes automatically. */
-  :root[data-theme="light"] {
-    --bg:       #f6f8fa;
-    --surface:  #ffffff;
-    --border:   #d0d7de;
-    --accent:   #1a7f37;
-    --accent2:  #0969da;
-    --text:     #1f2328;
-    --muted:    #59636e;
-    --user-bg:  #eef1f4;
-    --ai-bg:    #ffffff;
-    --danger:   #cf222e;
-    --warn:     #9a6700;
+    --copper:   #B87333;
   }
 
   body {
@@ -81,6 +59,7 @@
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
   }
+  .header-logo { width: 38px; height: 38px; border-radius: 8px; object-fit: cover; cursor: pointer; flex-shrink: 0; }
   header h1 { font-size: 16px; font-weight: 600; line-height: 1.2; }
   header h1 span { color: var(--copper); }
   header h1 .byline { display: block; font-size: 10px; font-weight: 400; color: var(--muted); letter-spacing: .3px; }
@@ -140,10 +119,7 @@
     margin-top: 4px;
   }
 
-  .conv-search-wrap { padding: 0 12px 8px; }
-  .conv-search-wrap input { font-size: 12px; padding: 5px 8px; }
   .conv-list { flex: 1; overflow-y: auto; padding: 8px; }
-  .conv-item.search-hidden { display: none; }
   .conv-item {
     padding: 8px 10px;
     border-radius: 6px;
@@ -202,17 +178,6 @@
   .btn-sm { padding: 4px 10px; font-size: 12px; }
   .btn-full { width: 100%; justify-content: center; }
 
-  /* Small chrome buttons (theme toggle, sidebar collapse) — same understated
-     hover-reveal language as .conv-menu-btn/.pw-toggle-btn elsewhere. */
-  .icon-btn {
-    background: none; border: 1px solid transparent; color: var(--muted);
-    cursor: pointer; font-size: 15px; line-height: 1; padding: 5px 7px;
-    border-radius: 6px; transition: background .15s, color .15s;
-  }
-  .icon-btn:hover { color: var(--text); background: rgba(127,127,127,.12); }
-  .sidebar-toggle-btn { display: none; }
-  .sidebar-backdrop { display: none; }
-
   /* ── Tabs ── */
   .tabs-row {
     display: flex;
@@ -256,7 +221,14 @@
   .tab.active { color: var(--text); border-bottom-color: var(--accent2); }
 
   /* ── Main Content ── */
-  .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; position: relative; }
+  /* Brand watermark — faint logo behind every tab's content */
+  .logo-watermark {
+    position: absolute; inset: 0; z-index: 0; display: flex;
+    align-items: center; justify-content: center; pointer-events: none; overflow: hidden;
+  }
+  .logo-watermark img { width: 100%; max-height: 90%; object-fit: contain; opacity: .05; user-select: none; }
+  .main > *:not(.logo-watermark) { position: relative; z-index: 1; }
   .tab-panel { display: none; flex: 1; flex-direction: column; overflow: hidden; }
   .tab-panel.active { display: flex; }
 
@@ -302,22 +274,6 @@
   .message.user .bubble {
     background: rgba(31,111,235,.15);
     border-color: rgba(31,111,235,.3);
-  }
-
-  /* Edit-and-resend — offered only on the most recent user message (see
-     renderMessageGroups). Hover-reveal matches .conv-menu-btn elsewhere. */
-  .user-edit-btn {
-    display: none;
-    margin-left: 8px;
-    background: none; border: none; color: var(--muted); cursor: pointer;
-    font-size: 12px; padding: 2px 5px; border-radius: 4px; vertical-align: middle;
-  }
-  .message.user:hover .user-edit-btn { display: inline-block; }
-  .user-edit-btn:hover { color: var(--text); background: rgba(255,255,255,.12); }
-  .edit-user-textarea {
-    width: 100%; min-height: 60px; resize: vertical;
-    background: var(--bg); border: 1px solid var(--border); color: var(--text);
-    border-radius: 6px; padding: 6px 8px; font-size: 14px; font-family: inherit;
   }
 
   /* Markdown rendering */
@@ -386,6 +342,154 @@
   }
   .tool-row-body pre code { display: block; background: none; padding: 0; font: inherit; }
 
+  /* Tool row status — ✓ done / ✗ failed replaces the old plain
+     "running…" once a result lands (completeToolRow swaps the span). */
+  .tool-status-run { margin-left: auto; opacity: .6; font-size: 11px; }
+  .tool-status-ok { margin-left: auto; color: #3fb950; font-size: 11px; font-weight: 600; }
+  .tool-status-err { margin-left: auto; color: #f85149; font-size: 11px; font-weight: 600; }
+
+  /* Diffs inside tool results (edit_file / write_file) — GitHub-dark-ish
+     +/-/@ coloring, the way opencode and Claude Code show file edits. */
+  .diff-block { margin-top: 4px; }
+  .diff-block code { counter-reset: none; }
+  .diff-add { color: #3fb950; display: block; }
+  .diff-del { color: #f85149; display: block; }
+  .diff-hunk { color: #58a6ff; display: block; opacity: .85; }
+  .diff-ctx { display: block; opacity: .75; }
+
+  /* todo_write rows — the agent's live plan/progress checklist. */
+  .tool-row-todo summary { color: var(--text); }
+  .todo-list { padding: 6px 10px 10px; }
+  .todo-item { display: flex; gap: 8px; align-items: baseline; padding: 3px 0; font-size: 12px; }
+  .todo-icon { width: 16px; text-align: center; flex-shrink: 0; }
+  .todo-completed .todo-text { text-decoration: line-through; opacity: .55; }
+  .todo-in_progress .todo-text { color: var(--text); font-weight: 600; }
+  .todo-in_progress .todo-icon { color: #d29922; }
+  .todo-completed .todo-icon { color: #3fb950; }
+  .todo-pending .todo-icon, .todo-pending .todo-text { opacity: .6; }
+  .todo-progress { margin-top: 6px; font-size: 10px; text-transform: uppercase; letter-spacing: .4px; color: var(--muted); }
+
+  /* ── File Explorer (Windows Explorer style) ── */
+  .explorer { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
+  .ex-toolbar { display: flex; align-items: center; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  .ex-nav {
+    width: 30px; height: 28px; border-radius: 6px; border: 1px solid transparent; cursor: pointer;
+    background: transparent; color: var(--text); font-size: 11px; transition: background .12s;
+  }
+  .ex-nav:hover:not(:disabled) { background: rgba(127,127,127,.15); }
+  .ex-nav:disabled { opacity: .35; cursor: default; }
+  .ex-breadcrumb {
+    flex: 1; display: flex; align-items: center; gap: 2px; overflow: hidden; height: 28px; min-width: 60px;
+    border: 1px solid var(--border); border-radius: 6px; background: var(--surface); padding: 0 6px;
+  }
+  .ex-crumb {
+    font-size: 12px; color: var(--text); padding: 3px 6px; border-radius: 4px; cursor: pointer;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 160px; flex-shrink: 0;
+  }
+  .ex-crumb:hover { background: rgba(127,127,127,.15); }
+  .ex-crumb-sep { color: var(--muted); font-size: 11px; flex-shrink: 0; }
+  #ex-search {
+    width: 170px; height: 28px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--surface); color: var(--text); padding: 0 10px; font-size: 12px; flex-shrink: 0;
+    font-family: inherit;
+  }
+  #ex-search:focus { outline: none; border-color: var(--accent2); }
+  .ex-cmdbar { display: flex; align-items: center; gap: 6px; padding: 6px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  .ex-btn {
+    font-size: 12px; padding: 4px 10px; border-radius: 6px; cursor: pointer; font-family: inherit;
+    border: 1px solid var(--border); background: var(--surface); color: var(--text); transition: background .12s;
+  }
+  .ex-btn:hover { background: rgba(127,127,127,.12); }
+  .ex-header {
+    display: grid; grid-template-columns: minmax(160px,1fr) 150px 150px 90px;
+    padding: 0 12px; flex-shrink: 0; border-bottom: 1px solid var(--border); background: var(--surface);
+  }
+  .ex-hcol {
+    font-size: 11px; font-weight: 600; color: var(--muted); padding: 6px 8px; cursor: pointer;
+    user-select: none; display: flex; align-items: center; gap: 4px; white-space: nowrap;
+  }
+  .ex-hcol:hover { color: var(--text); }
+  .ex-hsize { justify-content: flex-end; }
+  .ex-sortind { font-size: 9px; }
+  .ex-list { flex: 1; overflow-y: auto; outline: none; min-height: 0; }
+  .ex-row {
+    display: grid; grid-template-columns: minmax(160px,1fr) 150px 150px 90px;
+    align-items: center; padding: 0 12px; height: 32px; font-size: 12px; cursor: default;
+  }
+  .ex-row:hover { background: rgba(127,127,127,.08); }
+  .ex-row.ex-selected { background: rgba(31,111,235,.22); }
+  .ex-row.ex-selected:hover { background: rgba(31,111,235,.3); }
+  .ex-cell { padding: 0 8px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .ex-name { display: flex; align-items: center; gap: 8px; }
+  .ex-name svg { flex-shrink: 0; }
+  .ex-modified, .ex-type { color: var(--muted); font-size: 11.5px; }
+  .ex-size { text-align: right; color: var(--muted); font-size: 11.5px; }
+  .ex-status {
+    flex-shrink: 0; padding: 4px 12px; border-top: 1px solid var(--border);
+    font-size: 11px; color: var(--muted); background: var(--surface);
+  }
+  .ex-context {
+    position: fixed; z-index: 1000; display: none; min-width: 190px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0,0,0,.4); padding: 4px;
+  }
+  .ex-context-item {
+    padding: 7px 12px; font-size: 12px; border-radius: 5px; cursor: pointer;
+    display: flex; gap: 8px; align-items: center;
+  }
+  .ex-context-item:hover { background: var(--accent); color: #fff; }
+  .ex-context-item.danger:hover { background: var(--danger); }
+  .ex-context-sep { height: 1px; background: var(--border); margin: 4px 8px; }
+  .ex-rename-input {
+    font: inherit; font-size: 12px; background: var(--bg); color: var(--text);
+    border: 1px solid var(--accent2); border-radius: 3px; padding: 1px 4px; width: 100%; outline: none;
+  }
+  .ex-creating-hint { padding: 4px 12px; font-size: 11px; color: var(--muted); }
+
+  /* Slash-command autocomplete popup, anchored above the input row */
+  .slash-popup {
+    display: none; position: absolute; bottom: 100%; left: 0; right: 0; z-index: 500;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    box-shadow: 0 8px 30px rgba(0,0,0,.45); overflow: hidden; max-height: 280px; overflow-y: auto;
+    margin-bottom: 4px;
+  }
+  .slash-item {
+    display: flex; gap: 10px; align-items: baseline; padding: 8px 12px; cursor: pointer; font-size: 12px;
+  }
+  .slash-item:hover, .slash-item.selected { background: rgba(127,127,127,.14); }
+  .slash-cmd-name { font-family: "JetBrains Mono", "Fira Code", monospace; color: var(--text); font-weight: 600; white-space: nowrap; }
+  .slash-cmd-desc { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .slash-hint { padding: 6px 12px; font-size: 10px; color: var(--muted); border-top: 1px solid var(--border); }
+
+  /* Toasts — command feedback, compaction results, auto-learned skills */
+  #toast-host { position: fixed; bottom: 18px; right: 18px; z-index: 10000; display: flex; flex-direction: column; gap: 8px; }
+  .toast {
+    background: var(--surface); border: 1px solid var(--border); color: var(--text);
+    padding: 10px 14px; border-radius: 8px; font-size: 12px; max-width: 380px;
+    box-shadow: 0 6px 24px rgba(0,0,0,.45); animation: toastIn .2s ease;
+  }
+  .toast.out { opacity: 0; transition: opacity .3s ease; }
+  @keyframes toastIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+  /* Agent Suggestions cards (Projects tab) */
+  .suggestion-header { font-size: 13px; font-weight: 600; margin-bottom: 10px; }
+  .suggestion-card {
+    border: 1px solid var(--border); border-radius: 10px; padding: 12px;
+    margin-bottom: 10px; background: var(--surface); display: flex; flex-direction: column; gap: 8px;
+  }
+  .suggestion-title { font-weight: 600; font-size: 13px; }
+  .suggestion-task { font-size: 12px; color: var(--muted); white-space: pre-wrap; }
+  .suggestion-card .btn { align-self: flex-start; }
+
+  /* Cloud budget row inside the token-usage ⋮ menu */
+  .budget-row { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--border); }
+  .budget-row label { font-size: 11px; color: var(--muted); white-space: nowrap; }
+  .budget-row input {
+    width: 64px; font-size: 12px; padding: 3px 6px; border-radius: 4px;
+    border: 1px solid var(--border); background: var(--bg); color: var(--text);
+  }
+  #cost-count { transition: color .2s ease; }
+
   /* ── Edit Panel (CodeMirror) ── */
   #edit-panel {
     position: fixed; top: 0; right: -480px; width: 460px; max-width: 90vw; height: 100vh;
@@ -418,6 +522,7 @@
     border-top: 1px solid var(--border);
     background: var(--surface);
     flex-shrink: 0;
+    position: relative; /* anchor for the slash-command autocomplete popup */
   }
   .input-row { display: flex; gap: 10px; align-items: flex-end; }
   #chat-input {
@@ -582,95 +687,19 @@
   .runner-output .exit { color: var(--muted); font-size: 11px; margin-top: 8px; border-top: 1px solid var(--border); padding-top: 8px; }
   .runner-placeholder { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--muted); font-size: 13px; text-align: center; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
 
-  /* ── Email: Outlook-style ribbon + folder rail + list + reading pane ── */
-  .email-app-font { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-  .email-ribbon {
-    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-    padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--surface); flex-shrink: 0;
+  /* ── Email: Outlook/Gmail-style inbox list + reading pane ── */
+  .email-list, .email-detail {
+    background: var(--surface);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   }
-  .email-ribbon select { width: auto; min-width: 180px; }
-  .email-3pane { flex: 1; display: flex; overflow: hidden; min-height: 0; }
-
-  .email-folder-rail {
-    width: 170px; flex-shrink: 0; overflow-y: auto; padding: 10px 6px;
-    border-right: 1px solid var(--border); background: var(--surface);
-  }
-  .email-folder-item {
-    display: flex; align-items: center; gap: 8px;
-    padding: 7px 10px; border-radius: 6px; cursor: pointer; font-size: 13px;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
-  .email-folder-item:hover { background: rgba(255,255,255,.05); }
-  .email-folder-item.active { background: rgba(31,111,235,.15); color: var(--accent2); font-weight: 600; }
-  .email-folder-item .folder-name { flex: 1; overflow: hidden; text-overflow: ellipsis; }
-  .email-folder-item .folder-unread-count {
-    font-size: 11px; color: var(--muted); flex-shrink: 0;
-  }
-  .email-folder-item.active .folder-unread-count { color: var(--accent2); }
-
-  /* ── Calendar peek (Outlook-style right-hand mini calendar) ── */
-  .email-calendar-peek {
-    width: 220px; flex-shrink: 0; overflow-y: auto; padding: 12px;
-    border-left: 1px solid var(--border); background: var(--surface);
-  }
-  .peek-month {
-    font-size: 13px; font-weight: 600; margin-bottom: 8px; text-align: center;
-  }
-  .peek-group-label {
-    font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px;
-    margin: 12px 0 6px;
-  }
-  .peek-group-label:first-of-type { margin-top: 0; }
-  .peek-event {
-    display: flex; gap: 8px; padding: 6px 4px; border-radius: 6px; font-size: 12px;
-    cursor: default;
-  }
-  .peek-event:hover { background: rgba(255,255,255,.05); }
-  .peek-event-time { color: var(--muted); flex-shrink: 0; width: 46px; }
-  .peek-event-title {
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;
-  }
-  .peek-empty { font-size: 12px; color: var(--muted); text-align: center; padding: 16px 4px; }
-  .peek-viewall { display: block; text-align: center; font-size: 12px; margin-top: 10px; color: var(--accent2); cursor: pointer; }
-  .peek-viewall:hover { text-decoration: underline; }
-
-  .email-list, .email-detail { background: var(--surface); }
   .email-row {
     display: flex; flex-direction: column; gap: 3px;
     padding: 10px 14px; margin: 6px 8px;
     border: 1px solid var(--border); border-radius: 10px;
     cursor: pointer; transition: background .1s ease, border-color .1s ease;
-    position: relative;
   }
   .email-row:hover { background: rgba(255,255,255,.04); }
-  .email-row.read { background: rgba(34,197,94,.08); }
-  .email-row.unread { background: rgba(239,68,68,.10); border-left: 3px solid var(--danger); }
-  .email-row.unread .email-row-sender, .email-row.unread .email-row-subject { font-weight: 700; }
-  /* Pinned wins over read/unread tinting (amber, regardless of read state) —
-     comes after them in source so equal-specificity cascade favors it. */
-  .email-row.pinned { background: rgba(217,119,6,.16); border-left: 3px solid #d97706; }
-  /* Selection must stay visually distinct no matter what read/unread/pinned
-     tint is under it — the one deliberate !important in this file. */
-  .email-row.active { background: rgba(31,111,235,.18) !important; border-color: var(--accent2); }
-  .email-row-pin {
-    position: absolute; top: 6px; right: 8px; display: none;
-    background: none; border: none; cursor: pointer; font-size: 12px; opacity: .6;
-    padding: 2px 4px; border-radius: 4px; line-height: 1;
-  }
-  .email-row:hover .email-row-pin, .email-row.pinned .email-row-pin { display: inline-block; }
-  .email-row.pinned .email-row-pin { opacity: 1; }
-  .email-row-pin:hover { background: rgba(255,255,255,.12); opacity: 1; }
-
-  /* ── Swipe to delete/archive ── */
-  .email-row { touch-action: pan-y; transition: transform .18s ease, opacity .18s ease; }
-  .email-row.dragging { transition: none; }
-  .email-row-swipe-bg {
-    position: absolute; inset: 0; border-radius: 10px;
-    display: flex; align-items: center; padding: 0 16px;
-    font-size: 13px; font-weight: 600; color: #fff;
-    opacity: 0; pointer-events: none; z-index: 0;
-  }
-  .email-row-top, .email-row-subject, .email-row-preview, .email-row-pin { position: relative; z-index: 1; }
+  .email-row.active { background: rgba(31,111,235,.15); border-color: var(--accent2); }
   .email-row-top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
   .email-row-sender { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .email-row-date { font-size: 11px; color: var(--muted); flex-shrink: 0; }
@@ -689,58 +718,42 @@
   .email-detail-date { font-size: 12px; color: var(--muted); margin-left: auto; white-space: nowrap; }
   .email-detail-body {
     padding: 20px 24px; font-size: 14px; line-height: 1.7; white-space: pre-wrap;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   }
   .email-detail-actions { padding: 0 24px 20px; display: flex; gap: 8px; flex-wrap: wrap; }
-
-  /* "Copper AI" — the app's answer to Copilot in Outlook. Uses --copper (not
-     --accent2, which everything else in Email uses) so the AI-assist actions
-     read as a distinct, branded capability rather than another generic
-     button. */
-  .btn-copper {
-    background: var(--copper); color: #fff;
-    display: inline-flex; align-items: center; gap: 6px;
-    padding: 7px 14px; border-radius: 6px; border: none;
-    cursor: pointer; font-size: 13px; font-weight: 600;
-    transition: opacity .15s;
-  }
-  .btn-copper:hover { opacity: .85; }
-  .btn-copper.btn-sm { padding: 4px 10px; font-size: 12px; }
-
-  /* ── Compose modal ── */
-  .compose-overlay {
-    position: fixed; inset: 0; background: rgba(0,0,0,.55);
-    display: flex; align-items: center; justify-content: center; z-index: 3000;
-  }
-  .compose-box {
-    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
-    width: 92%; max-width: 640px; max-height: 85vh; display: flex; flex-direction: column;
-    box-shadow: 0 12px 40px rgba(0,0,0,.4); overflow: hidden;
-  }
-  .compose-header {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 14px 18px; border-bottom: 1px solid var(--border); font-weight: 600; font-size: 14px;
-  }
-  .compose-body { padding: 14px 18px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
-  .compose-body input { font-size: 13px; }
-  .compose-body textarea {
-    width: 100%; min-height: 220px; resize: vertical; font-family: inherit; font-size: 13px;
-    background: var(--bg); border: 1px solid var(--border); color: var(--text);
-    border-radius: 6px; padding: 8px 10px;
-  }
-  .compose-ai-row {
-    display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
-    padding: 10px; border: 1px dashed var(--copper); border-radius: 8px; background: rgba(184,115,51,.06);
-  }
-  .compose-ai-row input { flex: 1; min-width: 160px; }
-  .compose-footer {
-    display: flex; justify-content: flex-end; gap: 8px;
-    padding: 12px 18px; border-top: 1px solid var(--border);
-  }
 
   /* ── Models Panel ── */
   .models-panel { padding: 24px; overflow-y: auto; max-width: 860px; }
   .models-panel h2 { font-size: 18px; font-weight: 600; margin-bottom: 6px; }
   .models-panel p { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+  .models-section-title {
+    font-size: 13px; font-weight: 600; margin: 18px 0 10px; display: flex;
+    align-items: baseline; gap: 10px;
+  }
+  .models-section-title span { font-size: 11px; font-weight: 400; color: var(--muted); }
+  .update-badge {
+    font-size: 11px; font-weight: 600; color: var(--warn);
+    padding: 2px 8px; border: 1px solid var(--warn); border-radius: 999px;
+  }
+  /* Auto-compaction divider (opencode-style context separator) */
+  .compact-notice {
+    display: flex; flex-direction: column; gap: 6px; margin: 14px auto; max-width: 640px;
+    width: 100%; font-size: 11px; color: var(--muted); text-align: center;
+  }
+  .compact-notice > span {
+    padding: 5px 12px; border: 1px dashed var(--border); border-radius: 999px; align-self: center;
+  }
+  .compact-notice details { text-align: left; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; }
+  .compact-notice summary { cursor: pointer; color: var(--accent2); }
+  /* LSP status chips (Models tab) */
+  .lsp-chip {
+    font-size: 11px; padding: 3px 10px; border-radius: 999px;
+    border: 1px solid var(--border); color: var(--muted); background: var(--surface);
+  }
+  .lsp-running { border-color: var(--accent); color: var(--accent); }
+  .lsp-available { border-color: var(--accent2); color: var(--accent2); }
+  .lsp-missing { border-color: var(--danger); color: var(--danger); }
+  .lsp-off { border-color: var(--warn); color: var(--warn); }
   .model-card {
     background: var(--surface); border: 1px solid var(--border);
     border-radius: 8px; padding: 14px 16px; margin-bottom: 10px;
@@ -853,65 +866,14 @@
   .file-attachments {
     display: flex; flex-wrap: wrap; gap: 4px; padding: 6px 0;
   }
-
-  /* ── Command palette (Ctrl/Cmd+K conversation switcher) ── */
-  .cmdk-overlay {
-    position: fixed; inset: 0; background: rgba(0,0,0,.5);
-    display: flex; align-items: flex-start; justify-content: center;
-    padding-top: 12vh; z-index: 2000;
-  }
-  .cmdk-box {
-    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
-    width: 90%; max-width: 480px; max-height: 60vh; display: flex; flex-direction: column;
-    box-shadow: 0 12px 40px rgba(0,0,0,.4); overflow: hidden;
-  }
-  .cmdk-box input {
-    border: none; border-bottom: 1px solid var(--border); border-radius: 0;
-    padding: 12px 14px; font-size: 14px;
-  }
-  .cmdk-box input:focus { border-color: var(--border); }
-  .cmdk-results { overflow-y: auto; padding: 6px; }
-  .cmdk-item {
-    padding: 8px 10px; border-radius: 6px; cursor: pointer; font-size: 13px;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
-  .cmdk-item:hover, .cmdk-item.active { background: rgba(255,255,255,.08); }
-  .cmdk-empty { padding: 14px; font-size: 12px; color: var(--muted); text-align: center; }
-
-  /* ── Mobile / narrow viewport ── */
-  @media (max-width: 760px) {
-    .sidebar-toggle-btn { display: inline-flex; }
-    header h1 .byline { display: none; }
-    .header-right { gap: 8px; }
-    .status-group .status-text { display: none; }
-
-    .sidebar {
-      position: fixed; top: 0; bottom: 0; left: 0; z-index: 500;
-      transform: translateX(-100%); transition: transform .2s ease;
-      box-shadow: 4px 0 20px rgba(0,0,0,.35);
-    }
-    .sidebar.open { transform: translateX(0); }
-    .sidebar-backdrop.open {
-      display: block; position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 499;
-    }
-
-    .tabs { overflow-x: auto; }
-    .bubble { max-width: calc(100% - 34px); font-size: 13px; }
-    .cmdk-box { max-width: 92%; }
-  }
 </style>
 </head>
 <body>
 
 <header>
-  <button class="icon-btn sidebar-toggle-btn" onclick="toggleSidebar()" title="Toggle sidebar" aria-label="Toggle sidebar">☰</button>
-  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" onclick="showAboutModal()" style="cursor:pointer" title="About AI Copper Maker">
-    <rect width="24" height="24" rx="6" fill="var(--copper)"/>
-    <path d="M7 8h10M7 12h6M7 16h8" stroke="white" stroke-width="1.8" stroke-linecap="round"/>
-  </svg>
+  <img src="assets/logo.png" alt="" class="header-logo" onclick="showAboutModal()" title="About AI Copper Maker">
   <h1>AI <span>Copper</span> Maker<span class="byline">A local AI coding studio — by CopperArch</span></h1>
   <div class="header-right">
-    <button class="icon-btn" id="theme-toggle-btn" onclick="toggleTheme()" title="Toggle light/dark theme" aria-label="Toggle light/dark theme">🌙</button>
     <div class="status-group">
       <div id="status-dot" class="status-dot"></div>
       <span id="status-text" class="status-text">Connecting...</span>
@@ -924,9 +886,8 @@
 </header>
 
 <div class="app">
-  <div class="sidebar-backdrop" id="sidebar-backdrop" onclick="toggleSidebar(false)"></div>
   <!-- Sidebar -->
-  <div class="sidebar" id="sidebar">
+  <div class="sidebar">
     <div class="sidebar-section">
       <label>Model</label>
       <select id="model-select">
@@ -945,9 +906,6 @@
       </button>
     </div>
 
-    <div class="conv-search-wrap">
-      <input type="text" id="conv-search" placeholder="🔍 Search conversations…" oninput="filterConvList(this.value)">
-    </div>
     <div class="conv-list" id="conv-list"></div>
 
     <div class="sidebar-section" style="margin-top:auto">
@@ -980,6 +938,7 @@
 
   <!-- Main -->
   <div class="main">
+    <div class="logo-watermark"><img src="assets/logo-watermark.png" alt=""></div>
     <div id="update-banner" style="display:none;padding:8px 16px;background:rgba(35,134,54,.15);border-bottom:1px solid rgba(35,134,54,.3);font-size:13px;align-items:center;gap:10px"></div>
     <!-- Tabs -->
     <div class="tabs-row">
@@ -992,7 +951,7 @@
         <div class="tab" onclick="switchTab('runner')">▶ Run Code</div>
         <div class="tab" onclick="switchTab('agent')">🤖 Agent</div>
         <div class="tab" onclick="switchTab('files')">📁 Files</div>
-        <div class="tab" onclick="switchTab('search')">🗂 File Search</div>
+        <div class="tab" onclick="switchTab('search')">🌐 Search</div>
         <div class="tab" onclick="switchTab('imagegen')">🎨 Image Gen</div>
         <div class="tab" onclick="switchTab('models')">📦 Models</div>
         <div class="tab" onclick="switchTab('email')">📧 Email</div>
@@ -1026,10 +985,10 @@
         <div class="chat-meta">
           <span id="token-count" class="token-count-ready">Ready</span>
           <span id="turn-token-count" style="font-size:11px;color:var(--muted)"></span>
+          <span id="cost-count" style="font-size:11px;color:var(--muted);display:none"></span>
           <span id="queue-indicator" style="font-size:11px;color:var(--muted)"></span>
           <span class="system-toggle" onclick="toggleSystemPrompt()">⚙ System prompt</span>
-          <span class="system-toggle" id="regenerate-toggle" onclick="regenerateLastResponse()" style="display:none">↻ Regenerate</span>
-          <span style="font-size:11px;color:var(--muted);margin-left:auto">📎 Drop files or folders anywhere on chat · Ctrl+K to search chats</span>
+          <span style="font-size:11px;color:var(--muted);margin-left:auto">📎 Drop files or folders anywhere on chat</span>
         </div>
         <div class="activity-bar" id="chat-activity-bar"></div>
         <div id="system-prompt-box">
@@ -1066,6 +1025,7 @@
                 <button class="btn btn-secondary btn-sm" onclick="cpAnalyze('improve')">✨ Improve Code</button>
                 <button class="btn btn-secondary btn-sm" onclick="cpAddFeaturePrompt()">➕ Add Feature</button>
                 <button class="btn btn-secondary btn-sm" onclick="cpAnalyze('suggest')">💡 Suggest Features</button>
+                <button class="btn btn-secondary btn-sm" onclick="cpAgentSuggestions()">🤖 Agent Suggestions</button>
                 <button class="btn btn-secondary btn-sm" onclick="cpSaveToDisk()">💾 Save to Disk</button>
               </div>
             </div>
@@ -1304,34 +1264,39 @@
       </div>
     </div>
 
-    <!-- Files Tab -->
+    <!-- Files Tab (Windows Explorer style) -->
     <div class="tab-panel" id="tab-files">
-      <div class="runner-layout">
-        <div class="runner-panel">
-          <div class="runner-toolbar">
-            <h2>📁 Files</h2>
-            <span style="font-size:12px;color:var(--muted)">~/ (your whole home directory)</span>
+      <div class="explorer">
+        <div class="ex-toolbar">
+          <button class="ex-nav" id="ex-back-btn" onclick="exBack()" title="Back">◀</button>
+          <button class="ex-nav" id="ex-fwd-btn" onclick="exForward()" title="Forward">▶</button>
+          <button class="ex-nav" id="ex-up-btn" onclick="exGoUp()" title="Up">▲</button>
+          <div class="ex-breadcrumb" id="ex-breadcrumb"></div>
+          <input type="text" id="ex-search" placeholder="Search" oninput="exRender()" onkeydown="if(event.key==='Escape'){this.value='';exRender();}" title="Filter the current folder by name">
+        </div>
+        <div class="ex-cmdbar">
+          <button class="ex-btn" id="ex-new-file-btn" onclick="exNewFile()" title="New file in this folder">📄 New file</button>
+          <button class="ex-btn" id="ex-new-dir-btn" onclick="exNewDir()" title="New folder in this folder">📁 New folder</button>
+          <button class="ex-btn" onclick="exRefresh()" title="Refresh">⟳ Refresh</button>
+        </div>
+        <div class="ex-header" id="ex-header">
+          <div class="ex-hcol ex-sortable" data-key="name">Name<span class="ex-sortind" id="ex-sort-name"></span></div>
+          <div class="ex-hcol ex-sortable" data-key="modified">Date modified<span class="ex-sortind" id="ex-sort-modified"></span></div>
+          <div class="ex-hcol ex-sortable" data-key="type">Type<span class="ex-sortind" id="ex-sort-type"></span></div>
+          <div class="ex-hcol ex-sortable ex-hsize" data-key="size">Size<span class="ex-sortind" id="ex-sort-size"></span></div>
+        </div>
+        <div class="ex-list" id="file-list" tabindex="0"></div>
+        <div class="ex-status"><span id="ex-status">0 items</span></div>
+        <div id="file-editor-area" style="display:none;flex-direction:column;gap:8px;padding-top:8px;border-top:1px solid var(--border);flex:0 0 45%">
+          <div style="display:flex;gap:8px;align-items:center">
+            <span id="file-editor-path" style="font-size:12px;color:var(--muted)"></span>
+            <button class="btn btn-primary btn-sm" onclick="fileSave()">💾 Save</button>
+            <button class="btn btn-secondary btn-sm" onclick="fileCloseEditor()">✕ Close</button>
           </div>
-          <div style="display:flex;gap:8px;flex-shrink:0">
-            <button class="btn btn-secondary btn-sm" onclick="fileGoUp()">⬆ Up</button>
-            <span id="file-current-path" style="font-size:12px;color:var(--muted);padding:4px 0">/</span>
-          </div>
-          <div id="file-list" style="flex:1;overflow-y:auto" class="runner-output"></div>
-          <div style="display:flex;gap:8px;flex-shrink:0;padding-top:8px;border-top:1px solid var(--border)">
-            <input type="text" id="file-new-name" placeholder="filename.ext" style="flex:1;font-size:12px">
-            <button class="btn btn-secondary btn-sm" onclick="fileCreate()">+ File</button>
-            <button class="btn btn-secondary btn-sm" onclick="fileCreateDir()">+ Dir</button>
-          </div>
-          <div id="file-editor-area" style="display:none;flex-direction:column;flex:1;gap:8px;padding-top:8px;border-top:1px solid var(--border)">
-            <div style="display:flex;gap:8px;align-items:center">
-              <span id="file-editor-path" style="font-size:12px;color:var(--muted)"></span>
-              <button class="btn btn-primary btn-sm" onclick="fileSave()">💾 Save</button>
-              <button class="btn btn-secondary btn-sm" onclick="fileCloseEditor()">✕ Close</button>
-            </div>
-            <textarea id="file-editor" style="flex:1;font-family:monospace;font-size:13px;padding:12px;background:#0d1117;border:1px solid var(--border);border-radius:8px;color:var(--text);resize:none"></textarea>
-          </div>
+          <textarea id="file-editor" style="flex:1;font-family:monospace;font-size:13px;padding:12px;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);resize:none"></textarea>
         </div>
       </div>
+      <div class="ex-context" id="ex-context"></div>
     </div>
 
     <!-- Search Tab -->
@@ -1339,6 +1304,18 @@
       <div class="runner-layout">
         <div class="runner-panel">
           <div class="runner-toolbar">
+            <h2>🌐 Web Search</h2>
+            <span style="font-size:12px;color:var(--muted)">Powered by DuckDuckGo</span>
+          </div>
+          <div style="display:flex;gap:8px;flex-shrink:0">
+            <input type="text" id="search-query" placeholder="Search the web..." style="flex:1" onkeydown="if(event.key==='Enter')doSearch()">
+            <button class="btn btn-accent" onclick="doSearch()" id="search-btn">Search</button>
+          </div>
+          <div id="search-results" class="runner-output" style="flex:1;overflow-y:auto;padding:12px 16px">
+            <div class="runner-placeholder"><p>Enter a search query above.</p></div>
+          </div>
+
+          <div class="runner-toolbar" style="border-top:1px solid var(--border);padding-top:12px;margin-top:4px">
             <h2>🗂 My Files (semantic)</h2>
             <span id="search-index-status" style="font-size:12px;color:var(--muted)">Not indexed yet</span>
             <button class="btn btn-secondary btn-sm" onclick="indexMyFiles()" id="index-files-btn">Index My Files</button>
@@ -1360,10 +1337,23 @@
         <div class="runner-panel">
           <div class="runner-toolbar">
             <h2>🎨 Image Generation</h2>
-            <span style="font-size:12px;color:var(--muted)">Requires a vision model (llava:7b, minicpm-v, etc.)</span>
+            <span style="font-size:12px;color:var(--muted)">Drop an image below to alter it, or leave empty to generate from scratch</span>
           </div>
+          <div style="display:flex;gap:6px;flex-shrink:0">
+            <button class="btn btn-accent btn-sm" id="imagegen-src-openrouter" onclick="setImagegenSource('openrouter')">☁️ OpenRouter (cloud)</button>
+            <button class="btn btn-secondary btn-sm" id="imagegen-src-local" onclick="setImagegenSource('local')">🖥️ Local (this machine)</button>
+          </div>
+          <div id="imagegen-local-setup" style="display:none;flex-shrink:0;padding:10px;border:1px solid var(--border);border-radius:8px;font-size:12px">
+            <div id="imagegen-local-status" style="color:var(--muted)">Checking hardware...</div>
+            <div id="imagegen-local-log" style="display:none;max-height:120px;overflow-y:auto;margin-top:6px;font-family:monospace;font-size:11px;white-space:pre-wrap;color:var(--muted)"></div>
+          </div>
+          <div id="imagegen-dropzone" class="apk-dropzone" style="flex-shrink:0" ondragover="event.preventDefault(); this.classList.add('drag-over')" ondragleave="this.classList.remove('drag-over')" ondrop="handleImageGenDrop(event)" onclick="document.getElementById('imagegen-file-input').click()">
+            <span id="imagegen-dropzone-text">🖼️ Drop an image here to alter it, or click to browse (optional)</span>
+          </div>
+          <input type="file" id="imagegen-file-input" accept="image/*" style="display:none" onchange="handleImageGenFileSelect(event)">
+          <div id="imagegen-source-preview" style="display:none;flex-shrink:0"></div>
           <div style="display:flex;gap:8px;flex-shrink:0">
-            <input type="text" id="imagegen-prompt" placeholder="Describe the image to generate..." style="flex:1" onkeydown="if(event.key==='Enter')doImageGen()">
+            <input type="text" id="imagegen-prompt" placeholder="Describe the image to generate, or how to alter the dropped one..." style="flex:1" onkeydown="if(event.key==='Enter')doImageGen()">
             <button class="btn btn-accent" onclick="doImageGen()" id="imagegen-btn">Generate</button>
           </div>
           <div id="imagegen-output" class="runner-output" style="flex:1;overflow-y:auto;padding:12px 16px">
@@ -1382,18 +1372,24 @@
         <div class="catalog-toolbar">
           <input type="text" id="catalog-search" placeholder="Search models..." oninput="renderModelsTab()">
           <div class="catalog-filters">
-            <button class="filter-btn active" onclick="setCatalogFilter('all', this)">All</button>
-            <button class="filter-btn" onclick="setCatalogFilter('coding', this)">Coding</button>
-            <button class="filter-btn" onclick="setCatalogFilter('general', this)">General</button>
-            <button class="filter-btn" onclick="setCatalogFilter('vision', this)">Vision</button>
+            <button class="filter-btn active" onclick="setCatalogFilter('local', this)">Local</button>
             <button class="filter-btn" onclick="setCatalogFilter('uncensored', this)">Uncensored</button>
-            <button class="filter-btn" onclick="setCatalogFilter('small', this)">&lt; 4 GB</button>
-            <button class="filter-btn" onclick="setCatalogFilter('installed', this)">Installed</button>
+            <button class="filter-btn" onclick="setCatalogFilter('free', this)">Free</button>
+            <button class="filter-btn" onclick="setCatalogFilter('paid', this)">Paid</button>
           </div>
         </div>
 
         <div id="catalog-list">
           <p style="font-size:13px;color:var(--muted)">Loading catalog...</p>
+        </div>
+
+        <div style="margin-top:20px;padding-top:20px;border-top:1px solid var(--border)">
+          <h3 style="font-size:14px;margin-bottom:4px">Language Servers (LSP)</h3>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:8px">
+            opencode-style: when the agent edits a file, its language server's diagnostics are fed back so it fixes its own errors.
+            Configure in <code>config.json</code> — <code>"lsp": true/false</code> or per-server overrides.
+          </p>
+          <div id="lsp-status-list" style="display:flex;gap:8px;flex-wrap:wrap"></div>
         </div>
 
         <div style="margin-top:20px;padding-top:20px;border-top:1px solid var(--border)">
@@ -1436,23 +1432,18 @@
     </div>
 
     <!-- Email Tab -->
-    <div class="tab-panel email-app-font" id="tab-email">
+    <div class="tab-panel" id="tab-email">
       <div class="runner-layout">
-        <div class="runner-panel" style="padding:0">
-          <div class="email-ribbon">
-            <button class="btn btn-primary btn-sm" onclick="openComposeModal()">✉ New Email</button>
-            <select id="email-account-select" onchange="onEmailAccountChange()"></select>
+        <div class="runner-panel">
+          <div class="runner-toolbar">
+            <h2>📧 Email</h2>
+            <select id="email-account-select" style="width:auto;min-width:200px" onchange="loadInbox()"></select>
             <button class="btn btn-secondary btn-sm" onclick="loadInbox()">↻ Refresh</button>
             <button class="btn btn-secondary btn-sm" onclick="toggleEmailSetup()">⚙ Accounts</button>
             <button class="btn btn-secondary btn-sm" onclick="toggleContacts()">👥 Contacts</button>
-            <button class="btn btn-danger btn-sm" id="email-empty-folder-btn" onclick="emptyCurrentEmailFolder()" style="display:none">🗑 Empty Folder</button>
-            <span style="margin-left:auto;font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px">
-              <span id="email-swipe-label"></span>
-              <button class="icon-btn" onclick="toggleEmailSwipeDirection()" title="Swap swipe directions">⇄</button>
-            </span>
           </div>
 
-          <div id="email-setup" style="display:none;padding:12px;margin:12px;border:1px solid var(--border);border-radius:8px;flex-direction:column;gap:8px;flex-shrink:0">
+          <div id="email-setup" style="display:none;padding:12px;border:1px solid var(--border);border-radius:8px;flex-direction:column;gap:8px;flex-shrink:0">
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding-bottom:8px;border-bottom:1px solid var(--border)">
               <button class="btn btn-accent btn-sm" onclick="startGoogleSignIn()">🔵 Sign in with Google</button>
               <span style="font-size:11px;color:var(--muted)">Covers both Gmail and Google Calendar in one step — you'll confirm what to import before anything's added.</span>
@@ -1496,7 +1487,7 @@
             <div id="email-accounts-list" style="display:flex;flex-direction:column;gap:4px"></div>
           </div>
 
-          <div id="contacts-panel" style="display:none;padding:12px;margin:12px;border:1px solid var(--border);border-radius:8px;flex-direction:column;gap:8px;flex-shrink:0;max-height:280px">
+          <div id="contacts-panel" style="display:none;padding:12px;border:1px solid var(--border);border-radius:8px;flex-direction:column;gap:8px;flex-shrink:0;max-height:280px">
             <div style="display:flex;gap:8px;flex-wrap:wrap">
               <input type="text" id="contact-name" placeholder="Name" style="width:auto;flex:1;min-width:120px">
               <input type="text" id="contact-email" placeholder="Email" style="width:auto;flex:1;min-width:160px">
@@ -1507,18 +1498,12 @@
             </div>
           </div>
 
-          <div class="email-3pane">
-            <div class="email-folder-rail" id="email-folder-rail">
-              <div style="font-size:12px;color:var(--muted);padding:8px 10px">No account selected</div>
-            </div>
+          <div style="flex:1;display:flex;overflow:hidden;gap:0;min-height:0;border:1px solid var(--border);border-radius:8px">
             <div id="email-message-list" class="email-list" style="width:320px;flex-shrink:0;overflow-y:auto;border-right:1px solid var(--border)">
               <div class="runner-placeholder">Add an account, pick it above, then Refresh.</div>
             </div>
             <div id="email-message-detail" class="email-detail" style="flex:1;overflow-y:auto">
               <div class="runner-placeholder">Select a message to read it.</div>
-            </div>
-            <div class="email-calendar-peek" id="email-calendar-peek">
-              <div class="peek-empty">Loading calendar…</div>
             </div>
           </div>
         </div>
@@ -1734,7 +1719,8 @@ let lastAnalyzerAppName = '';
 let lastAnalyzerFeatures = [];
 let pendingApkContext = '';
 let catalog = [];
-let catalogFilter = 'all';
+let catalogFilter = 'local';
+let cloudModelDetails = [];   // /api/models/cloud/details — paid section cards
 let suggestedModel = null;
 let ramInfo = null;
 let ramInfoTime = 0;
@@ -1777,13 +1763,6 @@ You write clean, production-ready code. When asked to build an app:
 
 document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('system-prompt').value = DEFAULT_SYSTEM;
-  initTheme();
-  document.addEventListener('keydown', e => {
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
-      e.preventDefault();
-      openCommandPalette();
-    }
-  });
   checkStatus();
   await loadConversations();
   loadSaveDirConfig();
@@ -1804,15 +1783,38 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('model-select').addEventListener('change', e => {
     localStorage.setItem('selectedModel', e.target.value);
     checkModelFit(e.target.value);
+    checkModelUpdates(e.target.value);
   });
 
   const input = document.getElementById('chat-input');
   input.addEventListener('keydown', e => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+    // Slash-command autocomplete navigation (opencode-style): arrows move,
+    // Tab/Enter complete the highlighted command, Escape dismisses. Enter
+    // with no popup open still sends as normal.
+    const popup = slashPopupEl();
+    if (popup && popup.style.display !== 'none') {
+      const items = popup.querySelectorAll('.slash-item');
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        if (!items.length) return;
+        slashPopupIdx = (slashPopupIdx + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+        updateSlashPopup();
+        return;
+      }
+      if (e.key === 'Tab' || (e.key === 'Enter' && /^\/[a-z]*$/i.test(input.value))) {
+        e.preventDefault();
+        const chosen = items[Math.max(0, slashPopupIdx)]?.dataset.cmd;
+        if (chosen) applySlashSuggestion(chosen);
+        return;
+      }
+      if (e.key === 'Escape') { e.preventDefault(); closeSlashPopup(); return; }
+    }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); closeSlashPopup(); sendMessage(); }
   });
   input.addEventListener('input', () => {
     input.style.height = 'auto';
     input.style.height = Math.min(input.scrollHeight, 160) + 'px';
+    updateSlashPopup();
   });
 
   const agentInput = document.getElementById('agent-input');
@@ -1856,106 +1858,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (btn) cpShowFile(btn.dataset.path);
   });
 });
-
-// ── Theme ──────────────────────────────────────────────────────────────────────
-
-// highlight.js ships separate light/dark stylesheets — swapped alongside the
-// CSS custom properties so code blocks stay legible under both themes
-// instead of e.g. dark syntax-highlighted code sitting on a light bubble.
-const HLJS_DARK_CSS = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/styles/github-dark.min.css';
-const HLJS_LIGHT_CSS = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/styles/github.min.css';
-
-function applyTheme(theme) {
-  document.documentElement.setAttribute('data-theme', theme);
-  const link = document.getElementById('hljs-theme-link');
-  if (link) link.href = theme === 'light' ? HLJS_LIGHT_CSS : HLJS_DARK_CSS;
-  const btn = document.getElementById('theme-toggle-btn');
-  if (btn) btn.textContent = theme === 'light' ? '☀️' : '🌙';
-}
-
-function initTheme() {
-  applyTheme(localStorage.getItem('theme') === 'light' ? 'light' : 'dark');
-}
-
-function toggleTheme() {
-  const next = document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
-  localStorage.setItem('theme', next);
-  applyTheme(next);
-}
-
-// ── Sidebar (mobile off-canvas) ─────────────────────────────────────────────────
-
-// Only meaningful under the mobile breakpoint (see the max-width:760px media
-// query) — on desktop the sidebar is always laid out in-flow and these
-// classes have no visual effect either way. `force` lets the backdrop click
-// handler always close rather than toggle.
-function toggleSidebar(force) {
-  const sidebar = document.getElementById('sidebar');
-  const backdrop = document.getElementById('sidebar-backdrop');
-  const open = force !== undefined ? force : !sidebar.classList.contains('open');
-  sidebar.classList.toggle('open', open);
-  backdrop.classList.toggle('open', open);
-}
-
-// ── Command palette (Ctrl/Cmd+K) ────────────────────────────────────────────────
-
-let cmdkActiveIdx = -1;
-
-function openCommandPalette() {
-  if (document.getElementById('cmdk-overlay')) return; // already open
-  const overlay = document.createElement('div');
-  overlay.id = 'cmdk-overlay';
-  overlay.className = 'cmdk-overlay';
-  overlay.innerHTML = `
-    <div class="cmdk-box">
-      <input type="text" id="cmdk-input" placeholder="Search conversations…" autocomplete="off">
-      <div class="cmdk-results" id="cmdk-results"></div>
-    </div>
-  `;
-  document.body.appendChild(overlay);
-  overlay.addEventListener('click', e => { if (e.target === overlay) closeCommandPalette(); });
-
-  const input = overlay.querySelector('#cmdk-input');
-  cmdkActiveIdx = 0;
-  renderCmdkResults('');
-  input.addEventListener('input', () => { cmdkActiveIdx = 0; renderCmdkResults(input.value); });
-  input.addEventListener('keydown', e => {
-    const items = () => Array.from(document.querySelectorAll('#cmdk-results .cmdk-item'));
-    if (e.key === 'Escape') { closeCommandPalette(); }
-    else if (e.key === 'ArrowDown') { e.preventDefault(); cmdkActiveIdx = Math.min(cmdkActiveIdx + 1, items().length - 1); highlightCmdkActive(); }
-    else if (e.key === 'ArrowUp') { e.preventDefault(); cmdkActiveIdx = Math.max(cmdkActiveIdx - 1, 0); highlightCmdkActive(); }
-    else if (e.key === 'Enter') { e.preventDefault(); items()[cmdkActiveIdx]?.click(); }
-  });
-  setTimeout(() => input.focus(), 0);
-}
-
-function closeCommandPalette() {
-  document.getElementById('cmdk-overlay')?.remove();
-}
-
-function highlightCmdkActive() {
-  document.querySelectorAll('#cmdk-results .cmdk-item').forEach((el, i) => {
-    el.classList.toggle('active', i === cmdkActiveIdx);
-  });
-}
-
-function renderCmdkResults(query) {
-  const q = query.trim().toLowerCase();
-  const results = document.getElementById('cmdk-results');
-  const matches = conversations.filter(c => !q || c.title.toLowerCase().includes(q));
-  if (!matches.length) {
-    results.innerHTML = '<div class="cmdk-empty">No conversations match</div>';
-    return;
-  }
-  results.innerHTML = matches.map(c => `<div class="cmdk-item" data-cid="${c.id}">💬 ${escHtml(c.title)}</div>`).join('');
-  results.querySelectorAll('.cmdk-item').forEach(el => {
-    el.addEventListener('click', () => {
-      loadConversation(el.dataset.cid);
-      closeCommandPalette();
-    });
-  });
-  highlightCmdkActive();
-}
 
 // ── Status & Models ────────────────────────────────────────────────────────────
 
@@ -2034,7 +1936,7 @@ function showAboutModal() {
     <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:24px;max-width:420px;width:90%;box-shadow:0 8px 30px rgba(0,0,0,.4)">
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
         <svg width="28" height="28" viewBox="0 0 24 24" fill="none">
-          <rect width="24" height="24" rx="6" fill="var(--copper)"/>
+          <rect width="24" height="24" rx="6" fill="#238636"/>
           <path d="M7 8h10M7 12h6M7 16h8" stroke="white" stroke-width="1.8" stroke-linecap="round"/>
         </svg>
         <div style="font-weight:600;font-size:16px">AI Copper Maker</div>
@@ -2130,8 +2032,56 @@ async function loadModels() {
     else if (prev && allModels.includes(prev)) sel.value = prev;
     renderModelsTab();
     checkModelFit(sel.value);
+    checkModelUpdates(sel.value);
   } catch {}
   loadModelContextLengths();
+}
+
+// ── Local model update checks (registry digest vs installed build) ────────────
+// Ollama tags are mutable — publishers can push a newer build under the same
+// name:tag. Once per model per session (or when the user switches to it), ask
+// the backend to compare the installed digest with the registry's current one;
+// if they differ, badge the card in Models → Local and offer a one-click update
+// (pulling the same name:tag replaces the old weights in place).
+
+let modelUpdates = {};            // model name → true (newer build in registry)
+let updateChecksDone = new Set(); // model names already checked this session
+
+function dismissedModelUpdates() {
+  try { return JSON.parse(localStorage.getItem('dismissedModelUpdates') || '{}'); }
+  catch { return {}; }
+}
+
+async function checkModelUpdates(model) {
+  if (!model || model.includes('/')) return;  // cloud models (provider/model) — not registry-backed
+  if (updateChecksDone.has(model)) return;
+  updateChecksDone.add(model);
+  try {
+    const r = await fetch(`${API}/api/models/check-update?model=${encodeURIComponent(model)}`);
+    if (!r.ok) return;
+    const d = await r.json();
+    if (d.error || d.unknown) return;
+    if (d.update_available) {
+      const dismissed = dismissedModelUpdates();
+      if (dismissed[model] === d.latest_digest) return;  // user already declined this exact build
+      modelUpdates[model] = true;
+      renderModelsTab();
+      showToast(`Update available for ${model} — a newer build is on the registry.`, 8000);
+    }
+  } catch {}
+}
+
+function dismissModelUpdate(model) {
+  fetch(`${API}/api/models/check-update?model=${encodeURIComponent(model)}`)
+    .then(r => r.ok ? r.json() : null)
+    .then(d => {
+      const dismissed = dismissedModelUpdates();
+      dismissed[model] = d?.latest_digest || 'unknown';
+      localStorage.setItem('dismissedModelUpdates', JSON.stringify(dismissed));
+      delete modelUpdates[model];
+      renderModelsTab();
+    })
+    .catch(() => { delete modelUpdates[model]; renderModelsTab(); });
 }
 
 // ── Token / context usage (sidebar, always visible) ──────────────────────────
@@ -2152,6 +2102,58 @@ async function loadModelContextLengths() {
 // (kept separate so a call site that shouldn't touch this display, like a
 // background conversation, can still record real usage into the running
 // weekly/period total without double-counting one that does both).
+// ── Paid-model cost display ───────────────────────────────────────────────────
+// Cloud usage events carry an estimated USD cost (computed server-side from
+// the provider's cached/uncached token rates) plus a monthly ledger. This
+// renders: per-turn cost appended right after the token count, and a running
+// "$X of $Y budget · N% left" line. Local models cost nothing — the line
+// hides itself.
+let costSummaryCache = null;
+
+async function refreshCostSummary() {
+  try {
+    const r = await fetch(`${API}/api/cost/summary`);
+    if (r.ok) costSummaryCache = await r.json();
+  } catch {}
+  return costSummaryCache;
+}
+
+function formatCost(usd) {
+  if (usd >= 1) return `$${usd.toFixed(2)}`;
+  if (usd >= 0.01) return `$${usd.toFixed(3)}`;
+  return `$${usd.toFixed(4)}`;
+}
+
+async function updateCostDisplay(usage, { showTurn = true } = {}) {
+  const costEl = document.getElementById('cost-count');
+  const turnEl = showTurn ? document.getElementById('turn-token-count') : null;
+  const cost = usage && typeof usage.cost === 'number' ? usage.cost : null;
+
+  if (cost === null || cost <= 0) {
+    if (costEl) costEl.style.display = 'none';
+    return;
+  }
+
+  // Per-turn cost, appended directly after the turn's token count.
+  if (turnEl) {
+    const base = (turnEl.textContent.split('·')[0] || '').trim();
+    const cached = usage.cached_tokens > 0 ? ` (${usage.cached_tokens.toLocaleString()} cached)` : '';
+    turnEl.textContent = `${base} · ≈${formatCost(cost)} this turn${cached}`;
+  }
+
+  // Budget line: spent so far this month vs. the configured ceiling.
+  const s = (await refreshCostSummary()) || {};
+  if (costEl && s.budget > 0) {
+    costEl.style.display = '';
+    const pct = s.percent_left != null ? s.percent_left : 100;
+    costEl.textContent = `💳 ${formatCost(s.spent)} of ${formatCost(s.budget)} used · ${pct}% left`;
+    costEl.style.color = pct <= 10 ? 'var(--danger)' : pct <= 35 ? 'var(--warn)' : 'var(--muted)';
+  } else if (costEl && s.spent > 0) {
+    costEl.style.display = '';
+    costEl.textContent = `💳 ${formatCost(s.spent)} used this month · no budget set`;
+  }
+}
+
 function updateTokenUsageDisplay(totalTokens, modelName) {
   const textEl = document.getElementById('token-usage-text');
   const barEl = document.getElementById('token-usage-bar');
@@ -2264,18 +2266,43 @@ function toggleTokenUsageMenu(btnEl) {
   const menu = document.createElement('div');
   menu.className = 'conv-menu';
   menu.style.top = `${rect.bottom + 4}px`;
-  menu.style.left = `${Math.max(4, rect.right - 150)}px`;
+  menu.style.left = `${Math.max(4, rect.right - 230)}px`;
+  menu.style.minWidth = '220px';
   menu.innerHTML = Object.entries(TOKEN_USAGE_INTERVALS)
     .map(([key, label]) => `<button data-interval="${key}">${key === current ? '✓' : ''} Reset ${label}</button>`)
-    .join('');
+    .join('')
+    + `<div class="budget-row" title="Monthly ceiling for paid cloud-model spend — the chat shows cost used and % left against it">
+         <label>💳 Cloud budget $/mo</label>
+         <input type="number" id="cloud-budget-input" min="0" step="1" placeholder="20">
+       </div>`;
   menu.addEventListener('click', e => {
     e.stopPropagation();
     const interval = e.target.closest('button')?.dataset.interval;
     if (interval) setTokenUsageInterval(interval);
-    closeTokenUsageMenu();
+    if (!e.target.closest('.budget-row')) closeTokenUsageMenu();
   });
   document.body.appendChild(menu);
   openTokenUsageMenuEl = menu;
+  // Pre-fill and wire the budget input (saved server-side in config.json so
+  // it survives across browsers/devices; empty or 0 disables the meter).
+  const budgetInput = menu.querySelector('#cloud-budget-input');
+  refreshCostSummary().then(s => {
+    if (s && s.budget > 0) budgetInput.value = s.budget;
+  });
+  budgetInput.addEventListener('change', async e => {
+    const v = e.target.value.trim();
+    try {
+      const r = await fetch(`${API}/api/config`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cloud_budget: v === '' ? null : parseFloat(v) || 0 }),
+      });
+      if (r.ok) {
+        costSummaryCache = null;
+        await refreshCostSummary();
+        showToast(`💳 Cloud budget set to ${v === '' || parseFloat(v) === 0 ? 'off' : '$' + parseFloat(v).toFixed(2)}/month`);
+      }
+    } catch { showToast('Could not save the budget setting.'); }
+  });
   setTimeout(() => document.addEventListener('click', closeTokenUsageMenu), 0);
 }
 
@@ -2352,7 +2379,9 @@ function deleteConversation(id) {
 function conversationToText(conv) {
   const lines = [`# ${conv.title}`, ''];
   for (const m of conv.messages) {
-    if (m.role === 'user') {
+    if (m.role === 'user' && String(m.content).startsWith('[Compacted conversation summary')) {
+      lines.push('[context compacted — earlier turns summarized]', '');
+    } else if (m.role === 'user') {
       lines.push(`User: ${m.displayText !== undefined ? m.displayText : m.content}`, '');
     } else if (m.role === 'assistant') {
       lines.push(`Assistant: ${m.content}`, '');
@@ -2434,22 +2463,6 @@ function renderConvList() {
       <button class="conv-menu-btn" data-cid="${c.id}" title="More">⋮</button>
     </div>
   `).join('');
-  // Re-apply whatever search term is currently typed — renderConvList()
-  // rebuilds the list wholesale (new conversation, delete, rename, streaming
-  // dot updates...), which would otherwise silently drop the active filter.
-  const searchInput = document.getElementById('conv-search');
-  if (searchInput && searchInput.value) filterConvList(searchInput.value);
-}
-
-// Client-side filter over the already-rendered conv-list — cheap since
-// conversations are already a small in-memory array, no need to re-fetch.
-function filterConvList(query) {
-  const q = query.trim().toLowerCase();
-  document.querySelectorAll('#conv-list .conv-item').forEach(el => {
-    const conv = conversations.find(c => c.id === el.dataset.cid);
-    const match = !q || (conv && conv.title.toLowerCase().includes(q));
-    el.classList.toggle('search-hidden', !match);
-  });
 }
 
 function currentConv() { return conversations.find(c => c.id === currentConvId); }
@@ -2493,7 +2506,6 @@ function renderMessages() {
       </div>
     `;
     container.appendChild(empty);
-    updateRegenerateVisibility();
     return;
   }
   container.innerHTML = renderMessageGroups(conv.messages);
@@ -2506,7 +2518,6 @@ function renderMessages() {
   const stream = activeStreams.get(conv.id);
   if (stream) insertThinkingBubble(stream.fullText, renderPendingToolRows(conv));
   container.scrollTop = container.scrollHeight;
-  updateRegenerateVisibility();
 }
 
 // Shown when the agent hits a `sudo`-prefixed run_command and needs
@@ -2573,21 +2584,107 @@ async function handleSudoRequired(data) {
 // path) rather than as its own top-level message box. `id`, when given, lets
 // the live-streaming path find this exact row again to fill in the result
 // once it arrives (see the tool_result handler in runNextTurn).
+// Renders a tool result for the collapsed row body. ```diff fences (returned
+// by edit_file/write_file) get proper +/-/@@ coloring so file changes read
+// like opencode/Claude-Code diffs; everything else is escaped plain text.
+function renderToolResultHtml(result, limit = 900) {
+  const text = (result || '').slice(0, limit);
+  const parts = text.split(/```diff\n/);
+  let html = '';
+  parts.forEach((part, i) => {
+    if (i === 0) {
+      if (part.trim()) html += `<pre><code>${escHtml(part.trim())}</code></pre>`;
+      return;
+    }
+    const endFence = part.indexOf('```');
+    const diffBody = endFence === -1 ? part : part.slice(0, endFence);
+    const tail = endFence === -1 ? '' : part.slice(endFence + 3);
+    html += `<pre class="diff-block"><code>` + diffBody.split('\n').map(line => {
+      const cls = line.startsWith('+') ? 'diff-add' : line.startsWith('-') ? 'diff-del'
+        : line.startsWith('@@') ? 'diff-hunk' : 'diff-ctx';
+      return `<span class="${cls}">${escHtml(line)}</span>`;
+    }).join('\n') + `</code></pre>`;
+    if (tail.trim()) html += `<pre><code>${escHtml(tail.trim())}</code></pre>`;
+  });
+  return html || '<pre><code>(no output)</code></pre>';
+}
+
+// todo_write rows render as a live checklist (the agent's plan/progress —
+// the same affordance Claude Code's TodoWrite and opencode's task list give).
+function renderTodoListHtml(todos) {
+  if (!Array.isArray(todos) || !todos.length) return '';
+  const icons = { completed: '✓', in_progress: '◐', pending: '○' };
+  const done = todos.filter(t => t.status === 'completed').length;
+  return `
+    <div class="todo-list">
+      ${todos.map(t => `
+        <div class="todo-item todo-${escHtml(t.status || 'pending')}">
+          <span class="todo-icon">${icons[t.status] || '○'}</span>
+          <span class="todo-text">${escHtml((t.content || '').slice(0, 160))}</span>
+        </div>`).join('')}
+      <div class="todo-progress">${done}/${todos.length} done</div>
+    </div>`;
+}
+
+// Patches a still-open "running…" tool row once its result arrives — used by
+// both the Chat and Agent tab streams. Shared so both surfaces render diffs,
+// status icons, and todo checklists identically.
+function completeToolRow(row, result) {
+  if (!row) return;
+  const summary = row.querySelector('summary');
+  row.querySelectorAll('.tool-row-status, .tool-status-run, .tool-status-ok, .tool-status-err').forEach(el => el.remove());
+  if (summary) {
+    const failed = /^(error|tool error|refused)/i.test(result || '');
+    const span = document.createElement('span');
+    span.className = failed ? 'tool-status-err' : 'tool-status-ok';
+    span.textContent = failed ? '✗ failed' : '✓';
+    summary.appendChild(span);
+  }
+  // todo_write rows already render their full content (the checklist) from
+  // the call arguments — the textual "Task list updated" result adds nothing.
+  if (row.classList.contains('tool-row-todo')) return;
+  row.querySelector('.tool-row-body')?.insertAdjacentHTML('beforeend',
+    `<div class="tool-row-label">Result</div>${renderToolResultHtml(result)}`);
+}
+
 function renderToolRow(callMsg, resultMsg, id) {
   const argsPreview = JSON.stringify(callMsg.arguments || {});
   const shortPreview = argsPreview.length > 60 ? argsPreview.slice(0, 60) + '…' : argsPreview;
   const idAttr = id ? ` id="${id}"` : '';
+  const isTodo = callMsg.name === 'todo_write';
+  let statusHtml;
+  if (resultMsg) {
+    const r = resultMsg.result || '';
+    statusHtml = /^(error|tool error|refused)/i.test(r) ? '<span class="tool-status-err">✗ failed</span>'
+      : '<span class="tool-status-ok">✓</span>';
+  } else {
+    statusHtml = '<span class="tool-status-run">running…</span>';
+  }
+  if (isTodo) {
+    const todos = (callMsg.arguments || {}).todos || [];
+    const done = todos.filter(t => t.status === 'completed').length;
+    const summary = resultMsg ? `${done}/${todos.length} done` : 'planning…';
+    return `
+      <details class="tool-row tool-row-todo"${idAttr}>
+        <summary>
+          <span class="tool-row-name">📋 plan</span>
+          <span class="tool-row-preview">${escHtml(summary)}</span>
+          ${statusHtml}
+        </summary>
+        <div class="tool-row-body">${renderTodoListHtml(todos)}</div>
+      </details>`;
+  }
   return `
     <details class="tool-row"${idAttr}>
       <summary>
         <span class="tool-row-name">${escHtml(callMsg.name)}</span>
         <span class="tool-row-preview">${escHtml(shortPreview)}</span>
-        <span class="tool-row-status">${resultMsg ? '' : 'running…'}</span>
+        ${statusHtml}
       </summary>
       <div class="tool-row-body">
         <div class="tool-row-label">Arguments</div>
         <code>${escHtml(argsPreview)}</code>
-        ${resultMsg ? `<div class="tool-row-label">Result</div><pre><code>${escHtml((resultMsg.result || '').slice(0, 500))}</code></pre>` : ''}
+        ${resultMsg ? `<div class="tool-row-label">Result</div>${renderToolResultHtml(resultMsg.result)}` : ''}
       </div>
     </details>`;
 }
@@ -2599,14 +2696,6 @@ function renderToolRow(callMsg, resultMsg, id) {
 // tool_call is always immediately followed by its own tool_result (see
 // _agent_turns in the backend), so they're paired up here into one row.
 function renderMessageGroups(messages) {
-  // Edit-and-resend is only offered on the most recent user turn — the
-  // agentHistory rollback in saveEditUserMessage()/regenerateLastResponse()
-  // only knows how to rewind to "the last user entry," so editing an older
-  // one would desync conv.messages from agentHistory.
-  let lastUserIdx = -1;
-  for (let k = messages.length - 1; k >= 0; k--) {
-    if (messages[k].role === 'user') { lastUserIdx = k; break; }
-  }
   const html = [];
   let i = 0;
   while (i < messages.length) {
@@ -2632,15 +2721,25 @@ function renderMessageGroups(messages) {
         </div>
       `);
     } else {
-      html.push(renderMsg(messages[i], i, i === lastUserIdx));
+      html.push(renderMsg(messages[i], i));
       i++;
     }
   }
   return html.join('');
 }
 
-function renderMsg(msg, idx, isEditableUser) {
+function renderMsg(msg, idx) {
   const isUser = msg.role === 'user';
+  // Auto-compaction summary (backend _compact_conv): render as an
+  // opencode-style context divider, not a fake user bubble.
+  if (isUser && typeof msg.content === 'string' && msg.content.startsWith('[Compacted conversation summary')) {
+    const body = msg.content.split('\n\n').slice(1).join('\n\n');
+    return `
+      <div class="compact-notice">
+        <span>🗜 context compacted — older turns were summarized to stay within the model's window</span>
+        <details><summary>show summary</summary><div>${renderMarkdown(body)}</div></details>
+      </div>`;
+  }
   // Older saved messages have no displayText/attachments — fall back to the raw content.
   const displayText = isUser && msg.displayText !== undefined ? msg.displayText : msg.content;
   const content = isUser ? escHtml(displayText).replace(/\n/g, '<br>') : renderMarkdown(msg.content);
@@ -2651,121 +2750,12 @@ function renderMsg(msg, idx, isEditableUser) {
   // blocks — it maps a rendered <pre> back to conv.messages[idx] so edits can
   // be written back into the stored conversation.
   const idxAttr = !isUser ? ` data-msg-idx="${idx}"` : '';
-  // data-user-idx is the equivalent lookup key for startEditUserMessage()/
-  // saveEditUserMessage() — only set on the one message editing is offered on.
-  const userIdxAttr = (isUser && isEditableUser) ? ` data-user-idx="${idx}"` : '';
-  const editBtn = (isUser && isEditableUser)
-    ? `<button class="user-edit-btn" title="Edit and resend" onclick="startEditUserMessage(${idx})">✎ Edit</button>`
-    : '';
   return `
     <div class="message ${isUser ? 'user' : ''}">
       <div class="avatar ${isUser ? 'user-av' : 'ai-av'}">${isUser ? '👤' : '🤖'}</div>
-      <div class="bubble"${idxAttr}${userIdxAttr}>${attachmentsHtml}${content}${editBtn}</div>
+      <div class="bubble"${idxAttr}>${attachmentsHtml}${content}</div>
     </div>
   `;
-}
-
-// Swaps the most recent user bubble into an inline textarea. Only ever
-// called on the message renderMessageGroups marked editable (the last user
-// turn), so saveEditUserMessage() below can safely assume "rewind to the
-// last user entry" is the correct agentHistory rollback point.
-function startEditUserMessage(idx) {
-  const conv = currentConv();
-  if (!conv) return;
-  const msg = conv.messages[idx];
-  if (!msg || msg.role !== 'user') return;
-  if (activeStreams.has(conv.id)) { alert('Wait for the current response to finish before editing.'); return; }
-  const bubble = document.querySelector(`.bubble[data-user-idx="${idx}"]`);
-  if (!bubble) return;
-  const original = msg.displayText !== undefined ? msg.displayText : msg.content;
-  bubble.innerHTML = `
-    <textarea class="edit-user-textarea">${escHtml(original)}</textarea>
-    <div style="display:flex;gap:6px;margin-top:6px;justify-content:flex-end">
-      <button class="btn btn-secondary btn-sm" onclick="renderMessages()">Cancel</button>
-      <button class="btn btn-primary btn-sm" onclick="saveEditUserMessage(${idx})">Save &amp; Resend</button>
-    </div>
-  `;
-  const ta = bubble.querySelector('textarea');
-  ta.focus();
-  ta.selectionStart = ta.selectionEnd = ta.value.length;
-}
-
-// Resends an edited user message the same way sendMessage() sends a new one:
-// drops the old turn and everything the model produced after it (it's being
-// superseded, not appended to), rewinds agentHistory to just before that
-// turn so runNextTurn()'s own push doesn't duplicate it, then queues the
-// edited text. File attachments on the original turn are not carried
-// forward — re-attaching is left to the user, same as any other resend.
-function saveEditUserMessage(idx) {
-  const conv = currentConv();
-  if (!conv) return;
-  if (activeStreams.has(conv.id)) { alert('Wait for the current response to finish before editing.'); return; }
-  const bubble = document.querySelector(`.bubble[data-user-idx="${idx}"]`);
-  const newText = bubble?.querySelector('textarea')?.value.trim();
-  if (!newText) { renderMessages(); return; }
-
-  conv.messages.splice(idx);
-  const hist = ensureAgentHistory(conv);
-  let lastUserHistIdx = -1;
-  for (let i = hist.length - 1; i >= 0; i--) {
-    if (hist[i].role === 'user') { lastUserHistIdx = i; break; }
-  }
-  if (lastUserHistIdx !== -1) hist.splice(lastUserHistIdx);
-
-  conv.messages.push({ role: 'user', content: newText, displayText: newText, attachments: [] });
-  if (idx === 0) conv.title = newText.slice(0, 40);
-  saveConvs();
-  renderConvList();
-  renderMessages();
-
-  if (!turnQueues.has(conv.id)) turnQueues.set(conv.id, []);
-  turnQueues.get(conv.id).push(newText);
-  updateQueueIndicator(conv.id);
-  runNextTurn(conv.id);
-}
-
-// Re-runs the last turn without retyping it: drops the previous
-// assistant/tool-call output after the last user message, rewinds
-// agentHistory to just before that turn (same rollback shape as
-// saveEditUserMessage()), and re-queues the same content.
-function regenerateLastResponse() {
-  const conv = currentConv();
-  if (!conv || !conv.messages.length) return;
-  if (activeStreams.has(conv.id)) return;
-
-  let lastUserIdx = -1;
-  for (let i = conv.messages.length - 1; i >= 0; i--) {
-    if (conv.messages[i].role === 'user') { lastUserIdx = i; break; }
-  }
-  if (lastUserIdx === -1) return;
-  const messageContent = conv.messages[lastUserIdx].content;
-
-  conv.messages.splice(lastUserIdx + 1);
-  const hist = ensureAgentHistory(conv);
-  let lastUserHistIdx = -1;
-  for (let i = hist.length - 1; i >= 0; i--) {
-    if (hist[i].role === 'user') { lastUserHistIdx = i; break; }
-  }
-  if (lastUserHistIdx !== -1) hist.splice(lastUserHistIdx);
-
-  saveConvs();
-  renderMessages();
-
-  if (!turnQueues.has(conv.id)) turnQueues.set(conv.id, []);
-  turnQueues.get(conv.id).push(messageContent);
-  updateQueueIndicator(conv.id);
-  runNextTurn(conv.id);
-}
-
-// Shows "↻ Regenerate" only when it would do something sensible: a
-// conversation is open, nothing is currently streaming, and there's at
-// least one user turn to redo.
-function updateRegenerateVisibility() {
-  const el = document.getElementById('regenerate-toggle');
-  if (!el) return;
-  const conv = currentConv();
-  const canRegenerate = !!conv && !activeStreams.has(conv.id) && conv.messages.some(m => m.role === 'user');
-  el.style.display = canRegenerate ? '' : 'none';
 }
 
 function renderAttachmentPill(f) {
@@ -2858,9 +2848,266 @@ function setChatStatus(convId, thinking) {
   el.classList.toggle('token-count-ready', !thinking);
 }
 
+// ── Slash commands (opencode-style) ───────────────────────────────────────────
+// Everything lands in runSlashCommand(): typing "/" in the input (autocomplete
+// popup) or a raw message starting with "/". sendMessage() intercepts those
+// before the model.
+
+const SLASH_COMMANDS = [
+  { cmd: 'new',     icon: '➕', label: 'New chat',  desc: 'Start a fresh conversation' },
+  { cmd: 'compact', icon: '🗜', label: 'Compact',   desc: 'Summarize older messages into one summary message to free context (keeps the last few turns intact)' },
+  { cmd: 'skills',  icon: '🧠', label: 'Skills',   desc: 'Open the skill library (auto-learned skills appear there)' },
+  { cmd: 'agent',   icon: '🤖', label: 'Agent',    desc: 'Switch to autonomous Agent mode — /agent <task> pre-fills it' },
+  { cmd: 'model',   icon: '📦', label: 'Model',    desc: 'Focus the model picker' },
+  { cmd: 'clear',   icon: '🧹', label: 'Clear',    desc: 'Empty this conversation (kept in the sidebar, history reset)' },
+  { cmd: 'stop',    icon: '⏹',  label: 'Stop',     desc: 'Stop the current streaming response' },
+  { cmd: 'help',    icon: '❓', label: 'Help',     desc: 'Show the command list' },
+];
+
+function runSlashCommand(cmd, argText = '') {
+  argText = (argText || '').trim();
+  switch (cmd) {
+    case 'new':
+      newConversation();
+      document.getElementById('chat-input').focus();
+      break;
+    case 'compact':
+      compactCurrentConversation();
+      break;
+    case 'skills':
+      switchTab('skills');
+      loadSkills?.();
+      break;
+    case 'agent':
+      switchTab('agent');
+      if (argText) {
+        document.getElementById('agent-input').value = argText;
+        document.getElementById('agent-input').focus();
+      }
+      break;
+    case 'model':
+      document.getElementById('model-select').focus();
+      break;
+    case 'clear': {
+      const conv = currentConv();
+      if (!conv) return;
+      conv.messages = [];
+      conv.agentHistory = [];
+      saveConvs();
+      if (currentConvId === conv.id) renderMessages();
+      showToast('🧹 Conversation cleared — history starts fresh.');
+      break;
+    }
+    case 'stop':
+      stopStreaming();
+      break;
+    case 'help':
+    default:
+      showSlashHelp();
+  }
+}
+
+// sendMessage() calls this first — a leading "/" is a command, never a prompt.
+function maybeInterceptSlash(text) {
+  if (!text.startsWith('/')) return false;
+  const spaceIdx = text.indexOf(' ');
+  const cmd = (spaceIdx === -1 ? text.slice(1) : text.slice(1, spaceIdx)).toLowerCase();
+  const argText = spaceIdx === -1 ? '' : text.slice(spaceIdx + 1);
+  const known = SLASH_COMMANDS.some(c => c.cmd === cmd);
+  if (!known) {
+    showToast(`Unknown command "/${cmd}" — /help lists them.`);
+    return true; // still swallow it; sending "/foo" to the model is never intended
+  }
+  runSlashCommand(cmd, argText);
+  return true;
+}
+
+// ── /compact: context compaction (opencode /compact) ─────────────────────────
+// Replaces everything except the last few turns with one dense model-written
+// summary. The display side keeps one visible "compacted" marker bubble plus
+// the surviving tail, so what you see matches what the model actually gets.
+async function compactCurrentConversation() {
+  const conv = currentConv();
+  if (!conv) return;
+  const model = document.getElementById('model-select').value;
+  if (!model) { alert('Select a model first'); return; }
+  const history = ensureAgentHistory(conv);
+  if (history.length < 8) { showToast('Not enough conversation to compact yet.'); return; }
+  if (activeStreams.has(conv.id)) { showToast('Wait for the current response to finish first.'); return; }
+  showToast('🗜 Compacting conversation…');
+  try {
+    const res = await fetch(`${API}/api/compact`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, messages: history, keep_last: 6 }),
+    });
+    if (!res.ok) { const e = await res.json(); throw new Error(e.detail || 'Compaction failed'); }
+    const data = await res.json();
+    conv.agentHistory = data.messages;
+    // Rebuild the visible transcript from what the model will actually see:
+    // the summary bubble + the surviving tail. Tail entries are plain
+    // {role, content}; user rows get displayText so attachments logic still
+    // renders them normally on re-load. Bare tool-role entries stay in
+    // agentHistory (context) but have no standalone bubble — a tool result
+    // without its visible call row would just be confusing to render.
+    conv.messages = data.messages
+      .filter(m => m.role !== 'tool')
+      .map(m => m.role === 'user'
+        ? { role: 'user', content: m.content, displayText: (m.content.startsWith('[Compacted') ? '🗜 (compacted history summary)' : m.content.slice(0, 2000)) }
+        : { role: m.role, content: m.content });
+    saveConvs();
+    if (currentConvId === conv.id) renderMessages();
+    showToast('✓ Compacted — older turns are now a summary, context freed.');
+  } catch (err) {
+    showToast('Compaction failed: ' + err.message);
+  }
+}
+
+// ── Slash autocomplete popup ──────────────────────────────────────────────────
+let slashPopupIdx = -1;
+
+function slashPopupEl() { return document.getElementById('slash-popup'); }
+
+function updateSlashPopup() {
+  const input = document.getElementById('chat-input');
+  const text = input.value;
+  let popup = slashPopupEl();
+  // Only when the message is exactly a partial command (starts with "/",
+  // no space yet) — once args start, completion is no longer the point.
+  if (!(/^\/[a-z]*$/i.test(text))) { closeSlashPopup(); return; }
+  const q = text.slice(1).toLowerCase();
+  const matches = SLASH_COMMANDS.filter(c => c.cmd.startsWith(q));
+  if (!matches.length) { closeSlashPopup(); return; }
+  if (!popup) {
+    popup = document.createElement('div');
+    popup.id = 'slash-popup';
+    popup.className = 'slash-popup';
+    document.querySelector('.input-row').parentNode.insertBefore(popup, document.querySelector('.input-row'));
+  }
+  if (slashPopupIdx >= matches.length) slashPopupIdx = matches.length - 1;
+  popup.innerHTML = matches.map((c, i) => `
+    <div class="slash-item${i === slashPopupIdx ? ' selected' : ''}" data-cmd="${c.cmd}"
+         onmousedown="event.preventDefault(); applySlashSuggestion('${c.cmd}')">
+      <span class="slash-cmd-name">${c.icon} /${c.cmd}</span>
+      <span class="slash-cmd-desc">${escHtml(c.desc)}</span>
+    </div>`).join('');
+  popup.style.display = 'block';
+}
+
+function applySlashSuggestion(cmd) {
+  const input = document.getElementById('chat-input');
+  input.value = '/' + cmd + ' ';
+  closeSlashPopup();
+  input.focus();
+}
+
+function closeSlashPopup() {
+  slashPopupIdx = -1;
+  const popup = slashPopupEl();
+  if (popup) popup.style.display = 'none';
+}
+
+function showSlashHelp() {
+  let popup = slashPopupEl();
+  if (!popup) {
+    popup = document.createElement('div');
+    popup.id = 'slash-popup';
+    popup.className = 'slash-popup';
+    document.querySelector('.input-row').parentNode.insertBefore(popup, document.querySelector('.input-row'));
+  }
+  popup.innerHTML = SLASH_COMMANDS.map(c => `
+    <div class="slash-item" onmousedown="event.preventDefault(); applySlashSuggestion('${c.cmd}')">
+      <span class="slash-cmd-name">${c.icon} /${c.cmd}</span>
+      <span class="slash-cmd-desc">${escHtml(c.desc)}</span>
+    </div>`).join('') + '<div class="slash-hint">Click a command, or type / in the chat box — Enter runs the highlighted one</div>';
+  popup.style.display = 'block';
+  setTimeout(() => {
+    const closer = e => { if (!popup.contains(e.target)) { closeSlashPopup(); document.removeEventListener('mousedown', closer); } };
+    document.addEventListener('mousedown', closer);
+  }, 0);
+}
+
+// ── Toasts (used by commands, compaction, auto-skill notices) ─────────────────
+function showToast(text, ms = 3500) {
+  let host = document.getElementById('toast-host');
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'toast-host';
+    document.body.appendChild(host);
+  }
+  const toast = document.createElement('div');
+  toast.className = 'toast';
+  toast.textContent = text;
+  host.appendChild(toast);
+  setTimeout(() => { toast.classList.add('out'); setTimeout(() => toast.remove(), 300); }, ms);
+}
+
+// ── Auto-learned skill notice ─────────────────────────────────────────────────
+// The backend distills skills from agent sessions fire-and-forget after the
+// stream ends, so the only reliable way to notice one appeared is to compare
+// the auto-skill set before/after the turn (a few seconds of grace included
+// for the distillation LLM call to finish).
+async function snapshotAutoSkills() {
+  try {
+    const r = await fetch(`${API}/api/skills`);
+    if (!r.ok) return null;
+    const names = (await r.json()).skills.filter(s => s.source === 'auto').map(s => s.name);
+    return new Set(names);
+  } catch { return null; }
+}
+
+async function checkForNewAutoSkills(baseline) {
+  if (!baseline) return;
+  setTimeout(async () => {
+    try {
+      const r = await fetch(`${API}/api/skills`);
+      if (!r.ok) return;
+      const autos = (await r.json()).skills.filter(s => s.source === 'auto');
+      const fresh = autos.filter(s => !baseline.has(s.name));
+      if (fresh.length) {
+        showToast(`🧠 Auto-learned skill${fresh.length > 1 ? 's' : ''}: ${fresh.map(s => s.name).join(', ')} (see Skills tab)`, 6000);
+        loadSkills?.();
+      }
+    } catch {}
+  }, 4000);
+}
+
+// ── Auto conversation titles (opencode/ChatGPT-style session names) ───────────
+// Fires once per conversation: after its first completed exchange, ask the
+// model for a 3-6 word title instead of leaving the first-message prefix.
+async function maybeAutoTitle(convId) {
+  const conv = conversations.find(c => c.id === convId);
+  if (!conv || conv.autoTitled) return;
+  // Only replace titles that are still the default first-message prefix —
+  // never one the auto-titler (or anything else) already replaced.
+  if (!conv.titleIsDefault) { conv.autoTitled = true; return; }
+  conv.autoTitled = true;
+  const model = document.getElementById('model-select').value;
+  const text = conv.messages.map(m => `${m.role}: ${m.content}`).join('\n').slice(0, 3000);
+  if (!text) return;
+  try {
+    const r = await fetch(`${API}/api/title`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, text }),
+    });
+    if (!r.ok) return;
+    const title = (await r.json()).title;
+    if (title) {
+      conv.title = title;
+      saveConvs();
+      renderConvList();
+    }
+  } catch {}
+}
+
 function sendMessage() {
   const input = document.getElementById('chat-input');
   const text = input.value.trim();
+  if (maybeInterceptSlash(text)) {
+    input.value = '';
+    input.style.height = 'auto';
+    closeSlashPopup();
+    return;
+  }
   if (!currentConvId) newConversation();
   // Captured once — this whole function tracks ITS conversation from here on,
   // even if the user switches to (or starts) a different chat while this one
@@ -2898,7 +3145,7 @@ function sendMessage() {
   // displayText/attachments drive the chat-bubble preview; content (with the
   // full file text inlined) is what actually gets sent to the model.
   conv.messages.push({ role: 'user', content: messageContent, displayText: text, attachments: attachmentsMeta });
-  if (conv.title === 'New Chat') conv.title = text.slice(0, 40);
+  if (conv.title === 'New Chat') { conv.title = text.slice(0, 40); conv.titleIsDefault = true; }
   saveConvs();
   renderConvList();
 
@@ -2932,6 +3179,10 @@ async function runNextTurn(convId) {
   const model = document.getElementById('model-select').value;
 
   ensureAgentHistory(conv).push({ role: 'user', content: messageContent });
+
+  // Snapshot before the turn so checkForNewAutoSkills (scheduled on 'done')
+  // can tell a genuinely new auto-learned skill apart from pre-existing ones.
+  const autoSkillBaseline = await snapshotAutoSkills();
 
   const streamState = { abortController: new AbortController(), fullText: '', tokenCount: 0 };
   activeStreams.set(convId, streamState);
@@ -3043,14 +3294,11 @@ async function runNextTurn(convId) {
               // than adding a separate box — always immediately follows it (see
               // _agent_turns in the backend), so pendingToolRowId still points at it.
               const row = pendingToolRowId ? document.getElementById(pendingToolRowId) : null;
-              if (row) {
-                const status = row.querySelector('.tool-row-status');
-                if (status) status.textContent = '';
-                row.querySelector('.tool-row-body')?.insertAdjacentHTML('beforeend',
-                  `<div class="tool-row-label">Result</div><pre><code>${escHtml((data.result || '').slice(0, 500))}</code></pre>`);
-              }
-              pendingToolRowId = null;
-              document.getElementById('chat-messages').scrollTop = document.getElementById('chat-messages').scrollHeight;
+               if (row) {
+                 completeToolRow(row, data.result);
+               }
+               pendingToolRowId = null;
+               document.getElementById('chat-messages').scrollTop = document.getElementById('chat-messages').scrollHeight;
             }
           } else if (data.type === 'sudo_required') {
             if (viewingThis()) {
@@ -3066,6 +3314,11 @@ async function runNextTurn(convId) {
             receivedTerminalEvent = true;
             streamState.fullText = data.content;
             if (data.conversation) conv.agentHistory = data.conversation;
+            // The backend's fire-and-forget skill distillation runs after this
+            // event; checkForNewAutoSkills waits a few seconds so it can land,
+            // then toasts if the session taught the agent something reusable.
+            checkForNewAutoSkills(autoSkillBaseline);
+            maybeAutoTitle(convId);
             // Ollama's final chunk carries real token counts — prompt_eval_count
             // is how much context this turn actually used, eval_count is what
             // it generated. Together that's the conversation's current context
@@ -3077,6 +3330,9 @@ async function runNextTurn(convId) {
               const totalTokens = data.usage.prompt_eval_count + (data.usage.eval_count || 0);
               addToWeeklyTokenUsage(totalTokens);
               if (viewingThis()) updateTokenUsageDisplay(totalTokens, model);
+              // Paid models: show the estimated cost of this turn plus the
+              // running budget meter right after the token count.
+              updateCostDisplay(data.usage);
             }
           } else if (data.type === 'error') {
             receivedTerminalEvent = true;
@@ -3157,7 +3413,6 @@ async function runNextTurn(convId) {
 function setStreamingUI(streaming) {
   document.getElementById('stop-btn').style.display = streaming ? '' : 'none';
   document.getElementById('chat-activity-bar').classList.toggle('active', streaming);
-  updateRegenerateVisibility();
 }
 
 function insertThinkingBubble(existingText, toolsHtml) {
@@ -3609,6 +3864,21 @@ async function loadSavedProject(name) {
   }
 }
 
+let modelRankMap = {};  // model name → rank number
+
+// Fetch model rankings (cached server-side for 24h) and populate the rank map.
+async function loadModelRankings() {
+  try {
+    const r = await fetch(`${API}/api/models/rankings`);
+    if (!r.ok) return;
+    const d = await r.json();
+    modelRankMap = {};
+    for (const models of Object.values(d.rankings || {})) {
+      for (const m of models) modelRankMap[m.name] = m.rank;
+    }
+  } catch {}
+}
+
 // ── Models Tab ─────────────────────────────────────────────────────────────────
 
 async function loadCatalog() {
@@ -3619,6 +3889,14 @@ async function loadCatalog() {
     renderModelsTab();
     checkModelFit(document.getElementById('model-select').value);
   } catch { catalog = []; }
+  try {
+    const r = await fetch(`${API}/api/models/cloud/details`);
+    cloudModelDetails = (await r.json()).models || [];
+    renderModelsTab();
+  } catch { cloudModelDetails = []; }
+  await loadModelRankings();
+  renderModelsTab();
+  loadLspStatus();
   try {
     const ram = await getRAMInfo();
     const note = document.getElementById('models-ram-note');
@@ -3634,64 +3912,155 @@ function setCatalogFilter(filter, btn) {
   renderModelsTab();
 }
 
+// opencode-style sectioned model browser: Local / Uncensored / Free / Paid.
+const UNCENSORED_RE = /abliterat|uncensor|dolphin|unaligned|euryale|mythomax|noromaid/i;
+
 function renderModelsTab() {
+  const el = document.getElementById('catalog-list');
+  if (!el) return;
   const search = (document.getElementById('catalog-search')?.value || '').toLowerCase();
-  const isInstalled = (name, provider) => {
+  const matchesSearch = (name, desc = '') =>
+    !search || name.toLowerCase().includes(search) || (desc || '').toLowerCase().includes(search);
+  const isInstalled = (name, provider = 'ollama') => {
     const list = provider === 'lmstudio' ? installedModelsLmstudio : installedModels;
     return list.some(im => im === name || im.startsWith(name.split(':')[0] + ':'));
   };
 
-  let items = catalog.filter(m => {
-    if (catalogFilter === 'small')     return m.size_gb < 4;
-    if (catalogFilter === 'installed') return isInstalled(m.name, m.provider);
-    if (catalogFilter !== 'all')       return m.category === catalogFilter;
-    return true;
-  }).filter(m => !search || m.name.toLowerCase().includes(search) || m.desc.toLowerCase().includes(search));
+  const sectionTitle = (icon, title, sub) =>
+    `<h3 class="models-section-title">${icon} ${title}<span>${sub}</span></h3>`;
 
-  // Prepend any installed models not in the catalog (custom pulls)
-  if (catalogFilter === 'installed' || catalogFilter === 'all') {
-    const catalogNames = new Set(catalog.map(m => m.name));
-    const extra = installedModels
-      .filter(n => !catalogNames.has(n) && (!search || n.toLowerCase().includes(search)))
-      .map(n => ({ name: n, desc: 'Custom / unlisted model', size_gb: null, category: 'general' }));
-    if (catalogFilter === 'installed') items = [...extra, ...items];
-    else items = [...items, ...extra];
-  }
-
-  const el = document.getElementById('catalog-list');
-  if (!el) return;
-
-  if (!items.length) {
-    el.innerHTML = '<p style="font-size:13px;color:var(--muted)">No models match your search.</p>';
-    return;
-  }
-
-  el.innerHTML = items.map(m => {
+  const card = (m) => {
+    const rank = modelRankMap[m.name] || 0;
     const provider = m.provider || 'ollama';
     const installed = isInstalled(m.name, provider);
     const id = m.name.replace(/[:.\/]/g, '_');
     const sizeLabel = m.size_gb == null ? '' : m.size_gb >= 20 ? `${m.size_gb} GB — needs CPU offload` : `${m.size_gb} GB`;
     const providerBadge = `<span class="model-badge">${provider === 'lmstudio' ? 'LM Studio' : 'Ollama'}</span>`;
+    const rankBadge = rank !== 0 ? `<span class="model-badge" style="background:var(--accent);color:#fff;padding:2px 6px;border-radius:4px;font-size:10px;margin-left:4px">#${rank}</span>` : '';
+    const updatable = provider === 'ollama' && modelUpdates[m.name];
+    const ctx = provider === 'ollama' && modelContextLengths[m.name]
+      ? `<div class="model-size">${(modelContextLengths[m.name] / 1024).toFixed(0)}k context</div>` : '';
     return `
       <div class="model-card" id="card-${id}">
         <div class="model-info">
-          <div class="model-name">${escHtml(m.name)} ${providerBadge}</div>
+          <div class="model-name">${escHtml(m.name)} ${providerBadge}${rankBadge}</div>
           <div class="model-desc">${escHtml(m.desc)}</div>
           ${sizeLabel ? `<div class="model-size">${escHtml(sizeLabel)}</div>` : ''}
+          ${ctx}
           <div class="pull-progress" id="progress-${id}"></div>
         </div>
         <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">
+          ${updatable ? '<span class="update-badge">⬆ Update available</span>' : ''}
           <span class="model-status ${installed ? '' : 'not-installed'}">${installed ? 'Installed' : 'Not installed'}</span>
           ${installed
             ? (provider === 'ollama'
-                ? `<button class="btn btn-accent btn-sm" onclick="useModel('${m.name}')">Use</button>
-                   <button class="btn btn-secondary btn-sm" onclick="deleteModel('${m.name}')">Remove</button>`
+                ? `${updatable ? `<button class="btn btn-accent btn-sm" onclick="pullModel('${escHtml(m.name)}', document.getElementById('progress-${escHtml(id)}'))">⬆ Update</button>
+                   <button class="btn btn-secondary btn-sm" onclick="dismissModelUpdate('${escHtml(m.name)}')" title="Skip this build">✕</button>` : ''}
+                   <button class="btn ${updatable ? 'btn-secondary' : 'btn-accent'} btn-sm" onclick="useModel('${escHtml(m.name)}')">Use</button>
+                   <button class="btn btn-secondary btn-sm" onclick="deleteModel('${escHtml(m.name)}')">Remove</button>`
                 : `<span style="font-size:11px;color:var(--muted)" title="Chat/Agent only talks to Ollama models right now">Installed in LM Studio</span>`)
-            : `<button class="btn btn-accent btn-sm" onclick="pullModel('${m.name}', document.getElementById('progress-${id}'), '${provider}')">Pull</button>`
-          }
+            : `<button class="btn btn-accent btn-sm" onclick="pullModel('${escHtml(m.name)}', document.getElementById('progress-${escHtml(id)}'), '${provider}')">Pull</button>`}
         </div>
       </div>`;
-  }).join('');
+  };
+
+  const emptyNote = (msg) =>
+    `<p style="font-size:13px;color:var(--muted)">${msg}</p>`;
+  let html = '';
+
+  if (catalogFilter === 'local') {
+    const catalogByName = new Map(catalog.map(c => [c.name, c]));
+    const rows = [];
+    for (const n of installedModels) {
+      const c = catalogByName.get(n) || catalog.find(c => n.startsWith(c.name.split(':')[0] + ':')) || {};
+      rows.push({ name: n, desc: c.desc || 'Custom / unlisted model', size_gb: c.size_gb ?? null, category: c.category || 'general', provider: 'ollama' });
+    }
+    for (const n of installedModelsLmstudio) {
+      rows.push({ name: n, desc: 'LM Studio model (local, on this machine)', size_gb: null, category: 'general', provider: 'lmstudio' });
+    }
+    const filtered = rows.filter(r => matchesSearch(r.name, r.desc));
+    html += sectionTitle('💾', 'Local', 'installed on this machine — private, no per-token cost');
+    html += filtered.length
+      ? filtered.map(card).join('')
+      : emptyNote('No local models installed yet — pull one from Free or Uncensored.');
+  }
+
+  else if (catalogFilter === 'uncensored') {
+    const rows = [];
+    for (const n of installedModels) {
+      if (UNCENSORED_RE.test(n)) {
+        const c = catalog.find(c => c.name === n) || {};
+        rows.push({ name: n, desc: c.desc || 'Uncensored model (installed)', size_gb: c.size_gb ?? null, category: 'uncensored', provider: 'ollama' });
+      }
+    }
+    for (const c of catalog) {
+      if (c.category === 'uncensored' && !rows.some(r => r.name === c.name))
+        rows.push({ ...c });
+    }
+    const filtered = rows.filter(r => matchesSearch(r.name, r.desc));
+    html += sectionTitle('🔓', 'Uncensored', 'abliterated / no-refusal models — installed ones and pull-able picks');
+    html += filtered.length
+      ? filtered.map(card).join('')
+      : emptyNote('No uncensored models match — try "Search Online" below for abliterated variants.');
+  }
+
+  else if (catalogFilter === 'free') {
+    const rows = catalog.filter(c => c.category !== 'uncensored');
+    const filtered = rows.filter(r => matchesSearch(r.name, r.desc));
+    html += sectionTitle('🆓', 'Free', 'open-weight models — free to download, free to run, yours forever');
+    html += filtered.length
+      ? filtered.map(card).join('')
+      : emptyNote('No catalog models match your search.');
+  }
+
+  else if (catalogFilter === 'paid') {
+    html += sectionTitle('💳', 'Paid', 'cloud providers — metered per million tokens, budget-capped');
+    const rows = cloudModelDetails.filter(r => matchesSearch(`${r.provider} ${r.model}`));
+    html += rows.length
+      ? rows.map(r => `
+        <div class="model-card">
+          <div class="model-info">
+            <div class="model-name">${escHtml(r.label)} <span class="model-badge">${escHtml(r.model)}</span></div>
+            <div class="model-desc">≈$${r.input_per_mtok?.toFixed(2) ?? '—'} in / $${r.output_per_mtok?.toFixed(2) ?? '—'} out per 1M tokens</div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">
+            <span class="model-status ${r.configured ? '' : 'not-installed'}">${r.configured ? 'Key configured' : 'No API key'}</span>
+            ${r.configured
+              ? `<button class="btn btn-accent btn-sm" onclick="useCloudModel('${escHtml(r.provider + '/' + r.model)}')">Use</button>`
+              : `<span style="font-size:11px;color:var(--muted)">Add a key below ↓</span>`}
+          </div>
+        </div>`).join('')
+      : emptyNote('No cloud models match your search.');
+  }
+
+  el.innerHTML = html;
+}
+
+function useCloudModel(name) {
+  const sel = document.getElementById('model-select');
+  if ([...sel.options].some(o => o.value === name)) {
+    sel.value = name;
+    localStorage.setItem('selectedModel', name);
+    switchTab('chat');
+  }
+}
+
+async function loadLspStatus() {
+  const el = document.getElementById('lsp-status-list');
+  if (!el) return;
+  try {
+    const r = await fetch(`${API}/api/lsp/status`);
+    const d = await r.json();
+    if (!d.enabled) {
+      el.innerHTML = '<span class="lsp-chip lsp-off">LSP disabled — set "lsp": true in config.json</span>';
+      return;
+    }
+    el.innerHTML = d.servers.map(s =>
+      `<span class="lsp-chip lsp-${s.state}" title="${escHtml(s.command.join(' '))} — ${escHtml(s.extensions.join(' '))}">${escHtml(s.name)} · ${s.state}</span>`
+    ).join('') || '<span class="lsp-chip">no servers configured</span>';
+  } catch {
+    el.innerHTML = '<span class="lsp-chip">status unavailable</span>';
+  }
 }
 
 async function renderCloudProviders() {
@@ -3830,6 +4199,10 @@ async function pullModel(modelName, progressEl, provider = 'ollama') {
       progressEl.innerHTML = `<span style="color:var(--danger)">Error: ${escHtml(errorMsg)}</span>`;
     } else {
       progressEl.innerHTML = '<span style="color:var(--accent)">✓ Download complete</span>';
+      delete modelUpdates[modelName];   // fresh build pulled — no update pending anymore
+      const dismissed = dismissedModelUpdates();
+      delete dismissed[modelName];
+      localStorage.setItem('dismissedModelUpdates', JSON.stringify(dismissed));
     }
     await loadModels();
   } catch (err) {
@@ -3976,7 +4349,7 @@ function switchTab(name) {
     p.classList.toggle('active', p.id === 'tab-' + name);
   });
   if (name === 'codeprojects') loadCodeProjects();
-  if (name === 'files' && !filesLoadedOnce) { filesLoadedOnce = true; loadFileList(''); }
+  if (name === 'files' && !filesLoadedOnce) { filesLoadedOnce = true; exInit(); loadFileList(''); }
   if (name === 'email' && !emailInitedOnce) { emailInitedOnce = true; initEmailTab(); }
   if (name === 'calendar' && !calendarInitedOnce) { calendarInitedOnce = true; initCalendarTab(); }
   if (name === 'skills' && !skillsInitedOnce) { skillsInitedOnce = true; loadSkills(); }
@@ -4333,6 +4706,59 @@ async function cpApply(content) {
   } catch (err) {
     alert('Error applying changes: ' + err.message);
   }
+}
+
+// ── Agent Suggestions (Projects tab) ──────────────────────────────────────────
+// Asks the model to look at THIS project and propose the highest-value tasks
+// an autonomous agent could run on it next, rendered as one-click cards.
+async function cpAgentSuggestions() {
+  const proj = codeProjects.find(p => p.id === currentCodeProjectId);
+  if (!proj) return;
+  const model = document.getElementById('model-select').value;
+  if (!model) { alert('Select a model first (top-left)'); return; }
+  const area = document.getElementById('cp-result-area');
+  area.innerHTML = '<div class="runner-placeholder">Analyzing the project for agent tasks…</div>';
+  try {
+    const res = await fetch(`${API}/api/code-projects/${proj.id}/agent-suggestions`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model }),
+    });
+    if (!res.ok) {
+      const e = await res.json();
+      area.innerHTML = `<span class="stderr">Error: ${escHtml(e.detail || 'Request failed')}</span>`;
+      return;
+    }
+    const { suggestions } = await res.json();
+    area.innerHTML = '';
+    const header = document.createElement('div');
+    header.className = 'suggestion-header';
+    header.textContent = `🤖 ${suggestions.length} suggested agent task${suggestions.length > 1 ? 's' : ''} for this project:`;
+    area.appendChild(header);
+    suggestions.forEach(s => {
+      const card = document.createElement('div');
+      card.className = 'suggestion-card';
+      card.innerHTML = `
+        <div class="suggestion-title">${escHtml(s.title)}</div>
+        <div class="suggestion-task">${escHtml(s.task)}</div>`;
+      const runBtn = document.createElement('button');
+      runBtn.className = 'btn btn-accent btn-sm';
+      runBtn.textContent = '▶ Run in Agent';
+      runBtn.onclick = () => runSuggestedAgentTask(s.task, s.title);
+      card.appendChild(runBtn);
+      area.appendChild(card);
+    });
+  } catch (err) {
+    area.innerHTML = `<span class="stderr">Connection error: ${escHtml(err.message)}</span>`;
+  }
+}
+
+// Hands a suggestion straight to the Agent tab and starts it — the task text
+// is already self-contained (the backend prompt demands real files/functions).
+function runSuggestedAgentTask(task, title) {
+  switchTab('agent');
+  document.getElementById('agent-placeholder')?.remove();
+  document.getElementById('agent-input').value = task;
+  runAgent();
 }
 
 // showDirectoryPicker (Chromium, secure contexts incl. http://localhost) is
@@ -4797,10 +5223,46 @@ async function stopProjectRun() {
 
 // ── Web Search ─────────────────────────────────────────────────────────────────
 
-// doSearch() (plain web search via /api/search) was removed — it duplicated
-// the agent's own web_search tool with none of the model's synthesis on top.
-// doSemanticSearch()/indexMyFiles() below (local file search) are unrelated
-// and kept.
+async function doSearch() {
+  const query = document.getElementById('search-query').value.trim();
+  if (!query) return;
+  const output = document.getElementById('search-results');
+  const btn = document.getElementById('search-btn');
+  btn.disabled = true; btn.textContent = 'Searching...';
+  output.innerHTML = '<div style="color:var(--muted)"><div class="thinking"><span></span><span></span><span></span></div> Searching...</div>';
+  try {
+    const r = await fetch(`${API}/api/search`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, max_results: 8 })
+    });
+    const data = await r.json();
+    if (data.error) {
+      output.innerHTML = `<span class="stderr">Error: ${data.error}</span>`;
+      return;
+    }
+    if (!data.results.length) {
+      output.innerHTML = '<div style="color:var(--muted);padding:20px;text-align:center">No results found.</div>';
+      return;
+    }
+    output.innerHTML = data.results.map(r => `
+      <div style="padding:10px 12px;border:1px solid var(--border);border-radius:8px;margin-bottom:8px;background:var(--surface)">
+        <a href="${escHtml(r.url)}" target="_blank" style="color:var(--accent2);text-decoration:none;font-weight:500;font-size:14px" rel="noopener">${escHtml(r.title)}</a>
+        <div style="font-size:11px;color:var(--muted);margin-top:2px;word-break:break-all">${escHtml(r.url)}</div>
+        <div style="font-size:13px;color:var(--text);margin-top:6px">${escHtml(r.snippet)}</div>
+      </div>
+    `).join('');
+  } catch (err) {
+    output.innerHTML = `<span class="stderr">Error: ${err.message}</span>`;
+  } finally {
+    // Was a plain trailing statement — the early `return`s above (no
+    // results / data.error) skipped right past it, leaving the button
+    // stuck saying "Searching..." forever, disabled, so no further click
+    // ever sent another request. `finally` runs no matter which path
+    // above was taken.
+    btn.disabled = false; btn.textContent = 'Search';
+  }
+}
 
 // ── Semantic File Search ──────────────────────────────────────────────────────
 
@@ -4879,27 +5341,52 @@ async function doSemanticSearch() {
   }
 }
 
-// ── Image Generation ──────────────────────────────────────────────────────────
+// ── Image Generation (OpenRouter or local GPU: real images, generate or edit) ──
 
-async function doImageGen() {
-  const prompt = document.getElementById('imagegen-prompt').value.trim();
-  if (!prompt) return;
-  const output = document.getElementById('imagegen-output');
-  const btn = document.getElementById('imagegen-btn');
-  btn.disabled = true; btn.textContent = 'Generating...';
-  output.innerHTML = '<div style="color:var(--muted)"><div class="thinking"><span></span><span></span><span></span></div> Generating image...</div>';
+let imagegenSourceB64 = '';  // data URL of a dropped/selected source image to alter, '' = pure generation
+let imagegenSource = 'openrouter';  // 'openrouter' | 'local'
+let imagegenLocalReady = false;     // true once /api/image-local/status says installed+gpu_active (or installed at all)
+
+function setImagegenSource(src) {
+  imagegenSource = src;
+  document.getElementById('imagegen-src-openrouter').className = 'btn btn-sm ' + (src === 'openrouter' ? 'btn-accent' : 'btn-secondary');
+  document.getElementById('imagegen-src-local').className = 'btn btn-sm ' + (src === 'local' ? 'btn-accent' : 'btn-secondary');
+  document.getElementById('imagegen-local-setup').style.display = src === 'local' ? 'block' : 'none';
+  if (src === 'local') checkImagegenLocalStatus();
+}
+
+async function checkImagegenLocalStatus() {
+  const status = document.getElementById('imagegen-local-status');
+  status.textContent = 'Checking hardware...';
   try {
-    const res = await fetch(`${API}/api/generate-image`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt })
-    });
-    if (!res.ok) {
-      const err = await res.json();
-      output.innerHTML = `<span class="stderr">Error: ${escHtml(err.detail || JSON.stringify(err))}</span>`;
-      return;
+    const r = await fetch(`${API}/api/image-local/status`);
+    const d = await r.json();
+    const gpuLine = d.gpu_name
+      ? `${escHtml(d.gpu_name)} (${d.detected_backend}${d.vram_gb ? `, ${d.vram_gb} GB VRAM` : ''})`
+      : 'No dedicated GPU detected — CPU only';
+    if (d.installed && d.gpu_active) {
+      imagegenLocalReady = true;
+      status.innerHTML = `✓ Ready — ${gpuLine}, GPU acceleration confirmed.`;
+    } else if (d.installed && d.cpu_only_fallback) {
+      imagegenLocalReady = true;
+      status.innerHTML = `⚠ Installed, but running on CPU only (no ${d.detected_backend} wheel available for this Python version) — generation will be slow. ${gpuLine}`;
+    } else {
+      imagegenLocalReady = false;
+      status.innerHTML = `${gpuLine}<br><button class="btn btn-accent btn-sm" style="margin-top:6px" onclick="installImagegenLocal()" id="imagegen-install-btn">⬇ Install local image generation (~2-7 GB download)</button>`;
     }
-    let response = '';
+  } catch (err) {
+    status.textContent = 'Error checking status: ' + err.message;
+  }
+}
+
+async function installImagegenLocal() {
+  const btn = document.getElementById('imagegen-install-btn');
+  const log = document.getElementById('imagegen-local-log');
+  if (btn) { btn.disabled = true; btn.textContent = 'Installing...'; }
+  log.style.display = 'block';
+  log.textContent = '';
+  try {
+    const res = await fetch(`${API}/api/image-local/install`, { method: 'POST' });
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     while (true) {
@@ -4908,55 +5395,499 @@ async function doImageGen() {
       for (const line of decoder.decode(value).split('\n').filter(Boolean)) {
         try {
           const data = JSON.parse(line);
-          if (data.error) { output.innerHTML = `<span class="stderr">Error: ${escHtml(data.error)}</span>`; return; }
-          if (data.response) response += data.response;
+          log.textContent += (data.text || '') + (data.text?.endsWith('\n') ? '' : '\n');
+          log.scrollTop = log.scrollHeight;
         } catch {}
       }
     }
-    output.innerHTML = `<div style="white-space:pre-wrap;font-size:13px;line-height:1.6">${escHtml(response)}</div>`;
+  } catch (err) {
+    log.textContent += 'Error: ' + err.message + '\n';
+  } finally {
+    await checkImagegenLocalStatus();
+  }
+}
+
+function handleImageGenDrop(event) {
+  event.preventDefault();
+  event.currentTarget.classList.remove('drag-over');
+  const file = event.dataTransfer.files[0];
+  if (file) loadImageGenSource(file);
+}
+
+function handleImageGenFileSelect(event) {
+  const file = event.target.files[0];
+  if (file) loadImageGenSource(file);
+  event.target.value = ''; // allow re-selecting the same file later
+}
+
+function loadImageGenSource(file) {
+  if (!file.type.startsWith('image/')) { alert('Not an image file.'); return; }
+  const reader = new FileReader();
+  reader.onload = () => {
+    imagegenSourceB64 = reader.result; // data:image/...;base64,...
+    document.getElementById('imagegen-source-preview').style.display = 'block';
+    document.getElementById('imagegen-source-preview').innerHTML = `
+      <div style="display:flex;align-items:center;gap:8px;margin:6px 0">
+        <img src="${imagegenSourceB64}" style="max-height:80px;border-radius:6px;border:1px solid var(--border)">
+        <span style="font-size:12px;color:var(--muted)">${escHtml(file.name)}</span>
+        <button class="btn btn-secondary btn-sm" onclick="clearImageGenSource()">✕ Remove</button>
+      </div>`;
+    document.getElementById('imagegen-dropzone-text').textContent = '🖼️ Image loaded — drop another to replace it';
+  };
+  reader.readAsDataURL(file);
+}
+
+function clearImageGenSource() {
+  imagegenSourceB64 = '';
+  document.getElementById('imagegen-source-preview').style.display = 'none';
+  document.getElementById('imagegen-source-preview').innerHTML = '';
+  document.getElementById('imagegen-dropzone-text').textContent = '🖼️ Drop an image here to alter it, or click to browse (optional)';
+}
+
+async function doImageGen() {
+  const prompt = document.getElementById('imagegen-prompt').value.trim();
+  if (!prompt) return;
+  if (imagegenSource === 'local' && !imagegenLocalReady) {
+    alert('Local image generation isn\'t installed yet — click "Install local image generation" above first.');
+    return;
+  }
+  const output = document.getElementById('imagegen-output');
+  const btn = document.getElementById('imagegen-btn');
+  const altering = !!imagegenSourceB64;
+  const endpoint = imagegenSource === 'local' ? '/api/generate-image/local' : '/api/generate-image/openrouter';
+  btn.disabled = true; btn.textContent = altering ? 'Altering...' : 'Generating...';
+  output.innerHTML = `<div style="color:var(--muted)"><div class="thinking"><span></span><span></span><span></span></div> ${altering ? 'Altering image...' : 'Generating image...'}${imagegenSource === 'local' ? ' (first run also downloads the model — can take a few minutes)' : ''}</div>`;
+  try {
+    const res = await fetch(`${API}${endpoint}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt, image_b64: imagegenSourceB64 })
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      output.innerHTML = `<span class="stderr">Error: ${escHtml(data.detail || JSON.stringify(data))}</span>`;
+      return;
+    }
+    output.dataset.b64 = data.b64_json;
+    output.dataset.mediaType = data.media_type;
+    const costLine = data.cost ? `<div style="font-size:11px;color:var(--muted)">Cost: $${data.cost.toFixed(4)}</div>` : '';
+    output.innerHTML = `
+      <div style="display:flex;flex-direction:column;gap:10px;align-items:flex-start">
+        <img src="data:${data.media_type};base64,${data.b64_json}" style="max-width:100%;border-radius:8px;border:1px solid var(--border)">
+        <div style="display:flex;gap:8px;align-items:center">
+          <input type="text" id="imagegen-save-name" placeholder="filename (optional)" style="width:200px">
+          <button class="btn btn-accent btn-sm" onclick="saveGeneratedImage()">💾 Save</button>
+          <span id="imagegen-save-status" style="font-size:12px;color:var(--muted)"></span>
+        </div>
+        ${costLine}
+      </div>`;
   } catch (err) {
     output.innerHTML = `<span class="stderr">Error: ${err.message}</span>`;
   } finally {
-    // The !res.ok / data.error early returns above (e.g. "No vision model
-    // found") used to skip right past this, leaving the button stuck
-    // disabled on "Generating..." forever even though the real error was
-    // already shown in the output area.
+    // The !res.ok early return above (e.g. "No OpenRouter API key configured")
+    // used to skip right past this, leaving the button stuck disabled on
+    // "Generating..." forever even though the real error was already shown.
     btn.disabled = false; btn.textContent = 'Generate';
   }
 }
 
-// ── File Browser ──────────────────────────────────────────────────────────────
-
-let fileCurrentPath = '';
-
-async function loadFileList(path) {
-  fileCurrentPath = path || '';
-  const list = document.getElementById('file-list');
-  document.getElementById('file-current-path').textContent = '/' + path;
+async function saveGeneratedImage() {
+  const output = document.getElementById('imagegen-output');
+  const b64 = output.dataset.b64;
+  if (!b64) return;
+  const status = document.getElementById('imagegen-save-status');
+  const filename = document.getElementById('imagegen-save-name').value.trim();
+  status.textContent = 'Saving...';
   try {
-    const r = await fetch(`${API}/api/files/list?path=${encodeURIComponent(path)}`);
+    const r = await fetch(`${API}/api/generate-image/save`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ b64_json: b64, filename, media_type: output.dataset.mediaType || 'image/png' })
+    });
     const data = await r.json();
-    if (!data.dirs && !data.files) {
-      list.innerHTML = '<div style="padding:20px;color:var(--muted);text-align:center">No projects yet. Generate one first.</div>';
-      return;
-    }
-    let html = '';
-    for (const d of data.dirs) {
-      html += `<div class="conv-item" onclick="loadFileList('${escHtml(d.path)}')" style="cursor:pointer">📁 ${escHtml(d.name)}</div>`;
-    }
-    for (const f of data.files) {
-      html += `<div class="conv-item" onclick="fileOpen('${escHtml(f.path)}')" style="cursor:pointer">📄 ${escHtml(f.name)} <span style="font-size:11px;color:var(--muted);margin-left:auto">${(f.size / 1024).toFixed(1)} KB</span></div>`;
-    }
-    list.innerHTML = html || '<div style="padding:20px;color:var(--muted);text-align:center">Empty directory</div>';
+    if (!r.ok) { status.textContent = 'Error: ' + (data.detail || 'unknown'); return; }
+    status.textContent = `✓ Saved to ${data.path}`;
   } catch (err) {
-    list.innerHTML = `<span class="stderr">Error: ${err.message}</span>`;
+    status.textContent = 'Error: ' + err.message;
   }
 }
 
-function fileGoUp() {
-  const parts = fileCurrentPath.split('/').filter(Boolean);
-  parts.pop();
-  loadFileList(parts.join('/'));
+// ── File Explorer (Windows Explorer style) ────────────────────────────────────
+
+let fileCurrentPath = '';            // relative path under home ('' = root)
+let exAllEntries = [];               // current listing: [{name, path, isDir, size, modified}]
+let exHistory = [];
+let exHistoryIdx = -1;
+let exSortKey = 'name';
+let exSortDir = 1;
+let exSelected = null;
+let exCreating = null;               // 'file' | 'dir' while the inline name box is open
+let exInited = false;
+
+const EX_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+
+function exExt(name) { const m = /\.([^.]+)$/.exec(name); return m ? m[1].toLowerCase() : ''; }
+
+const EX_TYPE_LABELS = {
+  txt: 'Text Document', md: 'Markdown Document', log: 'Log File', pdf: 'PDF Document',
+  html: 'HTML Document', htm: 'HTML Document', css: 'Style Sheet', js: 'JavaScript File',
+  ts: 'TypeScript File', py: 'Python File', rs: 'Rust Source File', go: 'Go Source File',
+  c: 'C Source File', cpp: 'C++ Source File', h: 'Header File', sh: 'Shell Script',
+  json: 'JSON File', xml: 'XML Document', yaml: 'YAML Document', yml: 'YAML Document',
+  png: 'PNG Image', jpg: 'JPG File', jpeg: 'JPEG File', gif: 'GIF File', svg: 'SVG Document',
+  webp: 'WebP Image', bmp: 'Bitmap Image', ico: 'Icon File',
+  mp3: 'MP3 Audio', wav: 'Wave Sound', flac: 'FLAC Audio', ogg: 'OGG Audio',
+  mp4: 'MP4 Video', mkv: 'MKV Video', webm: 'WebM Video', avi: 'AVI Video',
+  zip: 'ZIP Archive', tar: 'TAR Archive', gz: 'GZip Archive', '7z': '7-Zip Archive', xz: 'XZ Archive',
+  exe: 'Application', msi: 'Installer Package', deb: 'Debian Package', rpm: 'RPM Package',
+  apk: 'Android Package', iso: 'Disc Image', torrent: 'Torrent File',
+};
+
+const EX_ICON_COLORS = {
+  py: '#3776ab', js: '#b9972e', ts: '#3178c6', html: '#e34c26', css: '#2965f1', json: '#b58a0c',
+  rs: '#d97706', go: '#0088a8', c: '#55606b', cpp: '#00599c', sh: '#4e8f2f', java: '#b07219',
+  md: '#7d8590', txt: '#7d8590', log: '#7d8590',
+  png: '#a855f7', jpg: '#a855f7', jpeg: '#a855f7', gif: '#a855f7', webp: '#a855f7', svg: '#a855f7', bmp: '#a855f7', ico: '#a855f7',
+  mp3: '#22c55e', wav: '#22c55e', flac: '#22c55e', ogg: '#22c55e',
+  mp4: '#ec4899', mkv: '#ec4899', webm: '#ec4899', avi: '#ec4899',
+  zip: '#d97706', tar: '#d97706', gz: '#d97706', '7z': '#d97706', xz: '#d97706',
+  pdf: '#dc2626', exe: '#0d9488', msi: '#0d9488', deb: '#0d9488', rpm: '#0d9488', apk: '#22c55e', iso: '#6b7280',
+};
+
+function exTypeLabel(e) {
+  if (e.isDir) return 'File folder';
+  const ext = exExt(e.name);
+  return EX_TYPE_LABELS[ext] || (ext ? ext.toUpperCase() + ' File' : 'File');
+}
+
+function exFormatSize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+  if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + ' MB';
+  return (bytes / 1073741824).toFixed(1) + ' GB';
+}
+
+function exFormatDate(ts) {
+  if (!ts) return '';
+  const d = new Date(ts * 1000);
+  return d.toLocaleString([], { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+}
+
+function exIconSvg(e) {
+  if (e.isDir) {
+    return `<svg width="20" height="20" viewBox="0 0 24 24"><path d="M2.5 5.5A1.5 1.5 0 0 1 4 4h4.7c.5 0 .97.2 1.32.55L11.4 6h8.1A1.5 1.5 0 0 1 21 7.5v11a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5z" fill="#f0b64a" stroke="#b98a4a" stroke-width="1"/><path d="M3 9.7h18" stroke="#c98d2e" stroke-width="1"/></svg>`;
+  }
+  const ext = exExt(e.name);
+  const color = EX_ICON_COLORS[ext] || '#6b7280';
+  const label = (ext || 'FILE').toUpperCase().slice(0, 4);
+  const fs = label.length >= 4 ? 5 : 6;
+  return `<svg width="20" height="20" viewBox="0 0 24 24"><path d="M6 2.5h8l5 5V21a.5.5 0 0 1-.5.5h-12A.5.5 0 0 1 6 21z" fill="#e9edf2" stroke="#9aa4b2" stroke-width="1"/><path d="M14 2.5v5h5" fill="none" stroke="#9aa4b2" stroke-width="1"/><text x="12.5" y="18" text-anchor="middle" font-size="${fs}" font-weight="700" fill="${color}" font-family="Segoe UI, sans-serif">${escHtml(label)}</text></svg>`;
+}
+
+function exInit() {
+  if (exInited) return;
+  exInited = true;
+  const list = document.getElementById('file-list');
+  const menu = document.getElementById('ex-context');
+
+  // Click: select the row (clicking empty space clears selection), and open
+  // it right away — a single click doing nothing but a faint highlight read
+  // as "broken" to users coming from web file browsers rather than a desktop
+  // Explorer, so click now opens too; double-click still works (harmlessly
+  // re-opens the same target).
+  list.addEventListener('click', ev => {
+    if (ev.target.closest('.ex-rename-input')) return;
+    const row = ev.target.closest('.ex-row');
+    if (!row || row.dataset.path === undefined) {
+      if (!exCreating) { exSelected = null; exRender(); }
+      return;
+    }
+    list.focus();
+    exSelected = row.dataset.path;
+    exRender();
+    exOpen(row.dataset.path, row.dataset.isdir === '1');
+  });
+
+  // Double-click: open (navigate into a folder, open a file in the editor)
+  list.addEventListener('dblclick', ev => {
+    if (ev.target.closest('.ex-rename-input')) return;
+    const row = ev.target.closest('.ex-row');
+    if (!row || row.dataset.path === undefined) return;
+    exOpen(row.dataset.path, row.dataset.isdir === '1');
+  });
+
+  // Right-click: context menu (item menu or empty-space menu)
+  list.addEventListener('contextmenu', ev => {
+    ev.preventDefault();
+    const row = ev.target.closest('.ex-row');
+    if (row && row.dataset.path !== undefined) {
+      exSelected = row.dataset.path;
+      exRender();
+      exShowMenu(ev.clientX, ev.clientY, [
+        { act: 'open', label: '📂 Open', path: row.dataset.path },
+        { act: 'rename', label: '✏️ Rename', path: row.dataset.path },
+        { sep: true },
+        { act: 'delete', label: '🗑️ Delete', path: row.dataset.path, danger: true },
+      ]);
+    } else {
+      exShowMenu(ev.clientX, ev.clientY, [
+        { act: 'newfile', label: '📄 New file' },
+        { act: 'newdir', label: '📁 New folder' },
+        { sep: true },
+        { act: 'refresh', label: '⟳ Refresh' },
+      ]);
+    }
+  });
+
+  // Keyboard: F2 rename, Delete, Enter open, Backspace up, arrows move selection
+  list.addEventListener('keydown', ev => {
+    if (ev.key === 'F2' && exSelected) { ev.preventDefault(); exStartRename(exSelected); }
+    else if (ev.key === 'Delete' && exSelected) { ev.preventDefault(); exDelete(exSelected); }
+    else if (ev.key === 'Enter' && exSelected) {
+      ev.preventDefault();
+      const e = exFind(exSelected);
+      if (e) exOpen(exSelected, e.isDir);
+    }
+    else if (ev.key === 'Backspace' && document.activeElement === list) { ev.preventDefault(); exGoUp(); }
+    else if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') { ev.preventDefault(); exArrow(ev.key === 'ArrowDown' ? 1 : -1); }
+  });
+
+  // Column headers: click to sort, click again to flip direction
+  document.getElementById('ex-header').addEventListener('click', ev => {
+    const col = ev.target.closest('.ex-hcol');
+    if (col) exSetSort(col.dataset.key);
+  });
+
+  // Breadcrumb segments: click to jump to that folder
+  document.getElementById('ex-breadcrumb').addEventListener('click', ev => {
+    const c = ev.target.closest('.ex-crumb');
+    if (c) exNavigate(c.dataset.path || '');
+  });
+
+  menu.addEventListener('click', ev => {
+    const item = ev.target.closest('.ex-context-item');
+    if (!item) return;
+    menu.style.display = 'none';
+    const act = item.dataset.act, path = item.dataset.path;
+    if (act === 'open') { const e = exFind(path); if (e) exOpen(path, e.isDir); }
+    else if (act === 'rename') exStartRename(path);
+    else if (act === 'delete') exDelete(path);
+    else if (act === 'newfile') exNewFile();
+    else if (act === 'newdir') exNewDir();
+    else if (act === 'refresh') exRefresh();
+  });
+
+  document.addEventListener('click', () => { menu.style.display = 'none'; });
+  document.addEventListener('keydown', ev => { if (ev.key === 'Escape') menu.style.display = 'none'; });
+}
+
+function exShowMenu(x, y, items) {
+  const menu = document.getElementById('ex-context');
+  menu.innerHTML = items.map(it => it.sep
+    ? '<div class="ex-context-sep"></div>'
+    : `<div class="ex-context-item${it.danger ? ' danger' : ''}" data-act="${it.act}" data-path="${escHtml(it.path || '')}">${escHtml(it.label)}</div>`
+  ).join('');
+  menu.style.display = 'block';
+  const rect = menu.getBoundingClientRect();
+  menu.style.left = Math.min(x, window.innerWidth - rect.width - 8) + 'px';
+  menu.style.top = Math.min(y, window.innerHeight - rect.height - 8) + 'px';
+}
+
+function exSetSort(key) {
+  if (exSortKey === key) exSortDir = -exSortDir;
+  else { exSortKey = key; exSortDir = 1; }
+  exRender();
+}
+
+function exVisibleEntries() {
+  const q = (document.getElementById('ex-search').value || '').trim().toLowerCase();
+  const all = exAllEntries.filter(e => !q || e.name.toLowerCase().includes(q));
+  all.sort((a, b) => {
+    if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;   // folders always first (Explorer default)
+    let r = 0;
+    if (exSortKey === 'name') r = EX_COLLATOR.compare(a.name, b.name);
+    else if (exSortKey === 'modified') r = (a.modified || 0) - (b.modified || 0);
+    else if (exSortKey === 'size') r = (a.size || 0) - (b.size || 0);
+    else r = EX_COLLATOR.compare(exTypeLabel(a), exTypeLabel(b));
+    if (!r && exSortKey !== 'name') r = EX_COLLATOR.compare(a.name, b.name);
+    return r * exSortDir;
+  });
+  return all;
+}
+
+function exRender() {
+  const list = document.getElementById('file-list');
+  // Breadcrumb: 🏠 Home + one crumb per path segment
+  const parts = fileCurrentPath ? fileCurrentPath.split('/').filter(Boolean) : [];
+  let bc = `<span class="ex-crumb" data-path="" title="Home">🏠 Home</span>`;
+  parts.forEach((p, i) => {
+    bc += `<span class="ex-crumb-sep">▸</span><span class="ex-crumb" data-path="${escHtml(parts.slice(0, i + 1).join('/'))}" title="${escHtml(p)}">${escHtml(p)}</span>`;
+  });
+  document.getElementById('ex-breadcrumb').innerHTML = bc;
+  // Sort indicators
+  for (const k of ['name', 'modified', 'type', 'size'])
+    document.getElementById('ex-sort-' + k).textContent = k === exSortKey ? (exSortDir > 0 ? '▲' : '▼') : '';
+  // Nav buttons
+  document.getElementById('ex-back-btn').disabled = exHistoryIdx <= 0;
+  document.getElementById('ex-fwd-btn').disabled = exHistoryIdx >= exHistory.length - 1;
+  document.getElementById('ex-up-btn').disabled = !fileCurrentPath;
+  // Rows
+  const entries = exVisibleEntries();
+  let html = '';
+  if (exCreating) {
+    const icon = exCreating === 'dir' ? exIconSvg({ isDir: true }) : exIconSvg({ isDir: false, name: 'x.txt' });
+    const defaultName = exCreating === 'dir' ? 'New folder' : 'New file.txt';
+    html += `<div class="ex-row"><div class="ex-cell ex-name">${icon}<input id="ex-creating-input" class="ex-rename-input" value="${escHtml(defaultName)}"></div><div class="ex-cell"></div><div class="ex-cell"></div><div class="ex-cell"></div></div>`;
+  }
+  for (const e of entries) {
+    html += `<div class="ex-row${e.path === exSelected ? ' ex-selected' : ''}" data-path="${escHtml(e.path)}" data-isdir="${e.isDir ? 1 : 0}">
+      <div class="ex-cell ex-name">${exIconSvg(e)}<span>${escHtml(e.name)}</span></div>
+      <div class="ex-cell ex-modified">${exFormatDate(e.modified)}</div>
+      <div class="ex-cell ex-type">${escHtml(exTypeLabel(e))}</div>
+      <div class="ex-cell ex-size">${e.isDir ? '' : exFormatSize(e.size || 0)}</div>
+    </div>`;
+  }
+  if (!entries.length && !exCreating) {
+    const q = (document.getElementById('ex-search').value || '').trim();
+    html += `<div style="padding:24px;color:var(--muted);text-align:center;font-size:12px">${q ? 'No items match your search.' : 'This folder is empty.'}</div>`;
+  }
+  list.innerHTML = html;
+  // Status bar (Explorer style: "12 items | 1 item selected")
+  document.getElementById('ex-status').textContent =
+    entries.length + (entries.length === 1 ? ' item' : ' items') +
+    (exSelected && entries.some(e => e.path === exSelected) ? ' | 1 item selected' : '');
+  // Wire + focus the inline creation box
+  if (exCreating) {
+    const input = document.getElementById('ex-creating-input');
+    const dot = input.value.lastIndexOf('.');
+    input.focus();
+    input.setSelectionRange(0, dot > 0 ? dot : input.value.length);
+    input.addEventListener('keydown', ev => {
+      if (ev.key === 'Enter') { ev.preventDefault(); exCommitCreate(input.value.trim()); }
+      else if (ev.key === 'Escape') { ev.preventDefault(); exCreating = null; exRender(); }
+      ev.stopPropagation();
+    });
+    input.addEventListener('blur', () => { if (exCreating) exCommitCreate(input.value.trim()); });
+  }
+}
+
+async function loadFileList(path, pushHistory = true) {
+  path = path || '';
+  fileCurrentPath = path;
+  exSelected = null;
+  const searchEl = document.getElementById('ex-search');
+  if (searchEl) searchEl.value = '';
+  let data;
+  try {
+    const r = await fetch(`${API}/api/files/list?path=${encodeURIComponent(path)}`);
+    data = await r.json();
+  } catch (err) {
+    document.getElementById('file-list').innerHTML = `<div style="padding:16px;color:var(--danger);font-size:12px">Error: ${escHtml(err.message)}</div>`;
+    return;
+  }
+  exAllEntries = [
+    ...(data.dirs || []).map(d => ({ ...d, isDir: true })),
+    ...(data.files || []).map(f => ({ ...f, isDir: false })),
+  ];
+  if (pushHistory || exHistoryIdx === -1) {
+    exHistory = exHistory.slice(0, exHistoryIdx + 1);
+    exHistory.push(path);
+    exHistoryIdx = exHistory.length - 1;
+  }
+  exRender();
+}
+
+function exNavigate(path) { loadFileList(path, true); }
+function exRefresh() { loadFileList(fileCurrentPath, false); }
+function exBack() { if (exHistoryIdx > 0) { exHistoryIdx--; loadFileList(exHistory[exHistoryIdx], false); } }
+function exForward() { if (exHistoryIdx < exHistory.length - 1) { exHistoryIdx++; loadFileList(exHistory[exHistoryIdx], false); } }
+function exGoUp() { if (!fileCurrentPath) return; const parts = fileCurrentPath.split('/').filter(Boolean); parts.pop(); loadFileList(parts.join('/'), true); }
+function exFind(path) { return exAllEntries.find(e => e.path === path); }
+function exOpen(path, isDir) { if (isDir) loadFileList(path, true); else fileOpen(path); }
+
+function exArrow(delta) {
+  const rows = [...document.querySelectorAll('#file-list .ex-row[data-path]')];
+  if (!rows.length) return;
+  let idx = rows.findIndex(r => r.dataset.path === exSelected);
+  idx = idx === -1 ? (delta > 0 ? 0 : rows.length - 1) : Math.min(rows.length - 1, Math.max(0, idx + delta));
+  exSelected = rows[idx].dataset.path;
+  exRender();
+  const el = document.querySelector(`#file-list .ex-row[data-path="${CSS.escape(exSelected)}"]`);
+  if (el) el.scrollIntoView({ block: 'nearest' });
+}
+
+function exNewFile() { exCreating = 'file'; exRender(); }
+function exNewDir() { exCreating = 'dir'; exRender(); }
+
+async function exCommitCreate(name) {
+  const kind = exCreating;
+  exCreating = null;
+  if (!name) { exRender(); return; }
+  const full = fileCurrentPath ? fileCurrentPath + '/' + name : name;
+  try {
+    const url = kind === 'dir' ? `${API}/api/files/mkdir` : `${API}/api/files/write`;
+    const body = kind === 'dir' ? { path: full } : { path: full, content: '' };
+    const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (!r.ok) throw new Error((await r.json()).detail || 'create failed');
+    await loadFileList(fileCurrentPath, false);
+    exSelected = full;
+    exRender();
+  } catch (err) {
+    alert('Error: ' + err.message);
+    loadFileList(fileCurrentPath, false);
+  }
+}
+
+function exStartRename(path) {
+  const e = exFind(path);
+  if (!e) return;
+  const row = document.querySelector(`#file-list .ex-row[data-path="${CSS.escape(path)}"]`);
+  const span = row && row.querySelector('.ex-name span');
+  if (!span) return;
+  const input = document.createElement('input');
+  input.className = 'ex-rename-input';
+  input.value = e.name;
+  span.replaceWith(input);
+  const dot = e.name.lastIndexOf('.');
+  input.focus();
+  input.setSelectionRange(0, dot > 0 ? dot : e.name.length);
+  let done = false;
+  const finish = async commit => {
+    if (done) return;
+    done = true;
+    input.replaceWith(span);
+    const newName = input.value.trim();
+    if (!commit || !newName || newName === e.name) return;
+    try {
+      const r = await fetch(`${API}/api/files/rename`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, new_name: newName }) });
+      if (!r.ok) throw new Error((await r.json()).detail || 'rename failed');
+      await loadFileList(fileCurrentPath, false);
+      exSelected = path.split('/').slice(0, -1).concat(newName).join('/');
+      exRender();
+    } catch (err) {
+      alert('Error: ' + err.message);
+      exRender();
+    }
+  };
+  input.addEventListener('keydown', ev => {
+    if (ev.key === 'Enter') { ev.preventDefault(); finish(true); }
+    else if (ev.key === 'Escape') { ev.preventDefault(); finish(false); }
+    ev.stopPropagation();
+  });
+  input.addEventListener('blur', () => finish(true));
+}
+
+async function exDelete(path) {
+  const e = exFind(path);
+  if (!e) return;
+  const what = e.isDir ? `folder "${e.name}" and everything in it` : `"${e.name}"`;
+  if (!confirm(`Are you sure you want to permanently delete ${what}?`)) return;
+  try {
+    const r = await fetch(`${API}/api/files/delete`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path }) });
+    if (!r.ok) throw new Error((await r.json()).detail || 'delete failed');
+    exSelected = null;
+    loadFileList(fileCurrentPath, false);
+  } catch (err) { alert('Error: ' + err.message); }
 }
 
 async function fileOpen(path) {
@@ -4967,7 +5898,7 @@ async function fileOpen(path) {
     });
     const data = await r.json();
     if (data.content !== undefined) {
-      document.getElementById('file-editor-path').textContent = path;
+      document.getElementById('file-editor-path').textContent = '~/' + path;
       document.getElementById('file-editor').value = data.content;
       document.getElementById('file-editor-area').style.display = 'flex';
       document.getElementById('file-editor').dataset.path = path;
@@ -4986,7 +5917,7 @@ async function fileSave() {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ path, content })
     });
-    loadFileList(fileCurrentPath);
+    loadFileList(fileCurrentPath, false);
   } catch (err) {
     alert('Error saving: ' + err.message);
   }
@@ -4994,34 +5925,6 @@ async function fileSave() {
 
 function fileCloseEditor() {
   document.getElementById('file-editor-area').style.display = 'none';
-}
-
-async function fileCreate() {
-  const name = document.getElementById('file-new-name').value.trim();
-  if (!name) return;
-  const fullPath = fileCurrentPath ? fileCurrentPath + '/' + name : name;
-  try {
-    await fetch(`${API}/api/files/write`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path: fullPath, content: '' })
-    });
-    document.getElementById('file-new-name').value = '';
-    loadFileList(fileCurrentPath);
-  } catch (err) { alert('Error: ' + err.message); }
-}
-
-async function fileCreateDir() {
-  const name = document.getElementById('file-new-name').value.trim();
-  if (!name) return;
-  try {
-    const fullPath = fileCurrentPath ? fileCurrentPath + '/' + name + '/.gitkeep' : name + '/.gitkeep';
-    await fetch(`${API}/api/files/write`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path: fullPath, content: '' })
-    });
-    document.getElementById('file-new-name').value = '';
-    loadFileList(fileCurrentPath);
-  } catch (err) { alert('Error: ' + err.message); }
 }
 
 // ── Agent Mode ────────────────────────────────────────────────────────────────
@@ -5112,12 +6015,7 @@ async function runAgent() {
             conv.scrollTop = conv.scrollHeight;
           } else if (data.type === 'tool_result') {
             const row = pendingToolRowId ? document.getElementById(pendingToolRowId) : null;
-            if (row) {
-              const statusEl = row.querySelector('.tool-row-status');
-              if (statusEl) statusEl.textContent = '';
-              row.querySelector('.tool-row-body')?.insertAdjacentHTML('beforeend',
-                `<div class="tool-row-label">Result</div><pre><code>${escHtml((data.result || '').slice(0, 500))}</code></pre>`);
-            }
+            completeToolRow(row, data.result);
             pendingToolRowId = null;
             conv.scrollTop = conv.scrollHeight;
           } else if (data.type === 'sudo_required') {
@@ -5139,6 +6037,10 @@ async function runAgent() {
               const totalTokens = data.usage.prompt_eval_count + (data.usage.eval_count || 0);
               addToWeeklyTokenUsage(totalTokens);
               updateTokenUsageDisplay(totalTokens, model);
+              // Same cost accounting for Agent-mode runs — the per-turn line
+              // targets the Chat tab's spans, so skip those here and only
+              // refresh the global monthly budget meter.
+              updateCostDisplay(data.usage, { showTurn: false });
             }
           } else if (data.type === 'error') {
             receivedTerminalEvent = true;
@@ -5347,190 +6249,10 @@ function removeFilePill(filename) {
 let emailAccounts = [];
 let emailProviders = {};
 let currentEmailMessages = [];
-let currentEmailFolder = 'INBOX';
 
 async function initEmailTab() {
   await loadEmailProviders();
   await loadEmailAccounts();
-  loadEmailCalendarPeek();
-  updateSwipeDirectionLabel();
-  initEmailSwipeHandlers();
-}
-
-// ── Swipe to delete/archive ──────────────────────────────────────────────────
-
-let emailSwipeReversed = localStorage.getItem('emailSwipeReversed') === '1';
-const EMAIL_SWIPE_THRESHOLD = 90; // px of horizontal drag before it counts as a real swipe, not a wobble
-
-function toggleEmailSwipeDirection() {
-  emailSwipeReversed = !emailSwipeReversed;
-  localStorage.setItem('emailSwipeReversed', emailSwipeReversed ? '1' : '0');
-  updateSwipeDirectionLabel();
-}
-
-function updateSwipeDirectionLabel() {
-  const el = document.getElementById('email-swipe-label');
-  if (!el) return;
-  el.textContent = emailSwipeReversed ? '← Archive · Delete →' : '← Delete · Archive →';
-}
-
-// dx < 0 is a left-swipe (row drags left), dx > 0 is a right-swipe.
-// Default: left = delete, right = archive — reversible via the ⇄ toggle.
-function emailSwipeAction(dx) {
-  const leftSwipe = dx < 0;
-  if (leftSwipe) return emailSwipeReversed ? 'archive' : 'delete';
-  return emailSwipeReversed ? 'delete' : 'archive';
-}
-
-let _emailSwipe = null; // { row, idx, startX, currentX }
-
-// Pointer Events (not separate touch/mouse handlers) so the same code
-// drives this on a touchscreen and as a mouse drag on desktop — this app's
-// primary surface. Delegated on the list container since rows are
-// recreated on every render; a per-row listener would need rebinding
-// every time renderEmailMessageList() runs.
-function initEmailSwipeHandlers() {
-  const list = document.getElementById('email-message-list');
-  if (!list || list.dataset.swipeInit) return;
-  list.dataset.swipeInit = '1';
-
-  list.addEventListener('pointerdown', e => {
-    if (e.target.closest('.email-row-pin')) return; // pin button has its own click handling
-    const row = e.target.closest('.email-row');
-    if (!row) return;
-    const idx = parseInt(row.id.replace('email-row-', ''), 10);
-    _emailSwipe = { row, idx, startX: e.clientX, currentX: e.clientX };
-    row.setPointerCapture(e.pointerId);
-    row.classList.add('dragging');
-  });
-
-  list.addEventListener('pointermove', e => {
-    if (!_emailSwipe) return;
-    _emailSwipe.currentX = e.clientX;
-    const dx = Math.max(-160, Math.min(160, _emailSwipe.currentX - _emailSwipe.startX));
-    _emailSwipe.row.style.transform = `translateX(${dx}px)`;
-    renderEmailSwipeBg(_emailSwipe.row, dx);
-  });
-
-  const endSwipe = () => {
-    if (!_emailSwipe) return;
-    const { row, idx } = _emailSwipe;
-    const dx = _emailSwipe.currentX - _emailSwipe.startX;
-    row.classList.remove('dragging');
-    if (Math.abs(dx) >= EMAIL_SWIPE_THRESHOLD) {
-      const action = emailSwipeAction(dx);
-      row.style.transform = `translateX(${dx < 0 ? '-100%' : '100%'})`;
-      row.style.opacity = '0';
-      setTimeout(() => runEmailSwipeAction(idx, action), 160);
-    } else {
-      row.style.transform = 'translateX(0)';
-      const bg = row.querySelector('.email-row-swipe-bg');
-      if (bg) bg.style.opacity = '0';
-    }
-    _emailSwipe = null;
-  };
-  list.addEventListener('pointerup', endSwipe);
-  list.addEventListener('pointercancel', endSwipe);
-}
-
-function renderEmailSwipeBg(row, dx) {
-  let bg = row.querySelector('.email-row-swipe-bg');
-  if (!bg) {
-    bg = document.createElement('div');
-    bg.className = 'email-row-swipe-bg';
-    row.insertBefore(bg, row.firstChild);
-  }
-  if (dx === 0) { bg.style.opacity = '0'; return; }
-  const action = emailSwipeAction(dx);
-  bg.style.opacity = String(Math.min(1, Math.abs(dx) / EMAIL_SWIPE_THRESHOLD));
-  bg.style.background = action === 'delete' ? 'var(--danger)' : 'var(--accent2)';
-  bg.style.justifyContent = dx < 0 ? 'flex-end' : 'flex-start';
-  bg.textContent = action === 'delete' ? '🗑 Delete' : '📦 Archive';
-}
-
-async function runEmailSwipeAction(idx, action) {
-  const m = currentEmailMessages[idx];
-  if (!m) { renderEmailMessageList(); return; }
-  const accountId = document.getElementById('email-account-select').value;
-  const folderQS = `folder=${encodeURIComponent(currentEmailFolder)}`;
-  try {
-    const r = action === 'delete'
-      ? await fetch(`${API}/api/email/${accountId}/messages/${encodeURIComponent(m.uid)}?${folderQS}`, { method: 'DELETE' })
-      : await fetch(`${API}/api/email/${accountId}/messages/${encodeURIComponent(m.uid)}/archive?${folderQS}`, { method: 'POST' });
-    if (!r.ok) { const e = await r.json(); throw new Error(e.detail || 'Failed'); }
-    // Optimistic local removal so the list doesn't flash back before the
-    // folder/inbox refresh below completes.
-    currentEmailMessages = currentEmailMessages.filter(x => x !== m);
-    renderEmailMessageList();
-    loadEmailFolders(); // re-fetches this folder's messages + all folders' unread counts
-  } catch (err) {
-    alert(`Could not ${action}: ${err.message}`);
-    renderEmailMessageList();
-  }
-}
-
-// Outlook-style "Calendar & Meetings" peek — shows your own approved events
-// (the ones already pushed to CalDAV/the ICS feed via the Calendar tab), not
-// a live read of an external calendar this app doesn't have two-way sync
-// with. Account-independent (your own local event queue, not per-mailbox),
-// so it loads once when the Email tab opens rather than per account/folder.
-async function loadEmailCalendarPeek() {
-  const peek = document.getElementById('email-calendar-peek');
-  if (!peek) return;
-  const monthLabel = new Date().toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
-  try {
-    const r = await fetch(`${API}/api/calendar/events?status=approved`);
-    const d = await r.json();
-    const now = new Date();
-    const todayStr = now.toISOString().slice(0, 10);
-    const tomorrow = new Date(now);
-    tomorrow.setDate(tomorrow.getDate() + 1);
-    const tomorrowStr = tomorrow.toISOString().slice(0, 10);
-
-    const upcoming = (d.events || [])
-      .filter(e => e.start && e.start.slice(0, 10) >= todayStr)
-      .sort((a, b) => a.start.localeCompare(b.start))
-      .slice(0, 12);
-
-    if (!upcoming.length) {
-      peek.innerHTML = `
-        <div class="peek-month">${escHtml(monthLabel)}</div>
-        <div class="peek-empty">No upcoming events</div>
-        <span class="peek-viewall" onclick="switchTab('calendar')">Open Calendar →</span>
-      `;
-      return;
-    }
-
-    const groups = { today: [], tomorrow: [], later: [] };
-    for (const e of upcoming) {
-      const dateStr = e.start.slice(0, 10);
-      if (dateStr === todayStr) groups.today.push(e);
-      else if (dateStr === tomorrowStr) groups.tomorrow.push(e);
-      else groups.later.push(e);
-    }
-    const renderEvent = e => {
-      const time = e.all_day ? 'All day' : (e.start.slice(11, 16) || '');
-      const titleAttr = e.location ? `${e.title} — ${e.location}` : (e.title || '');
-      return `
-        <div class="peek-event" title="${escHtml(titleAttr)}">
-          <span class="peek-event-time">${escHtml(time)}</span>
-          <span class="peek-event-title">${escHtml(e.title || '(untitled)')}</span>
-        </div>`;
-    };
-    const renderGroup = (label, events) => events.length
-      ? `<div class="peek-group-label">${label}</div>${events.map(renderEvent).join('')}`
-      : '';
-
-    peek.innerHTML = `
-      <div class="peek-month">${escHtml(monthLabel)}</div>
-      ${renderGroup('Today', groups.today)}
-      ${renderGroup('Tomorrow', groups.tomorrow)}
-      ${renderGroup('Upcoming', groups.later)}
-      <span class="peek-viewall" onclick="switchTab('calendar')">Open Calendar →</span>
-    `;
-  } catch (err) {
-    peek.innerHTML = `<div class="peek-month">${escHtml(monthLabel)}</div><div class="peek-empty">Couldn't load calendar</div>`;
-  }
 }
 
 function toggleEmailSetup() {
@@ -5795,9 +6517,13 @@ async function loadEmailAccounts() {
     const r = await fetch(`${API}/api/email/accounts`);
     const d = await r.json();
     emailAccounts = d.accounts || [];
-    document.getElementById('email-accounts-list').innerHTML = emailAccounts.map(a => `
+    document.getElementById('email-accounts-list').innerHTML = emailAccounts.map((a, i) => `
       <div style="display:flex;align-items:center;gap:8px;font-size:12px;padding:4px 6px;background:rgba(255,255,255,.03);border-radius:4px">
-        <span style="flex:1">${escHtml(a.label)} — ${escHtml(a.email)}</span>
+        <span style="display:flex;flex-direction:column;gap:1px">
+          <button class="btn btn-secondary btn-sm" style="padding:0 6px;line-height:1.4" title="Move up — loads first when higher in the list" ${i === 0 ? 'disabled' : ''} onclick="moveEmailAccount('${a.id}', -1)">▲</button>
+          <button class="btn btn-secondary btn-sm" style="padding:0 6px;line-height:1.4" title="Move down" ${i === emailAccounts.length - 1 ? 'disabled' : ''} onclick="moveEmailAccount('${a.id}', 1)">▼</button>
+        </span>
+        <span style="flex:1">${i === 0 ? '<strong title="Loads first">★</strong> ' : ''}${escHtml(a.label)} — ${escHtml(a.email)}</span>
         <button class="btn btn-secondary btn-sm" onclick="deleteEmailAccount('${a.id}')">Remove</button>
       </div>
     `).join('') || '<div style="font-size:12px;color:var(--muted)">No accounts yet.</div>';
@@ -5808,112 +6534,7 @@ async function loadEmailAccounts() {
       ? emailAccounts.map(a => `<option value="${a.id}">${escHtml(a.label)}</option>`).join('')
       : '<option value="">No accounts</option>';
     if (prev && emailAccounts.some(a => a.id === prev)) sel.value = prev;
-    if (sel.value) await loadEmailFolders();
   } catch {}
-}
-
-// Switching accounts always lands back on INBOX — a folder id from one
-// account (especially a Gmail-style "[Gmail]/Sent Mail" one) has no
-// guaranteed meaning on another.
-async function onEmailAccountChange() {
-  currentEmailFolder = 'INBOX';
-  await loadEmailFolders();
-}
-
-let currentEmailFolders = [{ name: 'INBOX', unread: 0 }];
-
-async function loadEmailFolders() {
-  const accountId = document.getElementById('email-account-select').value;
-  const rail = document.getElementById('email-folder-rail');
-  if (!accountId) {
-    rail.innerHTML = '<div style="font-size:12px;color:var(--muted);padding:8px 10px">No account selected</div>';
-    return;
-  }
-  rail.innerHTML = '<div style="font-size:12px;color:var(--muted);padding:8px 10px">Loading folders…</div>';
-  try {
-    const r = await fetch(`${API}/api/email/${accountId}/folders`);
-    const d = await r.json();
-    currentEmailFolders = d.folders && d.folders.length ? d.folders : [{ name: 'INBOX', unread: 0 }];
-    if (!currentEmailFolders.some(f => f.name === currentEmailFolder)) currentEmailFolder = 'INBOX';
-    renderEmailFolderRail();
-    await loadInbox();
-  } catch (err) {
-    rail.innerHTML = `<div style="font-size:12px;padding:8px 10px" class="stderr">${escHtml(err.message)}</div>`;
-  }
-}
-
-// Common IMAP folder names get a matching icon, same idea as Outlook's
-// built-in folder icons — anything else (a custom label, a Gmail category)
-// just gets the generic folder glyph.
-const EMAIL_FOLDER_ICONS = {
-  INBOX: '📥', SENT: '📤', DRAFTS: '📝', TRASH: '🗑', DELETED: '🗑',
-  JUNK: '⚠️', SPAM: '⚠️', ARCHIVE: '📦', STARRED: '⭐', IMPORTANT: '❗',
-};
-function emailFolderIcon(name) {
-  const key = name.split('/').pop().toUpperCase();
-  return EMAIL_FOLDER_ICONS[key] || '📁';
-}
-function emailFolderLabel(name) {
-  // "[Gmail]/Sent Mail" -> "Sent Mail" — the provider prefix is redundant
-  // once it's already grouped under this account in the rail.
-  return name.replace(/^\[Gmail\]\//, '');
-}
-
-function renderEmailFolderRail() {
-  const rail = document.getElementById('email-folder-rail');
-  rail.innerHTML = currentEmailFolders.map(f => `
-    <div class="email-folder-item ${f.name === currentEmailFolder ? 'active' : ''}" data-folder="${escHtml(f.name)}">
-      <span>${emailFolderIcon(f.name)}</span>
-      <span class="folder-name">${escHtml(emailFolderLabel(f.name))}</span>
-      ${f.unread ? `<span class="folder-unread-count">${f.unread}</span>` : ''}
-    </div>
-  `).join('');
-  updateEmptyFolderButtonVisibility();
-}
-
-// Bin/Trash/Spam/Junk are the folders every real mail client offers an
-// "Empty Folder" action for — matched on the last path segment so it still
-// works for Gmail's "[Gmail]/Bin"/"[Gmail]/Spam" alongside a plain "Trash".
-const EMAIL_EMPTYABLE_FOLDERS = new Set(['TRASH', 'BIN', 'DELETED', 'DELETED ITEMS', 'SPAM', 'JUNK', 'JUNK EMAIL']);
-function updateEmptyFolderButtonVisibility() {
-  const btn = document.getElementById('email-empty-folder-btn');
-  if (!btn) return;
-  const key = currentEmailFolder.split('/').pop().toUpperCase();
-  btn.style.display = EMAIL_EMPTYABLE_FOLDERS.has(key) ? '' : 'none';
-}
-
-async function emptyCurrentEmailFolder() {
-  const accountId = document.getElementById('email-account-select').value;
-  if (!accountId) return;
-  const label = emailFolderLabel(currentEmailFolder);
-  if (!confirm(`Permanently delete every message in "${label}"? This can't be undone.`)) return;
-  const btn = document.getElementById('email-empty-folder-btn');
-  btn.disabled = true;
-  try {
-    const r = await fetch(`${API}/api/email/${accountId}/folders/empty?folder=${encodeURIComponent(currentEmailFolder)}`, { method: 'POST' });
-    if (!r.ok) { const e = await r.json(); throw new Error(e.detail || 'Failed'); }
-    document.getElementById('email-message-detail').innerHTML = '<div class="runner-placeholder">Select a message to read it.</div>';
-    await loadEmailFolders();
-  } catch (err) {
-    alert('Could not empty folder: ' + err.message);
-  } finally {
-    btn.disabled = false;
-  }
-}
-
-document.addEventListener('DOMContentLoaded', () => {
-  document.getElementById('email-folder-rail').addEventListener('click', e => {
-    const item = e.target.closest('.email-folder-item');
-    if (item) selectEmailFolder(item.dataset.folder);
-  });
-});
-
-function selectEmailFolder(folder) {
-  if (folder === currentEmailFolder) return;
-  currentEmailFolder = folder;
-  renderEmailFolderRail();
-  document.getElementById('email-message-detail').innerHTML = '<div class="runner-placeholder">Select a message to read it.</div>';
-  loadInbox();
 }
 
 async function addEmailAccount() {
@@ -5962,6 +6583,19 @@ async function deleteEmailAccount(id) {
   await loadEmailAccounts();
 }
 
+async function moveEmailAccount(id, delta) {
+  const order = emailAccounts.map(a => a.id);
+  const i = order.indexOf(id);
+  const j = i + delta;
+  if (i < 0 || j < 0 || j >= order.length) return;
+  [order[i], order[j]] = [order[j], order[i]];
+  await fetch(`${API}/api/email/accounts/reorder`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ order })
+  });
+  await loadEmailAccounts();
+}
+
 // "Real Name <addr@example.com>" -> {name, addr} — falls back to using the
 // raw header as the name when it isn't in that form (some senders just send
 // a bare address with no display name).
@@ -5990,73 +6624,24 @@ function formatEmailDate(raw, withTime) {
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: d.getFullYear() === now.getFullYear() ? undefined : 'numeric' });
 }
 
-// Pin state lives in localStorage, not the message object — IMAP has no
-// native "pinned" concept, and currentEmailMessages is rebuilt from scratch
-// on every loadInbox() call, so anything not persisted separately would
-// reset on every refresh. Keyed by account+folder+uid since a UID is only
-// unique within one folder of one account.
-function _emailPinKey(accountId, folder, uid) {
-  return `${accountId}::${folder}::${uid}`;
-}
-function _loadPinnedEmailKeys() {
-  try { return new Set(JSON.parse(localStorage.getItem('pinnedEmails') || '[]')); }
-  catch { return new Set(); }
-}
-function _savePinnedEmailKeys(set) {
-  localStorage.setItem('pinnedEmails', JSON.stringify([...set]));
-}
-function toggleEmailPin(i) {
-  const m = currentEmailMessages[i];
-  if (!m) return;
-  const accountId = document.getElementById('email-account-select').value;
-  const key = _emailPinKey(accountId, currentEmailFolder, m.uid);
-  const pinned = _loadPinnedEmailKeys();
-  if (pinned.has(key)) pinned.delete(key); else pinned.add(key);
-  _savePinnedEmailKeys(pinned);
-  renderEmailMessageList();
-}
-
 async function loadInbox() {
   const accountId = document.getElementById('email-account-select').value;
   const list = document.getElementById('email-message-list');
   if (!accountId) { list.innerHTML = '<div class="runner-placeholder">Add an account first.</div>'; return; }
   list.innerHTML = '<div style="padding:12px;color:var(--muted)"><div class="thinking"><span></span><span></span><span></span></div> Loading inbox...</div>';
   try {
-    const r = await fetch(`${API}/api/email/${accountId}/messages?limit=25&folder=${encodeURIComponent(currentEmailFolder)}`);
+    const r = await fetch(`${API}/api/email/${accountId}/messages?limit=25`);
     if (!r.ok) { const e = await r.json(); throw new Error(e.detail || 'Failed'); }
     const d = await r.json();
     currentEmailMessages = d.messages || [];
-    renderEmailMessageList();
-  } catch (err) {
-    list.innerHTML = `<span class="stderr">Error: ${err.message}</span>`;
-  }
-}
-
-// Split from loadInbox() so pin/unpin can re-render (re-sort included)
-// without an extra IMAP fetch.
-function renderEmailMessageList() {
-  const list = document.getElementById('email-message-list');
-  if (!currentEmailMessages.length) {
-    list.innerHTML = '<div class="runner-placeholder">No messages found.</div>';
-    return;
-  }
-  const accountId = document.getElementById('email-account-select').value;
-  const pinnedKeys = _loadPinnedEmailKeys();
-  // Pinned-to-top, stable otherwise (Array.sort is stable in every current
-  // JS engine) — preserves the server's own newest-first order within each
-  // of the two groups.
-  const withPinFlag = currentEmailMessages.map(m => ({
-    m, pinned: pinnedKeys.has(_emailPinKey(accountId, currentEmailFolder, m.uid)),
-  }));
-  withPinFlag.sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0));
-
-  list.innerHTML = withPinFlag.map(({ m, pinned }) => {
-    const i = currentEmailMessages.indexOf(m);
-    const sender = parseEmailFrom(m.from);
-    const stateClass = pinned ? 'pinned' : (m.unread ? 'unread' : 'read');
-    return `
-      <div class="email-row ${stateClass}" id="email-row-${i}" onclick="openEmailMessage(${i})">
-        <button class="email-row-pin" onclick="event.stopPropagation(); toggleEmailPin(${i})" title="${pinned ? 'Unpin' : 'Pin to top'}">📌</button>
+    if (!currentEmailMessages.length) {
+      list.innerHTML = '<div class="runner-placeholder">No messages found.</div>';
+      return;
+    }
+    list.innerHTML = currentEmailMessages.map((m, i) => {
+      const sender = parseEmailFrom(m.from);
+      return `
+      <div class="email-row" id="email-row-${i}" onclick="openEmailMessage(${i})">
         <div class="email-row-top">
           <span class="email-row-sender">${escHtml(sender.name)}</span>
           <span class="email-row-date">${escHtml(formatEmailDate(m.date))}</span>
@@ -6064,31 +6649,17 @@ function renderEmailMessageList() {
         <span class="email-row-subject">${escHtml(m.subject || '(no subject)')}</span>
         <span class="email-row-preview">${escHtml(m.preview)}</span>
       </div>`;
-  }).join('');
+    }).join('');
+  } catch (err) {
+    list.innerHTML = `<span class="stderr">Error: ${err.message}</span>`;
+  }
 }
 
 function openEmailMessage(i) {
   const m = currentEmailMessages[i];
   if (!m) return;
   document.querySelectorAll('.email-row.active').forEach(el => el.classList.remove('active'));
-  const row = document.getElementById(`email-row-${i}`);
-  row?.classList.add('active');
-
-  // Mark read both locally (immediate UI feedback) and on the server (a
-  // real IMAP \Seen flag, not just local state) — matches what opening a
-  // message in any real mail client actually does. Fire-and-forget: a
-  // failed mark-read shouldn't block reading the message you already opened.
-  if (m.unread) {
-    m.unread = false;
-    // Swap the color state, but leave a pinned row's amber alone — pinned
-    // overrides read/unread tinting regardless of read state (see CSS).
-    if (row && !row.classList.contains('pinned')) {
-      row.classList.remove('unread');
-      row.classList.add('read');
-    }
-    const accountId = document.getElementById('email-account-select').value;
-    fetch(`${API}/api/email/${accountId}/messages/${encodeURIComponent(m.uid)}/read?folder=${encodeURIComponent(currentEmailFolder)}`, { method: 'POST' }).catch(() => {});
-  }
+  document.getElementById(`email-row-${i}`)?.classList.add('active');
 
   const sender = parseEmailFrom(m.from);
   const initial = (sender.name || '?').trim().charAt(0).toUpperCase();
@@ -6107,7 +6678,7 @@ function openEmailMessage(i) {
     </div>
     <div class="email-detail-body">${escHtml(m.body)}</div>
     <div class="email-detail-actions">
-      <button class="btn-copper btn-sm" onclick="draftEmailReplies(${i})">✨ Copper AI Reply</button>
+      <button class="btn btn-accent btn-sm" onclick="draftEmailReplies(${i})">✉ Draft 3 Replies</button>
       <button class="btn btn-secondary btn-sm" onclick="scanEmailForEvents(${i})">📅 Scan for Events</button>
       <button class="btn btn-secondary btn-sm" onclick="saveEmailMessage(${i})">💾 Save</button>
       <button class="btn btn-secondary btn-sm" onclick="deleteEmailMessage(${i})">🗑 Delete</button>
@@ -6142,7 +6713,7 @@ async function deleteEmailMessage(i) {
   if (!confirm(`Delete "${m.subject || '(no subject)'}"? This removes it from the server and can't be undone.`)) return;
   const accountId = document.getElementById('email-account-select').value;
   try {
-    const r = await fetch(`${API}/api/email/${accountId}/messages/${encodeURIComponent(m.uid)}?folder=${encodeURIComponent(currentEmailFolder)}`, { method: 'DELETE' });
+    const r = await fetch(`${API}/api/email/${accountId}/messages/${encodeURIComponent(m.uid)}`, { method: 'DELETE' });
     if (!r.ok) { const e = await r.json(); throw new Error(e.detail || 'Failed'); }
     document.getElementById('email-message-detail').innerHTML = '<div class="runner-placeholder">Select a message to read it.</div>';
     await loadInbox();
@@ -6198,105 +6769,6 @@ async function sendEmailReply(i, ri) {
     alert('Sent!');
   } catch (err) {
     alert('Error sending: ' + err.message);
-  }
-}
-
-// ── Compose (New Email) — same overlay pattern as showAboutModal()/
-// requestSudoPassword() elsewhere in this file: built in JS, not static
-// markup, since only one can ever be open at a time. Its "✨ Copper AI" row
-// is the compose-side counterpart to the "✨ Copper AI Reply" button in
-// openEmailMessage() above — one drafts a reply to an existing message, this
-// one drafts a whole new email from a short instruction (POST
-// /api/email/compose, distinct from /api/email/draft-replies).
-function openComposeModal() {
-  if (document.getElementById('compose-overlay')) return;
-  const accountId = document.getElementById('email-account-select').value;
-  if (!accountId) { alert('Add and select an email account first.'); return; }
-
-  const overlay = document.createElement('div');
-  overlay.id = 'compose-overlay';
-  overlay.className = 'compose-overlay';
-  overlay.innerHTML = `
-    <div class="compose-box">
-      <div class="compose-header">
-        <span>✉ New Email</span>
-        <button class="icon-btn" onclick="closeComposeModal()" aria-label="Close">✕</button>
-      </div>
-      <div class="compose-body">
-        <input type="text" id="compose-to" placeholder="To">
-        <input type="text" id="compose-subject" placeholder="Subject">
-        <div class="compose-ai-row">
-          <span style="font-size:13px;white-space:nowrap">✨ Copper AI:</span>
-          <input type="text" id="compose-ai-instructions" placeholder="What should this email say?" onkeydown="if(event.key==='Enter'){event.preventDefault();composeWithAI();}">
-          <button class="btn-copper btn-sm" id="compose-ai-btn" onclick="composeWithAI()">Draft it</button>
-        </div>
-        <textarea id="compose-body" placeholder="Write your email, or let Copper AI draft it above..."></textarea>
-        <div id="compose-status" style="font-size:12px;color:var(--muted)"></div>
-      </div>
-      <div class="compose-footer">
-        <button class="btn btn-secondary" onclick="closeComposeModal()">Cancel</button>
-        <button class="btn btn-primary" onclick="sendComposedEmail()">Send</button>
-      </div>
-    </div>
-  `;
-  document.body.appendChild(overlay);
-  overlay.addEventListener('click', e => { if (e.target === overlay) closeComposeModal(); });
-  document.addEventListener('keydown', function onEsc(e) {
-    if (e.key === 'Escape') { closeComposeModal(); document.removeEventListener('keydown', onEsc); }
-  });
-  setTimeout(() => document.getElementById('compose-to').focus(), 0);
-}
-
-function closeComposeModal() {
-  document.getElementById('compose-overlay')?.remove();
-}
-
-async function composeWithAI() {
-  const model = document.getElementById('model-select').value;
-  if (!model) { alert('Select a model first (top-left)'); return; }
-  const instructions = document.getElementById('compose-ai-instructions').value.trim();
-  if (!instructions) { alert('Tell Copper AI what the email should say first.'); return; }
-  const to = document.getElementById('compose-to').value.trim();
-  const btn = document.getElementById('compose-ai-btn');
-  const status = document.getElementById('compose-status');
-  btn.disabled = true; btn.textContent = 'Drafting…';
-  status.textContent = '';
-  try {
-    const r = await fetch(`${API}/api/email/compose`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, to, instructions })
-    });
-    if (!r.ok) { const e = await r.json(); throw new Error(e.detail || 'Failed'); }
-    const d = await r.json();
-    if (d.subject && !document.getElementById('compose-subject').value) {
-      document.getElementById('compose-subject').value = d.subject;
-    }
-    document.getElementById('compose-body').value = d.body || '';
-  } catch (err) {
-    status.textContent = 'Error: ' + err.message;
-  } finally {
-    btn.disabled = false; btn.textContent = 'Draft it';
-  }
-}
-
-async function sendComposedEmail() {
-  const accountId = document.getElementById('email-account-select').value;
-  const to = document.getElementById('compose-to').value.trim();
-  const subject = document.getElementById('compose-subject').value.trim();
-  const body = document.getElementById('compose-body').value;
-  if (!to) { alert('Enter a recipient.'); return; }
-  if (!body.trim()) { alert('Write something first (or let Copper AI draft it).'); return; }
-  const status = document.getElementById('compose-status');
-  status.textContent = 'Sending…';
-  try {
-    const r = await fetch(`${API}/api/email/send`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ account_id: accountId, to, subject, body })
-    });
-    if (!r.ok) { const e = await r.json(); throw new Error(e.detail || 'Failed'); }
-    closeComposeModal();
-  } catch (err) {
-    status.textContent = 'Error: ' + err.message;
   }
 }
 

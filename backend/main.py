@@ -1,6 +1,8 @@
 import asyncio
 import base64
+import difflib
 import glob
+import hashlib
 import imaplib
 import json
 import os
@@ -10,6 +12,7 @@ import shutil
 import smtplib
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -20,6 +23,7 @@ from email import message_from_bytes
 from email.header import decode_header
 from email.utils import parseaddr
 from email.message import EmailMessage as StdEmailMessage
+from fnmatch import fnmatch
 from pathlib import Path
 
 import httpx
@@ -54,6 +58,10 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     _load_and_schedule_routines()
     scheduler.add_job(_check_new_mail, IntervalTrigger(minutes=5), id="mail-poll", replace_existing=True)
+    # NOTE: this app uses a custom lifespan, which means @app.on_event
+    # handlers never fire — anything that must run at boot (skill/vendor
+    # import) or shutdown (LSP client cleanup) has to be wired in HERE.
+    await _register_builtin_skills()
     yield
     scheduler.shutdown(wait=False)
     # A "Run Code" dev server (npx expo start / flutter run) is deliberately
@@ -63,6 +71,12 @@ async def lifespan(app: FastAPI):
         proc = state.get("process")
         if proc and proc.returncode is None:
             proc.kill()
+    for client in _lsp_clients.values():
+        try:
+            if client.proc:
+                client.proc.terminate()
+        except Exception:
+            pass
 
 app = FastAPI(title="AI Copper Maker", lifespan=lifespan)
 
@@ -81,34 +95,102 @@ LMS_BIN = shutil.which("lms") or str(
 )
 API_KEYS_FILE = Path(__file__).parent.parent / "api_keys.json"
 CLOUD_PROVIDERS = {
-    "anthropic":  {"label": "Claude (Anthropic)",  "default_model": "claude-sonnet-4-6"},
-    "openai":     {"label": "ChatGPT (OpenAI)",     "default_model": "gpt-4o"},
-    "google":     {"label": "Gemini (Google)",      "default_model": "gemini-2.0-flash"},
-    "xai":        {"label": "Grok (xAI)",           "default_model": "grok-4"},
-    "deepseek":   {"label": "DeepSeek",             "default_model": "deepseek-chat"},
-    # Not one fixed model like the five above — one key here unlocks
-    # hundreds of other paid models (Llama, Mistral, Qwen, Grok, and the
-    # big-name ones above too) through a single OpenAI-compatible endpoint.
-    # See OPENROUTER_FEATURED_MODELS below for what actually lands in the
-    # model dropdown.
-    "openrouter": {"label": "OpenRouter (100s of paid models, 1 key)", "default_model": "openai/gpt-4o"},
+    "anthropic": {"label": "Claude (Anthropic)", "default_model": "claude-sonnet-4-6"},
+    "openai": {"label": "ChatGPT (OpenAI)", "default_model": "gpt-4o"},
+    "google": {"label": "Gemini (Google)", "default_model": "gemini-2.0-flash"},
+    "openrouter": {"label": "OpenRouter (any model)", "default_model": "anthropic/claude-sonnet-4.5"},
 }
 
-# A small, diverse hand-picked slice of OpenRouter's full catalog (hundreds
-# of models) — enough to cover every major paid family through the one
-# OpenRouter key without turning the model dropdown into an unbrowsable
-# wall of options. Model slugs are OpenRouter's own naming (provider/model),
-# nested under this app's own "openrouter/" prefix in the dropdown.
-OPENROUTER_FEATURED_MODELS = [
-    "openai/gpt-4o",
-    "anthropic/claude-3.7-sonnet",
-    "google/gemini-2.0-flash-001",
-    "x-ai/grok-2-1212",
-    "deepseek/deepseek-chat",
-    "meta-llama/llama-3.3-70b-instruct",
-    "mistralai/mistral-large",
-    "qwen/qwen-2.5-72b-instruct",
-]
+# ── Cloud-model pricing + spend tracking ──────────────────────────────────────
+# USD per MILLION tokens, from each provider's published price page. "cache_read"
+# is the discounted rate for tokens served from a prompt cache (Anthropic prompt
+# caching / OpenAI automatic caching / Gemini implicit caching); "cache_write"
+# (Anthropic only) is the surcharge for tokens written INTO the cache. These
+# move over time, so every cost shown anywhere in the app is prefixed "≈" and
+# unknown models fall back to their provider's default tier — an estimate for
+# awareness, not a bill.
+PRICING = {
+    "anthropic": {
+        "default": {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75},
+        "claude-sonnet-4-6": {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75},
+        "claude-sonnet-4-5": {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75},
+        "claude-opus-4-6": {"input": 15.0, "output": 75.0, "cache_read": 1.50, "cache_write": 18.75},
+        "claude-opus-4-1": {"input": 10.0, "output": 50.0, "cache_read": 1.00, "cache_write": 12.50},
+        "claude-3-5-haiku": {"input": 0.80, "output": 4.0, "cache_read": 0.08, "cache_write": 1.0},
+        "claude-haiku-4-5": {"input": 1.0, "output": 5.0, "cache_read": 0.10, "cache_write": 1.25},
+    },
+    "openai": {
+        "default": {"input": 2.50, "output": 10.0, "cache_read": 1.25},
+        "gpt-4o": {"input": 2.50, "output": 10.0, "cache_read": 1.25},
+        "gpt-4o-mini": {"input": 0.15, "output": 0.60, "cache_read": 0.075},
+        "gpt-4.1": {"input": 2.0, "output": 8.0, "cache_read": 0.50},
+        "gpt-4.1-mini": {"input": 0.40, "output": 1.60, "cache_read": 0.10},
+        "gpt-4.1-nano": {"input": 0.10, "output": 0.40, "cache_read": 0.025},
+    },
+    "google": {
+        "default": {"input": 0.10, "output": 0.40, "cache_read": 0.025},
+        "gemini-2.0-flash": {"input": 0.10, "output": 0.40, "cache_read": 0.025},
+        "gemini-2.5-flash": {"input": 0.30, "output": 2.50, "cache_read": 0.075},
+        "gemini-2.5-pro": {"input": 1.25, "output": 10.0, "cache_read": 0.31},
+},
+    "openrouter": {
+        "default": {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75},
+        "anthropic/claude-sonnet-4.5": {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75},
+        "anthropic/claude-opus-4": {"input": 15.0, "output": 75.0, "cache_read": 1.50, "cache_write": 18.75},
+        "openai/gpt-4o": {"input": 2.50, "output": 10.0, "cache_read": 1.25},
+        "openai/gpt-4o-mini": {"input": 0.15, "output": 0.60, "cache_read": 0.075},
+    },
+}
+
+def _pricing_for(provider: str, model: str) -> dict:
+    table = PRICING.get(provider, {})
+    return table.get(model) or table.get("default") or {"input": 0.0, "output": 0.0}
+
+SPEND_FILE = Path(__file__).parent.parent / "usage_cost.json"
+
+def _load_spend() -> dict:
+    """Per-calendar-month spend ledger: {"period": "YYYY-MM", "spent": float,
+    "by_model": {model: dollars}}. A new month rolls the ledger back to zero
+    (previous months aren't archived — this is an awareness meter, not an
+    invoice archive)."""
+    try:
+        data = json.loads(SPEND_FILE.read_text()) if SPEND_FILE.exists() else {}
+    except (json.JSONDecodeError, OSError):
+        data = {}
+    this_month = datetime.now().strftime("%Y-%m")
+    if data.get("period") != this_month:
+        data = {"period": this_month, "spent": 0.0, "by_model": {}}
+    return data
+
+def _record_spend(model: str, cost: float):
+    if cost <= 0:
+        return
+    data = _load_spend()
+    data["spent"] = round(data.get("spent", 0.0) + cost, 6)
+    data["by_model"][model] = round(data["by_model"].get(model, 0.0) + cost, 6)
+    try:
+        SPEND_FILE.write_text(json.dumps(data, indent=2))
+    except (OSError, IOError):
+        pass  # ledger is best-effort; never let it break a real completion
+
+def _cost_summary() -> dict:
+    """Everything the UI needs to render "cost used + % of budget left" for
+    paid models: the month's spend from the ledger, the budget ceiling from
+    config.json (cloud_budget, default $20/month), and the derived
+    percent-left. Local models spend nothing — the frontend only shows this
+    row when a cloud model is selected."""
+    data = _load_spend()
+    budget = float(load_config().get("cloud_budget", 20.0) or 0)
+    spent = data.get("spent", 0.0)
+    pct_left = max(0.0, round(100.0 * (budget - spent) / budget, 1)) if budget > 0 else None
+    return {
+        "period": data.get("period"),
+        "budget": budget,
+        "spent": round(spent, 4),
+        "remaining": round(max(0.0, budget - spent), 4) if budget > 0 else None,
+        "percent_left": pct_left,
+        "by_model": data.get("by_model", {}),
+    }
 
 
 def _load_api_keys() -> dict:
@@ -132,6 +214,21 @@ FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
 CONFIG_FILE = Path(__file__).parent.parent / "config.json"
 CONVERSATIONS_FILE = Path(__file__).parent.parent / "conversations.json"
 DEFAULT_SAVE_DIR = str(Path.home() / "Downloads" / "LLM-CODER")
+
+
+def _find_project_root(path: str) -> str:
+    """Walk up from *path* to find a project root marker (.git, Cargo.toml,
+    or .hg). Returns the absolute parent directory containing the marker, or
+    the original path's parent if no marker is found."""
+    p = Path(path).resolve()
+    for _ in range(20):  # don't go beyond 20 levels up
+        if any((p / marker).is_dir() for marker in (".git", "Cargo.toml", ".hg")):
+            return str(p)
+        parent = p.parent
+        if parent == p:  # reached filesystem root
+            break
+        p = parent
+    return str(p.parent if p.parent != p else p)
 
 
 def _detect_environment() -> dict:
@@ -179,6 +276,64 @@ def _detect_environment() -> dict:
 
 
 HOST_ENV = _detect_environment()
+
+
+def _detect_gpu_backend() -> dict:
+    """Best-effort GPU probe for picking the right PyTorch wheel for local
+    image generation. Deliberately NOT part of HOST_ENV/startup — this only
+    runs on-demand from the Image Gen tab's local-setup flow, since most
+    installs will never touch it (heavy ML deps, opt-in only). Every check
+    here is generic hardware detection, not anything specific to the machine
+    this was written on — it has to work correctly on whatever GPU (or lack
+    of one) the next person running this app actually has."""
+    result = {"backend": "cpu", "gpu_name": "", "vram_gb": None}
+
+    if shutil.which("nvidia-smi"):
+        try:
+            out = subprocess.run(
+                ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"],
+                capture_output=True, text=True, timeout=5,
+            )
+            line = out.stdout.strip().splitlines()[0] if out.returncode == 0 and out.stdout.strip() else ""
+            if line:
+                name, _, mem = line.partition(",")
+                vram_mb = float(re.sub(r"[^\d.]", "", mem)) if re.search(r"\d", mem) else 0
+                result.update(backend="cuda", gpu_name=name.strip(), vram_gb=round(vram_mb / 1024, 1) or None)
+                return result
+        except (OSError, subprocess.TimeoutExpired, ValueError, IndexError):
+            pass
+
+    if platform.system() == "Darwin" and platform.machine() == "arm64":
+        result.update(backend="mps", gpu_name="Apple Silicon (unified memory)")
+        return result
+
+    # AMD/ROCm: /dev/kfd is the kernel compute-node device — present as soon
+    # as the amdgpu driver loads, well before any ROCm userspace tooling is
+    # installed, so this works as a pre-install probe. lspci fills in the
+    # name/VRAM; on a machine with both an iGPU and a discrete card we want
+    # the one with the bigger memory BAR, not whichever lspci lists first.
+    if Path("/dev/kfd").exists() and shutil.which("lspci"):
+        try:
+            out = subprocess.run(["lspci", "-v"], capture_output=True, text=True, timeout=5)
+            best = None
+            for block in out.stdout.split("\n\n"):
+                if not re.search(r"VGA compatible controller|Display controller|3D controller", block):
+                    continue
+                if "AMD" not in block and "ATI" not in block:
+                    continue
+                name_m = re.search(r"\[AMD/ATI\]\s+(.+?)(?:\s+\(rev|\n)", block)
+                vram_gb = 0.0
+                for size, unit in re.findall(r"Memory at \S+ \([^)]*\)\s*\[size=(\d+)([MG])\]", block):
+                    vram_gb = max(vram_gb, float(size) / (1 if unit == "G" else 1024))
+                if best is None or vram_gb > best[1]:
+                    best = (name_m.group(1).strip() if name_m else "AMD GPU", vram_gb)
+            if best:
+                result.update(backend="rocm", gpu_name=best[0], vram_gb=round(best[1], 1) or None)
+                return result
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+    return result
 
 
 def _detect_vram() -> dict:
@@ -304,10 +459,26 @@ class FileWriteRequest(BaseModel):
     path: str
     content: str
 
+class FileEditRequest(BaseModel):
+    path: str
+    old_string: str
+    new_string: str
+    replace_all: bool = False
+
 class FileSearchRequest(BaseModel):
     pattern: str
     path: str = ""
     content_search: bool = False
+
+class FileDeleteRequest(BaseModel):
+    path: str
+
+class FileRenameRequest(BaseModel):
+    path: str
+    new_name: str
+
+class FileMkdirRequest(BaseModel):
+    path: str
 
 class AgentRequest(BaseModel):
     model: str
@@ -1351,11 +1522,45 @@ async def apply_update():
     return {"ok": True, "output": output, "restart_required": True}
 
 
-# The standalone /api/search (plain web search) endpoint was removed — it
-# backed the frontend's now-removed web-search UI, which only duplicated the
-# agent's own "web_search" tool (see execute_tool below) with none of the
-# model's synthesis on top. SearchRequest is kept: the tool handler still
-# builds one from the model's tool-call arguments.
+# ── Web Search ─────────────────────────────────────────────────────────────────
+
+@app.post("/api/search")
+async def web_search(req: SearchRequest):
+    try:
+        import urllib.parse
+        encoded = urllib.parse.quote(req.query)
+        url = f"https://html.duckduckgo.com/html/?q={encoded}"
+
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            client.headers.update({
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
+            })
+            r = await client.get(url)
+
+        results = []
+        for match in re.finditer(
+            r'<a rel="nofollow" class="result__a" href="(.*?)".*?>(.*?)</a>.*?'
+            r'<a class="result__snippet".*?>(.*?)</a>',
+            r.text, re.DOTALL
+        ):
+            link = match.group(1)
+            title = re.sub(r'<[^>]+>', '', match.group(2)).strip()
+            snippet = re.sub(r'<[^>]+>', '', match.group(3)).strip()
+            results.append({"title": title, "url": link, "snippet": snippet})
+            if len(results) >= req.max_results:
+                break
+
+        if not results and "anomaly" in r.text.lower():
+            # DuckDuckGo's own bot-detection interstitial (confirmed live: a
+            # burst of requests gets this instead of real results, same 200
+            # status, same URL, no redirect — indistinguishable from a
+            # genuine "no results" without checking for it) — say so plainly
+            # instead of silently reporting zero results either way.
+            return {"results": [], "error": "DuckDuckGo is temporarily rate-limiting automated requests from this machine — wait a minute and try again."}
+
+        return {"results": results}
+    except Exception as e:
+        return {"results": [], "error": str(e)}
 
 
 # ── Image Generation ───────────────────────────────────────────────────────────
@@ -1398,6 +1603,232 @@ async def generate_image(req: ImageGenRequest):
             yield json.dumps({"error": str(e)}).encode()
 
     return StreamingResponse(stream(), media_type="application/x-ndjson")
+
+
+# ── Image Generation: OpenRouter (real images, not a vision model's text
+# description) — text-to-image when no source image is given, image-to-image
+# editing when one is (drag-and-drop a photo, describe the change, get an
+# edited image back) ─────────────────────────────────────────────────────────
+
+class ImageEditRequest(BaseModel):
+    prompt: str
+    model: str = ""
+    image_b64: str = ""  # data URL ("data:image/png;base64,...") of a source image to alter; empty = pure generation
+
+OPENROUTER_IMAGE_GENERATE_MODEL = "google/gemini-2.5-flash-image"
+OPENROUTER_IMAGE_EDIT_MODEL = "openai/gpt-image-1"
+
+@app.post("/api/generate-image/openrouter")
+async def generate_image_openrouter(req: ImageEditRequest):
+    key = _load_api_keys().get("openrouter")
+    if not key:
+        raise HTTPException(400, "No OpenRouter API key configured — add one under Models → Paid.")
+    if not req.prompt.strip():
+        raise HTTPException(400, "Prompt is required.")
+
+    model = req.model or (OPENROUTER_IMAGE_EDIT_MODEL if req.image_b64 else OPENROUTER_IMAGE_GENERATE_MODEL)
+    body = {"model": model, "prompt": req.prompt}
+    if req.image_b64:
+        body["input_references"] = [{"type": "image_url", "image_url": {"url": req.image_b64}}]
+
+    try:
+        async with httpx.AsyncClient(timeout=120) as client:
+            r = await client.post(
+                "https://openrouter.ai/api/v1/images",
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                json=body,
+            )
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"Couldn't reach OpenRouter: {e}")
+    if r.status_code != 200:
+        raise HTTPException(r.status_code, f"OpenRouter image error: {r.text[:500]}")
+
+    data = r.json()
+    items = data.get("data") or []
+    if not items:
+        raise HTTPException(502, "OpenRouter returned no image data.")
+    cost = (data.get("usage") or {}).get("cost", 0.0)
+    _record_spend(f"openrouter/{model}", cost)
+    return {
+        "b64_json": items[0].get("b64_json", ""),
+        "media_type": items[0].get("media_type", "image/png"),
+        "cost": cost,
+    }
+
+
+class ImageSaveRequest(BaseModel):
+    b64_json: str
+    filename: str = ""
+    media_type: str = "image/png"
+
+IMAGE_SAVE_DIR = Path(os.path.expanduser("~")) / "Downloads" / "LLM-CODER" / "generated-images"
+
+@app.post("/api/generate-image/save")
+async def save_generated_image(req: ImageSaveRequest):
+    ext = "jpg" if "jpeg" in req.media_type else "png"
+    name = re.sub(r"[^\w\-.]", "_", req.filename.strip()) or f"generated-{int(time.time())}"
+    if not name.lower().endswith(f".{ext}"):
+        name = f"{name}.{ext}"
+    try:
+        raw = base64.b64decode(req.b64_json)
+    except Exception:
+        raise HTTPException(400, "Invalid image data.")
+    IMAGE_SAVE_DIR.mkdir(parents=True, exist_ok=True)
+    target = IMAGE_SAVE_DIR / name
+    try:
+        target.write_bytes(raw)
+    except OSError as e:
+        raise HTTPException(500, f"Couldn't save image: {e}")
+    return {"saved": True, "path": str(target)}
+
+
+# ── Image Generation: local GPU (opt-in — torch/diffusers live in their own
+# venv, never in the main app's requirements.txt) ──────────────────────────
+
+IMAGEGEN_VENV_DIR = Path(__file__).parent / "venv-imagegen"
+IMAGEGEN_VENV_PYTHON = IMAGEGEN_VENV_DIR / ("Scripts/python.exe" if platform.system() == "Windows" else "bin/python")
+IMAGEGEN_SCRIPT = Path(__file__).parent / "imagegen_local.py"
+IMAGEGEN_STATE_FILE = Path(__file__).parent.parent / "imagegen_local_state.json"
+
+# Ordered fallback candidates per backend — PyTorch's ROCm/CUDA wheel index
+# tags change over time and lag behind new Python releases (confirmed: as of
+# 2026 CUDA/ROCm wheels have trailed cp314 support, silently falling back to
+# CPU-only if `pip install torch` is run bare) — so several tags are tried in
+# order and the install is verified afterward rather than trusted blindly.
+# `None` means "plain PyPI, no special index" (CPU and Apple/MPS both ship
+# their accelerated build through plain `torch` already).
+TORCH_INDEX_CANDIDATES = {
+    "cuda": ["https://download.pytorch.org/whl/cu124", "https://download.pytorch.org/whl/cu121"],
+    "rocm": ["https://download.pytorch.org/whl/rocm6.2", "https://download.pytorch.org/whl/nightly/rocm7.2"],
+    "mps": [None],
+    "cpu": [None],
+}
+
+@app.get("/api/image-local/status")
+async def image_local_status():
+    gpu = _detect_gpu_backend()
+    installed = IMAGEGEN_VENV_PYTHON.exists()
+    verified = None
+    if installed:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                str(IMAGEGEN_VENV_PYTHON), "-c",
+                "import torch,json;print(json.dumps({'ok':True,'cuda':torch.cuda.is_available(),"
+                "'mps':getattr(torch.backends,'mps',None) and torch.backends.mps.is_available()}))",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            )
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+            verified = json.loads(out.decode()) if proc.returncode == 0 else {"ok": False}
+        except (OSError, asyncio.TimeoutError, json.JSONDecodeError):
+            verified = {"ok": False}
+    gpu_active = bool(verified and verified.get("ok") and (verified.get("cuda") or verified.get("mps")))
+    return {
+        "detected_backend": gpu["backend"], "gpu_name": gpu["gpu_name"], "vram_gb": gpu["vram_gb"],
+        "installed": installed, "gpu_active": gpu_active,
+        "cpu_only_fallback": installed and verified is not None and verified.get("ok") and not gpu_active,
+    }
+
+@app.post("/api/image-local/install")
+async def image_local_install():
+    gpu = _detect_gpu_backend()
+
+    vram_note = f", {gpu['vram_gb']} GB VRAM" if gpu["vram_gb"] else ""
+
+    async def stream():
+        yield json.dumps({"type": "status", "text": f"Detected: {gpu['gpu_name'] or 'no dedicated GPU'} "
+                                                      f"({gpu['backend']}{vram_note})"}) + "\n"
+        if not IMAGEGEN_VENV_PYTHON.exists():
+            yield json.dumps({"type": "log", "text": "Creating a dedicated venv (venv-imagegen)...\n"}) + "\n"
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, "-m", "venv", str(IMAGEGEN_VENV_DIR),
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            )
+            async for line in _iter_lines(proc.stdout):
+                yield json.dumps({"type": "log", "text": line}) + "\n"
+            if await proc.wait() != 0:
+                yield json.dumps({"type": "error", "text": "Couldn't create the venv.\n"}) + "\n"
+                return
+
+        torch_ok = False
+        for index_url in TORCH_INDEX_CANDIDATES.get(gpu["backend"], [None]):
+            cmd = [str(IMAGEGEN_VENV_PYTHON), "-m", "pip", "install", "--upgrade", "torch", "torchvision"]
+            if index_url:
+                cmd += ["--index-url", index_url]
+            yield json.dumps({"type": "log", "text": f"Installing torch{f' ({index_url})' if index_url else ''}...\n"}) + "\n"
+            proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+            async for line in _iter_lines(proc.stdout):
+                yield json.dumps({"type": "log", "text": line}) + "\n"
+            if await proc.wait() == 0:
+                torch_ok = True
+                break
+            yield json.dumps({"type": "log", "text": "That index didn't work, trying the next fallback...\n"}) + "\n"
+        if not torch_ok:
+            yield json.dumps({"type": "error", "text": "Couldn't install torch from any known index for this hardware.\n"}) + "\n"
+            return
+
+        yield json.dumps({"type": "log", "text": "Installing diffusers, transformers, accelerate, safetensors, pillow...\n"}) + "\n"
+        proc = await asyncio.create_subprocess_exec(
+            str(IMAGEGEN_VENV_PYTHON), "-m", "pip", "install",
+            "diffusers", "transformers", "accelerate", "safetensors", "pillow",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+        )
+        async for line in _iter_lines(proc.stdout):
+            yield json.dumps({"type": "log", "text": line}) + "\n"
+        if await proc.wait() != 0:
+            yield json.dumps({"type": "error", "text": "Couldn't install diffusers/transformers.\n"}) + "\n"
+            return
+
+        yield json.dumps({"type": "log", "text": "Verifying GPU acceleration actually came through...\n"}) + "\n"
+        verify = await asyncio.create_subprocess_exec(
+            str(IMAGEGEN_VENV_PYTHON), "-c",
+            "import torch;print('cuda' if torch.cuda.is_available() else "
+            "'mps' if getattr(torch.backends,'mps',None) and torch.backends.mps.is_available() else 'cpu')",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await verify.communicate()
+        active = out.decode().strip() or "cpu"
+        gpu_active = active in ("cuda", "mps")
+        try:
+            IMAGEGEN_STATE_FILE.write_text(json.dumps({
+                "backend": gpu["backend"], "gpu_name": gpu["gpu_name"], "vram_gb": gpu["vram_gb"],
+                "gpu_active": gpu_active, "installed_at": time.time(),
+            }))
+        except OSError:
+            pass
+        if gpu_active:
+            yield json.dumps({"type": "done", "text": f"Done — GPU acceleration confirmed working ({active}).\n"}) + "\n"
+        else:
+            yield json.dumps({"type": "done", "text": "Installed, but only CPU support came through for this "
+                               f"Python version (no {gpu['backend']} wheel available yet) — generation will work "
+                               "but be slow (minutes per image, not seconds).\n"}) + "\n"
+
+    return StreamingResponse(stream(), media_type="application/x-ndjson")
+
+@app.post("/api/generate-image/local")
+async def generate_image_local(req: ImageEditRequest):
+    if not IMAGEGEN_VENV_PYTHON.exists():
+        raise HTTPException(400, "Local image generation isn't set up yet — install it first.")
+    if not req.prompt.strip():
+        raise HTTPException(400, "Prompt is required.")
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            str(IMAGEGEN_VENV_PYTHON), str(IMAGEGEN_SCRIPT),
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        out, err = await asyncio.wait_for(
+            proc.communicate(json.dumps({"prompt": req.prompt, "image_b64": req.image_b64}).encode()),
+            timeout=600,  # first run downloads ~7GB of model weights; CPU-only inference is also slow
+        )
+    except asyncio.TimeoutError:
+        proc.kill()
+        raise HTTPException(504, "Local generation timed out after 10 minutes.")
+    try:
+        result = json.loads(out.decode().strip().splitlines()[-1]) if out.strip() else {}
+    except (json.JSONDecodeError, IndexError):
+        result = {}
+    if "error" in result or proc.returncode != 0:
+        raise HTTPException(500, result.get("error") or err.decode()[-500:] or "Local generation failed.")
+    return result
 
 
 # ── File Operations ────────────────────────────────────────────────────────────
@@ -1464,12 +1895,12 @@ async def list_files(path: str = ""):
     files, dirs = [], []
     for entry in _safe_iterdir(target):
         item = {"name": entry.name, "path": str(entry.relative_to(base))}
+        st = _safe_stat(entry)
+        item["modified"] = st.st_mtime if st else 0
         if entry.is_dir():
             dirs.append(item)
         else:
-            st = _safe_stat(entry)
             item["size"] = st.st_size if st else 0
-            item["modified"] = st.st_mtime if st else 0
             files.append(item)
     return {"files": files, "dirs": dirs, "current_path": path}
 
@@ -1499,6 +1930,58 @@ async def write_file(req: FileWriteRequest):
         return {"saved": True, "path": req.path}
     except Exception as e:
         raise HTTPException(500, f"Cannot write file: {e}")
+
+@app.post("/api/files/mkdir")
+async def mkdir_file(req: FileMkdirRequest):
+    base = Path(BASE_PROJECTS).resolve()
+    target = (base / req.path).resolve()
+    if not target.is_relative_to(base) or target == base:
+        raise HTTPException(403, "Path outside allowed directory")
+    if target.exists():
+        raise HTTPException(409, "An item with that name already exists")
+    try:
+        target.mkdir(parents=True)
+        return {"created": True, "path": req.path}
+    except Exception as e:
+        raise HTTPException(500, f"Cannot create folder: {e}")
+
+@app.post("/api/files/delete")
+async def delete_file(req: FileDeleteRequest):
+    base = Path(BASE_PROJECTS).resolve()
+    target = (base / req.path).resolve()
+    if not target.is_relative_to(base) or target == base:
+        raise HTTPException(403, "Path outside allowed directory")
+    if not target.exists():
+        raise HTTPException(404, "Not found")
+    import shutil
+    try:
+        if target.is_dir():
+            shutil.rmtree(target)
+        else:
+            target.unlink()
+        return {"deleted": True, "path": req.path}
+    except Exception as e:
+        raise HTTPException(500, f"Cannot delete: {e}")
+
+@app.post("/api/files/rename")
+async def rename_file(req: FileRenameRequest):
+    base = Path(BASE_PROJECTS).resolve()
+    target = (base / req.path).resolve()
+    if not target.is_relative_to(base) or target == base:
+        raise HTTPException(403, "Path outside allowed directory")
+    if not target.exists():
+        raise HTTPException(404, "Not found")
+    new_name = Path(req.new_name).name  # strip any path components
+    if not new_name or new_name in (".", ".."):
+        raise HTTPException(400, "Invalid name")
+    dest = target.parent / new_name
+    if dest.exists() and dest != target:
+        raise HTTPException(409, "An item with that name already exists")
+    try:
+        target.rename(dest)
+        return {"renamed": True, "old_path": req.path, "new_path": str(dest.relative_to(base))}
+    except Exception as e:
+        raise HTTPException(500, f"Cannot rename: {e}")
 
 
 # ── File Upload ────────────────────────────────────────────────────────────────
@@ -1696,6 +2179,18 @@ async def semantic_search_endpoint(req: SemanticSearchRequest):
 
 # ── Tool definitions for function calling ──────────────────────────────────────
 
+# grep_files skips these outright — reading them as text is useless (and for
+# big ones, slow) even with errors="ignore".
+BINARY_SUFFIXES = {
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".ico", ".svgz",
+    ".pdf", ".zip", ".tar", ".gz", ".xz", ".bz2", ".7z", ".rar",
+    ".exe", ".dll", ".so", ".dylib", ".bin", ".o", ".a", ".class",
+    ".jar", ".apk", ".aab", ".wasm", ".pyc", ".pyo",
+    ".mp3", ".mp4", ".wav", ".avi", ".mkv", ".mov", ".flac", ".ogg",
+    ".woff", ".woff2", ".ttf", ".otf", ".eot", ".db", ".sqlite", ".sqlite3",
+    ".iso", ".img", ".vdi", ".vmdk", ".qcow2", ".lock", ".DS_Store",
+}
+
 TOOLS = [
     {
         "type": "function",
@@ -1868,6 +2363,79 @@ TOOLS = [
                 "required": ["command"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_file",
+            "description": "Make a surgical edit to an EXISTING file by replacing an exact old_string with new_string, and get back a unified diff of what changed. STRONGLY PREFER this over write_file when the file already exists — rewriting a whole file from memory silently loses whatever you misremembered, while a targeted edit can only touch what you explicitly named. old_string must match the file's content exactly (including whitespace/indentation) and must be unique in the file — include 2-3 surrounding lines of context to make it unique. If the file doesn't exist yet, it's created with new_string (same as write_file).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Relative file path within the user's home directory"},
+                    "old_string": {"type": "string", "description": "Exact text to find and replace. For a new file, pass the empty string."},
+                    "new_string": {"type": "string", "description": "Replacement text."},
+                    "replace_all": {"type": "boolean", "description": "Replace every occurrence instead of requiring a unique match (default false)."}
+                },
+                "required": ["path", "old_string", "new_string"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "grep_files",
+            "description": "Search file CONTENTS for a regex across the home directory (like ripgrep/grep) and get matching lines with file:line numbers — this is how you find where a function/variable/config/error string is actually used, as opposed to search_files which only matches file NAMES. Skips binary files and common junk dirs (node_modules, .git, venv).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "Regular expression to search for in file contents (Python re syntax)"},
+                    "path": {"type": "string", "description": "Subdirectory to search in, relative to home (optional, defaults to all)"},
+                    "include": {"type": "string", "description": "Optional filename filter with wildcards, e.g. '*.py' or '*.ts'"},
+                    "max_results": {"type": "integer", "description": "Max matching lines to return (default 50)"}
+                },
+                "required": ["pattern"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "todo_write",
+            "description": "Create or update the session's task list so you (and the user) can track multi-step progress. For any task needing 3+ steps, call this FIRST with the full plan, then update statuses (pending/in_progress/completed) as you go. This replaces the whole list each call — always send the complete updated list, not a delta.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "todos": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "content": {"type": "string", "description": "Short task description"},
+                                "status": {"type": "string", "enum": ["pending", "in_progress", "completed"], "description": "Current status"}
+                            },
+                            "required": ["content", "status"]
+                        }
+                    }
+                },
+                "required": ["todos"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "task",
+            "description": "Delegate a self-contained sub-task to a fresh subagent with its own clean context window and the same tools, and get back its final report. Use this for research/exploration that would otherwise flood your own context with file contents or long command output (e.g. 'find every place the auth token is refreshed and summarize the flow') — the subagent reads the files in ITS context and only the distilled findings come back to you. The subagent cannot sudo or ask the user questions; describe the goal fully, including which directory to look in and what the output should contain. Optional 'agent' parameter: name one of the specialist agents listed in the system prompt (exact name) and its persona/instructions will drive the subagent — prefer this when the request matches a specialist.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "description": {"type": "string", "description": "Complete, self-contained description of the sub-task — the subagent sees ONLY this, with no other conversation context."},
+                    "max_turns": {"type": "integer", "description": "Optional cap on the subagent's tool-use turns (default 12, max 20)"}
+                },
+                "required": ["description"]
+            }
+        }
     }
 ]
 
@@ -1965,7 +2533,27 @@ async def _run_privileged_command(command: str, cwd: Path, password: str, timeou
     return f"$ sudo {cmd}\n(exit code {proc.returncode})\n{output or '(no output)'}"
 
 
-async def execute_tool(name: str, args: dict) -> str:
+def _unified_diff(before: str, after: str, path: str) -> str:
+    """Unified diff in a ```diff fence so the chat UI colors it red/green.
+    Capped hard: a whole-file rewrite of a big file produces a wall of diff
+    the model doesn't need verbatim in history (it has both versions
+    conceptually already — the diff exists for the human watching)."""
+    diff_lines = list(difflib.unified_diff(
+        before.splitlines(keepends=True), after.splitlines(keepends=True),
+        fromfile=f"a/{path}", tofile=f"b/{path}", n=3,
+    ))
+    if not diff_lines:
+        return "(no textual change)"
+    # Files without trailing newlines produce diff lines without them too,
+    # which renders as "-old+new" run together — normalize every line to be
+    # newline-terminated before joining.
+    text = "".join(l if l.endswith("\n") else l + "\n" for l in diff_lines)
+    if len(text) > 4000:
+        text = text[:4000] + "\n...[diff truncated]"
+    return f"```diff\n{text.strip()}\n```"
+
+
+async def execute_tool(name: str, args: dict, model: str = "", allow_subagents: bool = True) -> str:
     try:
         if name == "execute_code":
             req = ExecuteRequest(**args)
@@ -2037,8 +2625,75 @@ async def execute_tool(name: str, args: dict) -> str:
             if not target.is_relative_to(base):
                 return "Error: Access denied"
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(req.content)
-            return f"Written to {req.path} ({len(req.content)} bytes)"
+            before = target.read_text(encoding="utf-8", errors="replace") if target.is_file() else None
+            content = req.content
+            target.write_text(content)
+            # humanizer_academic pre-save pass (see _humanize_text): prose
+            # files get AI-writing patterns stripped before the save is
+            # final. The note tells the model (and the user) it happened.
+            note = ""
+            if _humanize_enabled() and target.suffix.lower() in PROSE_EXTS:
+                humanized = await _humanize_text(model, content)
+                if humanized != content:
+                    target.write_text(humanized)
+                    content = humanized
+                    note = "\n\n[humanizer_academic skill applied before save — AI-writing patterns removed from the saved text]"
+            if before is None:
+                return f"Created {req.path} ({len(content)} bytes){note}"
+            return f"Wrote {req.path} ({len(content)} bytes)\n\n{_unified_diff(before, content, req.path)}{note}"
+
+        elif name == "edit_file":
+            req = FileEditRequest(**args)
+            base = Path(BASE_PROJECTS).resolve()
+            target = (base / req.path).resolve()
+            if not target.is_relative_to(base):
+                return "Error: Access denied"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if not target.is_file():
+                if req.old_string:
+                    return f"Error: {req.path} doesn't exist yet. To create it, call edit_file with old_string=\"\" and new_string set to the full file content."
+                content = req.new_string
+                target.write_text(content)
+                note = ""
+                if _humanize_enabled() and target.suffix.lower() in PROSE_EXTS:
+                    humanized = await _humanize_text(model, content)
+                    if humanized != content:
+                        target.write_text(humanized)
+                        content = humanized
+                        note = "\n\n[humanizer_academic skill applied before save — AI-writing patterns removed from the saved text]"
+                return f"Created {req.path} ({len(content)} bytes){note}"
+            before = target.read_text(encoding="utf-8", errors="replace")
+            if req.old_string == "":
+                return (f"Error: {req.path} already exists — pass the exact text to replace in old_string "
+                        f"(prefer this over rewriting the whole file).")
+            occurrences = before.count(req.old_string)
+            if occurrences == 0:
+                # Give the model a fighting chance to recover on the next
+                # turn: show what IS around the closest match instead of a
+                # bare "not found" (the usual cause is off-by-a-bit
+                # whitespace/indentation, which difflib can point at).
+                closest = difflib.get_close_matches(req.old_string, before.splitlines(), n=1, cutoff=0.6)
+                hint = f"\nClosest similar line in the file:\n{closest[0]}" if closest else ""
+                return (f"Error: old_string not found in {req.path}. It must match the file exactly, "
+                        f"including whitespace and indentation. Read the file (or the relevant section) "
+                        f"and copy the text precisely.{hint}")
+            if occurrences > 1 and not req.replace_all:
+                first_line = req.old_string.strip().splitlines()[0] if req.old_string.strip() else "(whitespace)"
+                return (f"Error: old_string appears {occurrences} times in {req.path} — it must be unique "
+                        f"so the edit is unambiguous. Include 2-3 surrounding lines of context to make it "
+                        f"unique, or set replace_all=true if you really want all {occurrences} replaced. "
+                        f"First line of the match: {first_line}")
+            after = before.replace(req.old_string, req.new_string) if req.replace_all else \
+                before.replace(req.old_string, req.new_string, 1)
+            target.write_text(after)
+            note = ""
+            if _humanize_enabled() and target.suffix.lower() in PROSE_EXTS:
+                humanized = await _humanize_text(model, after)
+                if humanized != after:
+                    target.write_text(humanized)
+                    after = humanized
+                    note = "\n\n[humanizer_academic skill applied before save — AI-writing patterns removed from the saved text]"
+            return f"Edited {req.path} ({occurrences if req.replace_all else 1} replacement(s))\n\n{_unified_diff(before, after, req.path)}{note}"
 
         elif name == "list_files":
             path = args.get("path", "")
@@ -2089,7 +2744,6 @@ async def execute_tool(name: str, args: dict) -> str:
             search_path = (base / spath).resolve() if spath else base
             if not search_path.is_relative_to(base):
                 return "Error: Access denied"
-            from fnmatch import fnmatch
             results = []
             for entry in _safe_rglob(search_path):
                 if entry.is_file():
@@ -2123,6 +2777,116 @@ async def execute_tool(name: str, args: dict) -> str:
                 if s.get("name", "").strip().lower() == skill_name:
                     return f"Skill '{s['name']}': {s.get('instructions', '')}"
             return f"No skill named '{args.get('name', '')}' found."
+
+        elif name == "grep_files":
+            pattern = args.get("pattern", "")
+            try:
+                rx = re.compile(pattern)
+            except re.error as e:
+                return f"Error: invalid regex: {e}"
+            spath = args.get("path", "") or ""
+            base = Path(BASE_PROJECTS).resolve()
+            search_path = (base / spath).resolve() if spath else base
+            if not search_path.is_relative_to(base):
+                return "Error: Access denied"
+            if not search_path.exists():
+                return f"Directory not found: {spath}"
+            include = args.get("include", "") or None
+            max_results = int(args.get("max_results", 50))
+            junk = {"node_modules", ".git", ".venv", "venv", "__pycache__",
+                    ".cache", "dist", "build", "target", ".gradle", ".idea", ".vscode"}
+            results = []
+            for entry in _safe_rglob(search_path):
+                if not entry.is_file() or entry.suffix.lower() in BINARY_SUFFIXES:
+                    continue
+                if any(part in junk for part in entry.parts):
+                    continue
+                if include and not fnmatch(entry.name, include):
+                    continue
+                rel = str(entry.relative_to(base))
+                try:
+                    if (st := _safe_stat(entry)) and st.st_size > 2_000_000:
+                        continue
+                    text = entry.read_text(encoding="utf-8", errors="ignore")
+                except Exception:
+                    continue
+                for lineno, line in enumerate(text.splitlines(), 1):
+                    if rx.search(line):
+                        results.append(f"{rel}:{lineno}: {line.strip()[:240]}")
+                        if len(results) >= max_results:
+                            return (f"Found {len(results)} matching line(s) "
+                                    f"(hit the cap — narrow the pattern/path/include):\n" + "\n".join(results))
+            if not results:
+                return f"No matches for /{pattern}/ in {spath or '~'}"
+            return f"Found {len(results)} matching line(s):\n" + "\n".join(results)
+
+        elif name == "todo_write":
+            todos = args.get("todos", [])
+            if not isinstance(todos, list) or not todos:
+                return "Error: todos must be a non-empty array of {content, status}."
+            clean = []
+            for t in todos:
+                if isinstance(t, dict) and t.get("content"):
+                    clean.append({
+                        "content": str(t["content"])[:200],
+                        "status": t.get("status", "pending"),
+                    })
+            if not clean:
+                return "Error: no usable todo items in the list."
+            done = sum(1 for t in clean if t["status"] == "completed")
+            active = next((t["content"] for t in clean if t["status"] == "in_progress"), None)
+            status_line = f"Task list updated: {done}/{len(clean)} done"
+            if active:
+                status_line += f" — currently: {active}"
+            return status_line + ". Keep going."
+
+        elif name == "task":
+            if not model:
+                return "Error: subagents need a model; run this from the Agent/Chat loop."
+            if not allow_subagents:
+                return ("Error: subagents cannot spawn further subagents (one level of delegation only). "
+                        "Do the work yourself with your own tools instead.")
+            description = str(args.get("description", "")).strip()
+            if not description:
+                return "Error: no task description given."
+            # Optional specialist persona: the agent= param names an entry
+            # in the library with kind="agent" (imported agent collections)
+            # — its full instructions become the subagent's driving prompt.
+            persona = ""
+            agent_name = str(args.get("agent", "")).strip()
+            if agent_name:
+                lib = _load_json_list(SKILLS_FILE)
+                ag = next((s for s in lib if s.get("kind") == "agent"
+                           and str(s.get("name", "")).lower() == agent_name.lower()), None)
+                if not ag:
+                    names = [s.get("name", "") for s in lib if s.get("kind") == "agent"]
+                    return (f"Error: no agent named '{agent_name}'. "
+                            f"Available agents: {', '.join(names[:40]) or '(none)'}")
+                persona = str(ag.get("instructions", "")) + "\n\n---\n\n"
+            try:
+                max_turns = min(int(args.get("max_turns", 12)), 20)
+            except (TypeError, ValueError):
+                max_turns = 12
+            # Fresh context, same tool loop, but no sudo (a password prompt
+            # from a nested agent the user can't attribute to a step is a bad
+            # experience) and a tighter turn budget. The subagent sees ONLY
+            # the persona + description — that isolation is the entire point
+            # (top agents call this "subagents": heavy reads happen in its
+            # context and only the distilled findings come back).
+            sub_conv = [{"role": "user", "content":
+                persona + description + "\n\n(You are a subagent: no conversation history beyond this message. "
+                "You cannot ask the user questions or use sudo — make reasonable autonomous decisions "
+                "and return a complete, self-contained final report.)"}]
+            report = ""
+            async for ev in _agent_turns(
+                model, sub_conv, max_turns=max_turns,
+                allow_sudo=False, allow_subagents=False,
+            ):
+                if ev["type"] in ("done", "error"):
+                    report = ev.get("content", "")
+            if not report:
+                return "Subagent finished without a final report."
+            return _clip_for_model(report, limit=6000)
 
         elif name == "semantic_search":
             query = args.get("query", "")
@@ -2309,6 +3073,54 @@ async def search_models(q: str, provider: str = "all"):
 
     return {"results": results}
 
+@app.get("/api/models/check-update")
+async def check_model_update(model: str):
+    """Compares the installed build's digest against the Ollama registry's
+    current manifest digest for the same name:tag. Ollama tags are mutable —
+    publishers can republish a newer build under the same tag — so a digest
+    difference means the registry has a newer build than what's on disk.
+    Pulling the same name:tag again fetches the new build and replaces the
+    old weights in place (that's how the frontend's Update button works)."""
+    if not model:
+        raise HTTPException(400, "Missing model")
+    if "/" in model and model.split("/", 1)[0] in CLOUD_PROVIDERS:
+        raise HTTPException(400, "Cloud models can't be checked against the Ollama registry")
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        try:
+            r = await client.get(f"{OLLAMA}/api/tags")
+            local = next((m.get("digest") for m in r.json().get("models", [])
+                          if m.get("name") == model), None)
+        except Exception:
+            local = None
+    if not local:
+        raise HTTPException(404, "Model not installed locally")
+
+    # "ns/repo:tag" → registry path "ns/repo", tag; "repo:tag" → "library/repo"
+    if ":" in model.split("/")[-1]:
+        path, tag = model.rsplit(":", 1)
+    else:
+        path, tag = model, "latest"
+    if "/" not in path:
+        path = "library/" + path
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            rm = await client.get(
+                f"https://registry.ollama.ai/v2/{path}/manifests/{tag}",
+                headers={"Accept": "application/vnd.docker.distribution.manifest.v2+json, "
+                                   "application/vnd.oci.image.manifest.v1+json"})
+        if rm.status_code == 404:
+            # third-party repo deleted / never existed in the registry
+            return {"model": model, "update_available": False, "unknown": True}
+        rm.raise_for_status()
+        remote = hashlib.sha256(rm.content).hexdigest()
+    except Exception as e:
+        return {"model": model, "update_available": False, "error": str(e)[:200]}
+
+    return {"model": model, "update_available": remote != local,
+            "current_digest": local, "latest_digest": remote}
+
 @app.post("/api/models/pull")
 async def pull_model(req: PullRequest):
     if req.provider == "lmstudio":
@@ -2393,14 +3205,9 @@ async def _test_cloud_key(provider: str, key: str) -> None:
                                   headers={"Authorization": f"Bearer {key}"})
         elif provider == "google":
             r = await client.get("https://generativelanguage.googleapis.com/v1beta/models", params={"key": key})
-        elif provider == "xai":
-            r = await client.get("https://api.x.ai/v1/models", headers={"Authorization": f"Bearer {key}"})
-        elif provider == "deepseek":
-            r = await client.get("https://api.deepseek.com/v1/models", headers={"Authorization": f"Bearer {key}"})
         elif provider == "openrouter":
-            # /auth/key (not /models, which is public and unauthenticated)
-            # so an actually-invalid key still fails validation here.
-            r = await client.get("https://openrouter.ai/api/v1/auth/key", headers={"Authorization": f"Bearer {key}"})
+            r = await client.get("https://openrouter.ai/api/v1/models",
+                                  headers={"Authorization": f"Bearer {key}"})
         else:
             return
     if r.status_code != 200:
@@ -2459,25 +3266,214 @@ async def set_expo_key(req: ExpoTokenRequest):
 
 @app.get("/api/models/cloud")
 async def list_cloud_models():
-    """Only lists a provider's model(s) as usable once a key is actually
-    configured for it — no point offering a model the app can't call.
-    OpenRouter is the one exception to "one model per provider": it fans
-    out to OPENROUTER_FEATURED_MODELS instead of a single default_model,
-    since the whole point of adding it is access to many paid models
-    through one key, not just one more fixed option."""
+    """Only lists a provider's model as usable once a key is actually
+    configured for it — no point offering a model the app can't call."""
     keys = _load_api_keys()
-    models = []
+    return {"models": [f"{p}/{meta['default_model']}" for p, meta in CLOUD_PROVIDERS.items() if keys.get(p)]}
+
+@app.get("/api/models/cloud/details")
+async def cloud_model_details():
+    """Cards for the Models tab's Paid section: per-provider default model,
+    key status, and the estimated per-million-token rates from PRICING."""
+    keys = _load_api_keys()
+    out = []
     for p, meta in CLOUD_PROVIDERS.items():
-        if not keys.get(p):
-            continue
-        if p == "openrouter":
-            models.extend(f"openrouter/{m}" for m in OPENROUTER_FEATURED_MODELS)
+        rates = PRICING.get(p, {}).get(meta["default_model"]) or PRICING.get(p, {}).get("default", {})
+        out.append({
+            "provider": p, "label": meta["label"], "model": meta["default_model"],
+            "configured": bool(keys.get(p)),
+            "input_per_mtok": rates.get("input"), "output_per_mtok": rates.get("output"),
+        })
+    return {"models": out}
+
+
+async def _fetch_ollama_pulls(model_name: str) -> int:
+    """Scrape ollama.com search results for pull count of a model name."""
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            r = await client.get("https://ollama.com/search", params={"q": model_name})
+            txt = r.text
+            # look for patterns like "1.2k downloads" or "1,234 downloads"
+            import re
+            m = re.search(r'([\d,]+(?:\.\d+)?k?\s*download)', txt, re.I)
+            if m:
+                num_str = m.group(1).replace(",", "").replace("k", "000").replace("download", "").strip()
+                return int(float(num_str))
+    except Exception:
+        pass
+    return 0
+
+
+async def _fetch_hf_model_meta(model_id: str) -> dict:
+    """Fetch Hugging Face model metadata: downloads and likes."""
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            r = await client.get(f"https://huggingface.co/api/models/{model_id}")
+            if r.status_code == 200:
+                j = r.json()
+                return {
+                    "downloads": j.get("downloads", 0),
+                    "likes": j.get("likes", 0),
+                    "tags": j.get("tags", []),
+                }
+    except Exception:
+        pass
+    return {"downloads": 0, "likes": 0, "tags": []}
+
+
+async def _fetch_openrouter_models() -> list:
+    """Fetch public OpenRouter models API — returns model list with pricing/context."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get("https://openrouter.ai/api/v1/models")
+            if r.status_code == 200:
+                return r.json().get("data", [])
+    except Exception:
+        pass
+    return []
+
+
+@app.get("/api/models/rankings")
+async def list_model_rankings():
+    """Return ranked positions for models in each section (Local / Free / Paid),
+    computed from multiple independent sources: Ollama pull counts, HuggingFace
+    downloads/likes, and OpenRouter provider signals.  Includes rank #, score,
+    and source list per model so the UI can sort and display badges."""
+    import json, time, re
+    from pathlib import Path
+
+    cache_file = Path(__file__).parent.parent / "model_rankings_cache.json"
+    cached = None
+    if cache_file.exists():
+        try:
+            data = json.loads(cache_file.read_text())
+            if time.time() - data.get("fetched_at", 0) < 86400:
+                cached = data
+        except Exception:
+            pass
+
+    if cached:
+        return {"rankings": cached["rankings"], "fetched_hours_ago": int((time.time() - cached["fetched_at"]) / 3600)}
+
+    rankings = {"local": [], "free": [], "paid": []}
+
+    # ── 1. Local models: use Ollama installed models + pull counts ──
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            r = await client.get(f"{OLLAMA}/api/tags")
+            ollama_data = r.json().get("models", [])
+    except Exception:
+        ollama_data = []
+
+    installed = {m.get("name"): m for m in ollama_data}
+    # Also check config.json for installed models; the existing list_models already
+    # handles the /api/models call, but we read directly here for pull counts.
+    # Pull count per model from ollama.com search:
+    local_models = []
+    for m in ollama_data:
+        name = m.get("name", "")
+        pulls = await _fetch_ollama_pulls(name)
+        # context_length from details
+        ctx = (m.get("details") or {}).get("context_length") or 0
+        local_models.append({
+            "name": name,
+            "score": min(pulls / 10000, 1.0) if pulls else 0.0,  # normalize to 0-1
+            "pulls": pulls,
+            "sources": ["ollama"],
+            "context_length": ctx,
+        })
+
+    # ── 2. Free/open-weight models: Ollama catalog + HuggingFace metadata ──
+    # The static CATALOG is in the backend; we augment each with HF data.
+    free_models = []
+    for c in CATALOG:
+        if c.get("category") not in ("uncensored", "paid"):
+            # Augment with HF downloads/likes
+            hf = await _fetch_hf_model_meta(c.get("hf_id", c["name"]))
+            score = 0.0
+            if hf["downloads"] > 0:
+                score += 0.4 * min(hf["downloads"] / 500000, 1.0)
+            if hf["likes"] > 0:
+                score += 0.2 * min(hf["likes"] / 5000, 1.0)
+            # also add a small ollama-pull boost if the model appears in Ollama
+            ollama_boost = next((m["score"] for m in local_models if m["name"] == c["name"]), 0)
+            score += 0.4 * ollama_boost
+            score = min(score, 1.0)
+            free_models.append({
+                "name": c["name"],
+                "desc": c.get("desc", ""),
+                "score": score,
+                "sources": ["hf"] + (["ollama"] if ollama_boost > 0 else []),
+                "hf_downloads": hf["downloads"],
+                "hf_likes": hf["likes"],
+                "size_gb": c.get("size_gb"),
+            })
+
+    # ── 3. Paid/cloud models: OpenRouter signals + PRICING tier ──
+    keys = _load_api_keys()
+    paid_models = []
+    or_data = await _fetch_openrouter_models()
+    # Build a lookup: model id → {provider, pricing, etc}
+    or_by_id = {m.get("id"): m for m in or_data}
+    for p, meta in CLOUD_PROVIDERS.items():
+        configured = bool(keys.get(p))
+        default_model = meta["default_model"]
+        # OpenRouter provides per-model data; use default model's tier signals
+        or_model = or_by_id.get(default_model)
+        if or_model:
+            # Signals: context length, pricing tier, recency (created)
+            ctx = or_model.get("context_length", 0)
+            pricing = or_model.get("pricing", {})
+            # Simple scoring: newer + cheaper + larger context = higher rank
+            recency = 0
+            if "created" in or_model:
+                try:
+                    created = int(or_model["created"])
+                    recency = max(0, 1_000_000_000 - (time.time() * 1000 - created)) / 1_000_000_000
+                except Exception:
+                    recency = 0.5
+            tier = pricing.get("output", 0) if pricing else 0
+            # Normalize: inverse price (cheaper higher), recency, context size
+            price_score = max(0, 1 - min(tier / 100, 1))  # cheaper = higher score
+            ctx_score = min(ctx / 100_000, 1.0) if ctx else 0.0  # context up to 100k tokens
+            score = 0.4 * price_score + 0.3 * recency + 0.3 * ctx_score
         else:
-            models.append(f"{p}/{meta['default_model']}")
-    return {"models": models}
+            # No OpenRouter data; fallback to PRICING-only estimate
+            rates = PRICING.get(p, {}).get(default_model) or PRICING.get(p, {}).get("default", {})
+            input_r = rates.get("input", 0)
+            output_r = rates.get("output", 0)
+            # Cheaper models rank higher: normalize by inverse cost
+            price_score = max(0, 1 - (input_r + output_r) / 50)  # $50 threshold
+            score = 0.7 * price_score + 0.3 * (1 if configured else 0)
+        paid_models.append({
+            "name": default_model,
+            "provider": p,
+            "label": meta["label"],
+            "score": round(score, 3),
+            "sources": ["openrouter"] if or_model else ["pricing"],
+            "configured": configured,
+            "input_per_mtok": input_r,
+            "output_per_mtok": output_r,
+        })
+
+    # ── Sort each section by score descending, assign rank numbers ──
+    for section_key, section_models in [("local", local_models), ("free", free_models), ("paid", paid_models)]:
+        section_models.sort(key=lambda m: m["score"], reverse=True)
+        for rank, m in enumerate(section_models, start=1):
+            m["rank"] = rank
+        rankings[section_key] = section_models
+
+    # Cache for 24h
+    try:
+        cached_json = {"rankings": rankings, "fetched_at": time.time()}
+        cache_file.write_text(json.dumps(cached_json))
+    except Exception:
+        pass
+
+    return {"rankings": rankings, "fetched_hours_ago": 0}
 
 
-def _messages_for_cloud(messages: list) -> list:
+def _messages_for_cloud(messages: list, slim: bool = False) -> list:
     """None of the three cloud calls below use that provider's native
     tool-calling schema — like the Ollama/local path, tool calls and results
     here are just plain-text turns the model itself parses out of its own
@@ -2486,77 +3482,133 @@ def _messages_for_cloud(messages: list) -> list:
     "user" instead of being dropped. Dropping it (the previous behavior)
     silently erased every tool result from what a cloud model saw on its
     next turn — it would still be told "Continue with the result above" with
-    the actual result missing, breaking anything past a single tool call."""
-    return [{"role": "user" if m["role"] == "tool" else m["role"], "content": m["content"]}
-            for m in messages if m["role"] in ("user", "assistant", "tool")]
+    the actual result missing, breaking anything past a single tool call.
+
+    `slim=True` (used only by the agent loop, where multi-turn tool sessions
+    balloon fastest) stubs out every tool result except the last 4 — paying
+    for a 40k-token npm log AGAIN on every subsequent turn is pure waste
+    once the model has already reacted to it; the recent ones it may still
+    be reasoning over stay verbatim. This is the same history-squashing
+    trick the top-tier agents use to keep paid-model context lean."""
+    out = []
+    tool_indices = [i for i, m in enumerate(messages) if m["role"] == "tool"]
+    keep = set(tool_indices[-4:]) if slim else set()
+    for i, m in enumerate(messages):
+        if m["role"] not in ("user", "assistant", "tool"):
+            continue
+        content = m["content"]
+        if slim and m["role"] == "tool" and i not in keep:
+            content = "(older tool output elided to save context — the model already used it)"
+        out.append({"role": "user" if m["role"] == "tool" else m["role"], "content": content})
+    return out
 
 
-async def _call_anthropic(model: str, messages: list, system: str, api_key: str) -> str:
+def _usage_with_cost(provider: str, model: str, input_tokens: int, output_tokens: int,
+                     cached_tokens: int = 0, cache_write_tokens: int = 0) -> dict:
+    """Normalizes each provider's usage fields into one shape and attaches the
+    estimated USD cost, computed with that provider's cached-token rates.
+    Semantics differ subtly per provider and each caller below passes numbers
+    already adjusted for its own convention:
+      - Anthropic: input_tokens EXCLUDES cache tokens; cache read/write are
+        separate fields, each with its own rate.
+      - OpenAI/Gemini: prompt tokens INCLUDE the cached subset; cached tokens
+        bill at the (much cheaper) cache_read rate, the rest at full input."""
+    p = _pricing_for(provider, model)
+    input_rate = p.get("input", 0.0)
+    cost = 0.0
+    if provider == "anthropic":
+        cost = (input_tokens * input_rate
+                + cached_tokens * p.get("cache_read", 0.0)
+                + cache_write_tokens * p.get("cache_write", 0.0)
+                + output_tokens * p.get("output", 0.0)) / 1_000_000
+    else:
+        uncached = max(0, input_tokens - cached_tokens)
+        cost = (uncached * input_rate
+                + cached_tokens * p.get("cache_read", 0.0)
+                + output_tokens * p.get("output", 0.0)) / 1_000_000
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cached_tokens": cached_tokens,
+        "cost": round(cost, 6),
+    }
+
+
+async def _call_anthropic(model: str, messages: list, system: str, api_key: str) -> tuple[str, dict]:
+    # Prompt caching (the single biggest paid-model saver): the system prompt
+    # (which here includes the whole tool instruction sheet — thousands of
+    # stable tokens) is sent as a cached block, and a second cache breakpoint
+    # sits on the second-to-last message so the entire conversation prefix is
+    # read from cache on every turn after the first. Cached reads bill at a
+    # ~90% discount; the one-time write surcharge pays for itself immediately
+    # in an agent loop that re-sends the whole history every turn.
+    system_blocks = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+    cloud_msgs = _messages_for_cloud(messages, slim=len(messages) > 8)
+    if len(cloud_msgs) > 2:
+        # Content must be block-form to carry cache_control; string content
+        # is fine for the rest and stays that way.
+        prefix = cloud_msgs[:-2]
+        breakpoint_idx = len(prefix) - 1
+        for i, m in enumerate(cloud_msgs):
+            if i == breakpoint_idx:
+                cloud_msgs[i] = {"role": m["role"], "content": [
+                    {"type": "text", "text": m["content"], "cache_control": {"type": "ephemeral"}}
+                ]}
     async with httpx.AsyncClient(timeout=120) as client:
         r = await client.post(
             "https://api.anthropic.com/v1/messages",
             headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
             json={
-                "model": model, "max_tokens": 4096, "system": system,
-                "messages": _messages_for_cloud(messages),
+                "model": model, "max_tokens": 4096, "system": system_blocks,
+                "messages": cloud_msgs,
             },
         )
         if r.status_code != 200:
-            return f"Anthropic API error ({r.status_code}): {r.text[:500]}"
+            return f"Anthropic API error ({r.status_code}): {r.text[:500]}", {}
         data = r.json()
-        return "".join(b.get("text", "") for b in data.get("content", []))
+        u = data.get("usage", {})
+        usage = _usage_with_cost(
+            "anthropic", model,
+            input_tokens=u.get("input_tokens", 0),
+            output_tokens=u.get("output_tokens", 0),
+            cached_tokens=u.get("cache_read_input_tokens", 0),
+            cache_write_tokens=u.get("cache_creation_input_tokens", 0),
+        )
+        return "".join(b.get("text", "") for b in data.get("content", [])), usage
 
 
-async def _call_openai_compatible(url: str, model: str, messages: list, system: str, api_key: str,
-                                   label: str, extra_headers: dict | None = None) -> str:
-    """Shared implementation for every provider whose API mirrors OpenAI's
-    /chat/completions request/response shape — which by design is OpenAI
-    itself plus xAI, DeepSeek, and OpenRouter below (all three publish
-    their API as "OpenAI-compatible" specifically so existing OpenAI-SDK
-    code, and helpers exactly like this one, need only a different base URL
-    and key)."""
-    headers = {"Authorization": f"Bearer {api_key}", "content-type": "application/json"}
-    if extra_headers:
-        headers.update(extra_headers)
+async def _call_openai(model: str, messages: list, system: str, api_key: str) -> tuple[str, dict]:
+    # OpenAI prompt caching is automatic for prompts over 1024 tokens with a
+    # stable prefix (system first — which is already how we send it), so there
+    # is nothing to opt into; the response reports how many tokens hit the
+    # cache and they bill at the discounted rate automatically.
     async with httpx.AsyncClient(timeout=120) as client:
         r = await client.post(
-            url, headers=headers,
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "content-type": "application/json"},
             json={
                 "model": model,
-                "messages": [{"role": "system", "content": system}] + _messages_for_cloud(messages),
+                "messages": [{"role": "system", "content": system}] + _messages_for_cloud(messages, slim=len(messages) > 8),
             },
         )
         if r.status_code != 200:
-            return f"{label} API error ({r.status_code}): {r.text[:500]}"
+            return f"OpenAI API error ({r.status_code}): {r.text[:500]}", {}
         data = r.json()
-        return data["choices"][0]["message"]["content"] or ""
+        u = data.get("usage", {}) or {}
+        cached = (u.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
+        usage = _usage_with_cost(
+            "openai", model,
+            input_tokens=u.get("prompt_tokens", 0),
+            output_tokens=u.get("completion_tokens", 0),
+            cached_tokens=cached,
+        )
+        return data["choices"][0]["message"]["content"] or "", usage
 
 
-async def _call_openai(model: str, messages: list, system: str, api_key: str) -> str:
-    return await _call_openai_compatible(
-        "https://api.openai.com/v1/chat/completions", model, messages, system, api_key, "OpenAI")
-
-
-async def _call_xai(model: str, messages: list, system: str, api_key: str) -> str:
-    return await _call_openai_compatible(
-        "https://api.x.ai/v1/chat/completions", model, messages, system, api_key, "xAI")
-
-
-async def _call_deepseek(model: str, messages: list, system: str, api_key: str) -> str:
-    return await _call_openai_compatible(
-        "https://api.deepseek.com/v1/chat/completions", model, messages, system, api_key, "DeepSeek")
-
-
-async def _call_openrouter(model: str, messages: list, system: str, api_key: str) -> str:
-    # HTTP-Referer/X-Title are OpenRouter's optional app-attribution headers
-    # (surfaced on openrouter.ai/rankings) — harmless to include, not
-    # required for the call to work.
-    return await _call_openai_compatible(
-        "https://openrouter.ai/api/v1/chat/completions", model, messages, system, api_key, "OpenRouter",
-        extra_headers={"HTTP-Referer": "https://github.com/CopperArch/AI-Copper-Maker", "X-Title": "AI Copper Maker"})
-
-
-async def _call_gemini(model: str, messages: list, system: str, api_key: str) -> str:
+async def _call_gemini(model: str, messages: list, system: str, api_key: str) -> tuple[str, dict]:
+    # Gemini 2.x does implicit context caching server-side on stable prefixes
+    # — nothing to configure; the response reports cachedContentTokenCount and
+    # those tokens bill at the discounted rate.
     async with httpx.AsyncClient(timeout=120) as client:
         r = await client.post(
             f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
@@ -2565,40 +3617,72 @@ async def _call_gemini(model: str, messages: list, system: str, api_key: str) ->
                 "systemInstruction": {"parts": [{"text": system}]},
                 "contents": [
                     {"role": "model" if m["role"] == "assistant" else "user", "parts": [{"text": m["content"]}]}
-                    for m in _messages_for_cloud(messages)
+                    for m in _messages_for_cloud(messages, slim=len(messages) > 8)
                 ],
             },
         )
         if r.status_code != 200:
-            return f"Gemini API error ({r.status_code}): {r.text[:500]}"
+            return f"Gemini API error ({r.status_code}): {r.text[:500]}", {}
         data = r.json()
+        u = data.get("usageMetadata", {}) or {}
+        usage = _usage_with_cost(
+            "google", model,
+            input_tokens=u.get("promptTokenCount", 0),
+            output_tokens=u.get("candidatesTokenCount", 0),
+            cached_tokens=u.get("cachedContentTokenCount", 0),
+        )
         parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
-        return "".join(p.get("text", "") for p in parts)
+        return "".join(p.get("text", "") for p in parts), usage
 
 
-async def _call_cloud_model(model_ref: str, messages: list, system: str) -> str:
+async def _call_cloud_model(model_ref: str, messages: list, system: str, slim_history: bool = False) -> tuple[str, dict]:
     """model_ref is "<provider>/<model>", e.g. "anthropic/claude-sonnet-4-6" —
     the same slash convention Ollama itself uses for community model tags
     (e.g. huihui_ai/qwen2.5-coder-abliterate), so cloud models sit naturally
-    in the same model-name space instead of needing a different UI concept."""
+    in the same model-name space instead of needing a different UI concept.
+    Returns (text, usage); usage carries token counts, cached tokens, and the
+    estimated USD cost, and every dollar spent is recorded into the monthly
+    ledger so the budget meter in the UI reflects ALL cloud usage — agent
+    runs, drafting, analyzer, everything."""
     provider, _, model = model_ref.partition("/")
     keys = _load_api_keys()
     api_key = keys.get(provider)
     if not api_key:
-        return f"No API key configured for '{provider}' — add one in the Models tab first."
+        return f"No API key configured for '{provider}' — add one in the Models tab first.", {}
+    if slim_history:
+        messages = _messages_for_cloud(messages, slim=True)
     if provider == "anthropic":
-        return await _call_anthropic(model, messages, system, api_key)
-    if provider == "openai":
-        return await _call_openai(model, messages, system, api_key)
-    if provider == "google":
-        return await _call_gemini(model, messages, system, api_key)
-    if provider == "xai":
-        return await _call_xai(model, messages, system, api_key)
-    if provider == "deepseek":
-        return await _call_deepseek(model, messages, system, api_key)
-    if provider == "openrouter":
-        return await _call_openrouter(model, messages, system, api_key)
-    return f"Unknown cloud provider '{provider}'."
+        text, usage = await _call_anthropic(model, messages, system, api_key)
+    elif provider == "openai":
+        text, usage = await _call_openai(model, messages, system, api_key)
+    elif provider == "google":
+        text, usage = await _call_gemini(model, messages, system, api_key)
+    elif provider == "openrouter":
+        async with httpx.AsyncClient(timeout=120) as client:
+            r = await client.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}", "content-type": "application/json"},
+                json={
+                    "model": model,
+                    "messages": [{"role": "system", "content": system}] + _messages_for_cloud(messages, slim=len(messages) > 8),
+                },
+            )
+            if r.status_code != 200:
+                return f"OpenRouter API error ({r.status_code}): {r.text[:500]}", {}
+            data = r.json()
+            u = data.get("usage", {}) or {}
+            usage = _usage_with_cost(
+                "openrouter", model,
+                input_tokens=u.get("prompt_tokens", 0),
+                output_tokens=u.get("completion_tokens", 0),
+                cached_tokens=(u.get("prompt_tokens_details") or {}).get("cached_tokens", 0),
+            )
+            _record_spend(model_ref, usage.get("cost", 0.0))
+            return data["choices"][0]["message"]["content"] or "", usage
+    else:
+        return f"Unknown cloud provider '{provider}'.", {}
+    _record_spend(model_ref, usage.get("cost", 0.0))
+    return text, usage
 
 
 def _is_cloud_model(model: str) -> bool:
@@ -2621,7 +3705,8 @@ async def _llm_complete(model: str, messages: list, timeout: int = 120) -> str:
     if _is_cloud_model(model):
         system = next((m["content"] for m in messages if m["role"] == "system"), "")
         convo = [m for m in messages if m["role"] != "system"]
-        return await _call_cloud_model(model, convo, system)
+        text, _usage = await _call_cloud_model(model, convo, system)
+        return text
     async with httpx.AsyncClient(timeout=timeout) as client:
         r = await client.post(f"{OLLAMA}/api/chat", json={"model": model, "messages": messages, "stream": False})
         r.raise_for_status()
@@ -2639,7 +3724,7 @@ async def _stream_chat_ndjson(model: str, messages: list, timeout: int = 600):
     if _is_cloud_model(model):
         system = next((m["content"] for m in messages if m["role"] == "system"), "")
         convo = [m for m in messages if m["role"] != "system"]
-        text = await _call_cloud_model(model, convo, system)
+        text, _usage = await _call_cloud_model(model, convo, system)
         yield (json.dumps({"message": {"content": text}, "done": True}) + "\n").encode()
         return
     try:
@@ -2893,7 +3978,14 @@ When you need to use a tool, your ENTIRE response must be ONLY this — no narra
 ```
 The tool will be executed for you and its real result given back to you as the next message. Never fabricate what a tool would return, and never write example/hypothetical output as if it were a real result — if a tool call fails or doesn't exist, say so and try a different real tool or ask the user, rather than making up an answer. Once you have everything you need and the task is complete, respond in plain natural language summarizing what you actually did and the real outcome — do not emit another tool call once the task is finished.
 
-You are expected to actually DO the task with these tools — write the file, run the fix, run the build — not describe a plan and stop to ask whether you should proceed. Only stop and ask the user a question when you are genuinely blocked (missing credentials, a genuinely ambiguous target you can't infer, a destructive/irreversible action outside the project directory) — never merely to get permission for something you already have a working tool for.
+Working method (this is how top-tier coding agents operate — follow it):
+- PLAN FIRST: for any task needing 3+ steps, call todo_write with the full step list before doing anything else, then mark steps in_progress/completed as you actually go. Update it when reality diverges from the plan — the user sees this list live.
+- SEARCH, DON'T GUESS: to find where something lives in the codebase, use grep_files (contents) / search_files (filenames) / read_file, and include real line numbers in what you tell the user. Never speculate about code you haven't read.
+- SURGICAL EDITS: for changes to existing files, use edit_file (exact old_string → new_string) — NOT write_file. Rewriting a whole file from memory silently drops whatever you misremembered; a targeted edit can only touch what you named. write_file is for genuinely new files only. Every edit/write returns a unified diff — read it to verify the change is what you intended.
+- DELEGATE HEAVY READING: when a task involves reading lots of files or long command output that you don't need verbatim (codebase exploration, "how does X work" research), use the task tool — the subagent burns ITS context on the reading and only the distilled report comes back to yours.
+- VERIFY YOUR WORK: after changing code/config, actually run/test it (execute_code, run_command) and react to the real output instead of declaring success and stopping.
+
+You are expected to actually DO the task with these tools — write the file, run the fix, run the build — not describe a plan and stop to ask whether it should proceed. Only stop and ask the user a question when you are genuinely blocked (missing credentials, a genuinely ambiguous target you can't infer, a destructive/irreversible action outside the project directory) — never merely to get permission for something you already have a working tool for.
 
 You may install whatever software the task needs (package-manager installs, `ollama pull`, `flatpak install`, `git clone` + build, `npm install`/`pip install`, anything else) without asking permission first — the user has already directed full autonomy. Just say what you're installing as you go, and respect the platform caveats below (e.g. the atomic-distro reboot notes — those are physics, not restrictions).
 
@@ -2914,6 +4006,19 @@ def _clip_for_model(text: str, limit: int = 8000) -> str:
     return text[:limit] + f"\n...[truncated at {limit} characters — ask for a specific range if you need more]"
 
 
+MAX_AUTO_SKILLS = 120
+
+def _name_similarity(a: str, b: str) -> float:
+    """Token-overlap similarity for near-duplicate skill detection — exact-name
+    matching alone lets the same lesson pile up under slight rewordings
+    ("fix npm ebusy error" vs "fixing npm EBUSY errors"), which is exactly
+    what the auto-learner produces when a similar task recurs."""
+    ta = {w for w in re.split(r'[^a-z0-9]+', a.lower()) if len(w) > 2}
+    tb = {w for w in re.split(r'[^a-z0-9]+', b.lower()) if len(w) > 2}
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / min(len(ta), len(tb))
+
 async def _auto_distill_skill(model: str, conv: list):
     """Fire-and-forget: after an agent session that actually searched the web
     or ran code, asks the model whether it learned anything reusable — a fix
@@ -2923,8 +4028,9 @@ async def _auto_distill_skill(model: str, conv: list):
     below) there is no human review queue here: the user asked for skills to
     build up automatically from what the agent learns while searching/coding,
     not to approve each one. Every failure mode (model says no, bad JSON, a
-    near-duplicate name) just quietly does nothing — this must never surface
-    an error to the user or interrupt the real conversation it's watching."""
+    near-duplicate name, the auto-skill library being full) just quietly does
+    nothing — this must never surface an error to the user or interrupt the
+    real conversation it's watching."""
     try:
         transcript = "\n".join(
             f"{m['role']}: {str(m.get('content', ''))[:1500]}" for m in conv[-14:] if m.get("content")
@@ -2947,9 +4053,24 @@ Did this session involve solving a real problem, fixing a non-obvious bug, or di
         if not (name and description and instructions):
             return
         skills = _load_json_list(SKILLS_FILE)
-        # Don't pile up near-duplicates every time a similar task recurs.
-        if any(s.get("name", "").strip().lower() == name.lower() for s in skills):
-            return
+        # Don't pile up near-duplicates every time a similar task recurs —
+        # block exact names AND strong token overlap (same lesson, reworded),
+        # and a description that's near-verbatim an existing skill's.
+        for s in skills:
+            if s.get("name", "").strip().lower() == name.lower():
+                return
+            if _name_similarity(s.get("name", ""), name) >= 0.7:
+                return
+            if _name_similarity(s.get("description", ""), description) >= 0.8:
+                return
+        # The auto library is useful precisely because it stays small enough
+        # to fit in the system prompt's skill directory — cap it, and shed
+        # the OLDEST auto-learned entries (manual ones are never evicted)
+        # rather than silently stop learning.
+        auto_skills = [s for s in skills if s.get("source") == "auto"]
+        if len(auto_skills) >= MAX_AUTO_SKILLS:
+            oldest = min(auto_skills, key=lambda s: s.get("created_at", ""))
+            skills = [s for s in skills if s is not oldest]
         skills.append({
             "id": uuid.uuid4().hex[:12],
             "name": name,
@@ -2963,126 +4084,295 @@ Did this session involve solving a real problem, fixing a non-obvious bug, or di
         pass
 
 
-_MODEL_CONTEXT_LENGTH_CACHE: dict[str, int] = {}
-DEFAULT_CONTEXT_TOKENS = 8192  # conservative fallback when Ollama doesn't report context_length
+# ── LSP integration (opencode-style) ─────────────────────────────────────────
+# Language servers give the agent real compiler/type feedback on the files it
+# edits: after edit_file/write_file runs, the touched file's LSP diagnostics
+# are appended to the tool result so the model sees its own errors and
+# self-corrects. Registry + config follow opencode's shape — built-in servers
+# keyed by name, each with the command to run and the extensions it handles;
+# config.json's "lsp" key toggles them (true/false) or carries per-server
+# overrides ({"rust": {"disabled": true}, "custom": {"command": [...],
+# "extensions": [".x"]}}). One deliberate difference: opencode ships LSP off
+# by default; this app defaults it ON (set "lsp": false to disable).
 
+LSP_BUILTINS = {
+    "rust":       {"command": ["rust-analyzer"], "extensions": [".rs"]},
+    "typescript": {"command": ["npx", "-y", "typescript-language-server", "--stdio"],
+                    "extensions": [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"]},
+    "python":     {"command": ["pylsp"],
+                    "extensions": [".py", ".pyi"]},
+    "bash":       {"command": ["npx", "-y", "bash-language-server", "start"],
+                    "extensions": [".sh", ".bash", ".zsh"]},
+}
 
-async def _get_model_context_length(model: str) -> int:
-    """Best-effort lookup of the model's real context window, cached per
-    model name for the process lifetime — this is checked every agent turn
-    (see _compact_conversation_if_needed) and the value never changes
-    mid-run, so there's no reason to re-hit Ollama's API on every turn."""
-    if model in _MODEL_CONTEXT_LENGTH_CACHE:
-        return _MODEL_CONTEXT_LENGTH_CACHE[model]
-    if _is_cloud_model(model):
-        # Cloud context windows are documented and comfortably large; not
-        # worth a provider-specific lookup just to feed a compaction budget.
-        _MODEL_CONTEXT_LENGTH_CACHE[model] = 32000
-        return 32000
-    result = DEFAULT_CONTEXT_TOKENS
+LSP_LANGUAGE_IDS = {".rs": "rust", ".ts": "typescript", ".tsx": "typescript", ".js": "javascript",
+                    ".jsx": "javascript", ".mjs": "javascript", ".cjs": "javascript",
+                    ".py": "python", ".pyi": "python",
+                    ".sh": "shellscript", ".bash": "shellscript", ".zsh": "shellscript"}
+
+def _lsp_registry():
+    """Resolved registry (builtins + config overrides), or None when LSP is
+    off. Absent "lsp" key = enabled (this app's default); explicit false = off."""
+    cfg = load_config().get("lsp")
+    if cfg is False:
+        return None
+    if cfg is True or cfg is None:
+        return {name: dict(spec) for name, spec in LSP_BUILTINS.items()}
+    merged = {name: dict(spec) for name, spec in LSP_BUILTINS.items()}
+    for name, over in (cfg or {}).items():
+        if not isinstance(over, dict):
+            continue
+        if over.get("disabled"):
+            merged.pop(name, None)
+            continue
+        merged.setdefault(name, {}).update(over)
+    return merged
+
+class _LspClient:
+    """Minimal async JSON-RPC/LSP client over stdio: enough protocol to
+    initialize a server, push didOpen/didChange, and collect its
+    publishDiagnostics pushes. The point is error feedback for the agent
+    loop, not an IDE."""
+
+    def __init__(self, name, command, initialization=None):
+        self.name = name
+        self.command = command
+        self.initialization = initialization
+        self.proc = None
+        self._next_id = 0
+        self._pending = {}
+        self.diagnostics = {}
+        self._events = {}
+        self._opened = {}
+        self.dead = False
+
+    async def start(self, root_path: str | None = None):
+        self.proc = await asyncio.create_subprocess_exec(
+            *self.command,
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        asyncio.get_event_loop().create_task(self._read_loop())
+        root = Path(root_path).resolve() if root_path else Path(BASE_PROJECTS).resolve()
+        params = {
+            "processId": os.getpid(),
+            "rootUri": root.as_uri(),
+            "workspaceFolders": [{"uri": root.as_uri(), "name": root.name}],
+            "capabilities": {"textDocument": {"sync": {"dynamicRegistration": False}}},
+        }
+        if self.initialization:
+            params["initializationOptions"] = self.initialization
+        # 120s: npx-based servers (typescript-language-server, pyright,
+        # bash-language-server) download themselves on first spawn — that
+        # cold download happens before the server ever answers initialize.
+        await self._request("initialize", params, timeout=120)
+        self._notify("initialized", {})
+        return self
+
+    async def _send(self, payload):
+        body = json.dumps(payload).encode()
+        self.proc.stdin.write(b"Content-Length: %d\r\n\r\n" % len(body) + body)
+        await self.proc.stdin.drain()
+
+    async def _request(self, method, params, timeout=30):
+        self._next_id += 1
+        rid = self._next_id
+        fut = asyncio.get_event_loop().create_future()
+        self._pending[rid] = fut
+        await self._send({"jsonrpc": "2.0", "id": rid, "method": method, "params": params})
+        return await asyncio.wait_for(fut, timeout)
+
+    def _notify(self, method, params):
+        asyncio.get_event_loop().create_task(self._send({"jsonrpc": "2.0", "method": method, "params": params}))
+
+    async def _read_loop(self):
+        try:
+            while True:
+                headers = {}
+                while True:
+                    line = await self.proc.stdout.readline()
+                    if not line:
+                        raise ConnectionResetError("LSP server closed stdout")
+                    line = line.strip()
+                    if not line:
+                        break
+                    if b":" in line:
+                        k, v = line.split(b":", 1)
+                        headers[k.strip().lower()] = v.strip()
+                length = int(headers.get(b"content-length", b"0"))
+                msg = json.loads(await self.proc.stdout.readexactly(length))
+                if "id" in msg and ("result" in msg or "error" in msg):
+                    fut = self._pending.pop(msg["id"], None)
+                    if fut and not fut.done():
+                        fut.set_result(msg)
+                elif msg.get("method") == "textDocument/publishDiagnostics":
+                    params = msg.get("params") or {}
+                    uri = params.get("uri")
+                    if uri:
+                        self.diagnostics[uri] = params.get("diagnostics") or []
+                        ev = self._events.get(uri)
+                        if ev is None:
+                            ev = asyncio.Event()
+                            self._events[uri] = ev
+                        ev.set()
+        except Exception:
+            self.dead = True
+
+    def push_text(self, uri, text, language_id):
+        """didOpen the first time we touch a file, didChange with the full
+        text afterwards (servers not told about incremental sync must accept
+        full-document changes)."""
+        if uri in self._opened:
+            self._opened[uri] += 1
+            self._notify("textDocument/didChange", {
+                "textDocument": {"uri": uri, "version": self._opened[uri]},
+                "contentChanges": [{"text": text}],
+            })
+        else:
+            self._opened[uri] = 1
+            self._notify("textDocument/didOpen", {
+                "textDocument": {"uri": uri, "languageId": language_id, "version": 1, "text": text},
+            })
+
+    async def wait_diagnostics(self, uri, timeout=4.0):
+        ev = self._events.get(uri)
+        if ev is None:
+            ev = asyncio.Event()
+            self._events[uri] = ev
+        ev.clear()
+        try:
+            await asyncio.wait_for(ev.wait(), timeout)
+        except asyncio.TimeoutError:
+            pass
+        await asyncio.sleep(0.3)  # settle window for servers that publish in waves
+        return self.diagnostics.get(uri) or []
+
+_lsp_clients: dict = {}
+_lsp_last_errors: dict = {}   # server name → last start failure, for /api/lsp/status
+
+async def _lsp_client_for(suffix: str):
+    registry = _lsp_registry()
+    if not registry:
+        return None
+    name = next((n for n, spec in registry.items() if suffix in spec.get("extensions", [])), None)
+    if not name:
+        return None
+    spec = registry[name]
+    client = _lsp_clients.get(name)
+    if client and not client.dead:
+        return client
+    cmd0 = spec["command"][0]
+    if cmd0 not in ("npx", "node") and not shutil.which(cmd0):
+        _lsp_last_errors[name] = f"binary not found: {cmd0}"
+        return None  # binary genuinely missing — don't try to spawn it every edit
     try:
-        async with httpx.AsyncClient(timeout=5) as client:
-            r = await client.get(f"{OLLAMA}/api/tags")
-            data = r.json()
-            for m in data.get("models", []):
-                if m.get("name") == model:
-                    ctx = (m.get("details") or {}).get("context_length")
-                    if isinstance(ctx, int) and ctx > 0:
-                        result = ctx
-                    break
-    except Exception:
-        pass
-    _MODEL_CONTEXT_LENGTH_CACHE[model] = result
-    return result
+        client = await _LspClient(name, spec["command"], spec.get("initialization")).start()
+        _lsp_clients[name] = client
+        _lsp_last_errors.pop(name, None)
+        return client
+    except Exception as e:
+        _lsp_last_errors[name] = f"{type(e).__name__}: {str(e)[:200]}"
+        return None
 
-
-async def _summarize_dropped_turns(model: str, turns: list) -> str:
-    """One cheap extra model call to compress history that's about to be
-    dropped — trading a bit more compute for keeping the gist of what
-    happened instead of losing it outright. This is the same trade
-    context-extending tools like Plandex make: break a big task into more,
-    smaller model calls instead of one call that no longer fits. Falls back
-    to a naive truncated transcript if the summarization call itself fails,
-    so compaction never hard-fails the user's actual turn."""
-    transcript = "\n".join(f"{t.get('role', '?')}: {(t.get('content') or '')[:500]}" for t in turns)
-    prompt = (
-        "Summarize the following AI agent conversation history in a few dense "
-        "sentences. Keep concrete facts, decisions, file paths, and results the "
-        "model will still need to correctly continue the task — this replaces "
-        "the full history from here on, not a preview of it:\n\n" + transcript[:20000]
-    )
+async def _lsp_feedback_for_path(path_str: str) -> str:
+    """Diagnostics for the file the agent just touched, formatted for the
+    tool result. Empty string when LSP is off, no server matches, the server
+    can't start, or the file is clean — silence means success."""
+    if not path_str:
+        return ""
     try:
-        summary = (await _llm_complete(model, [{"role": "user", "content": prompt}], timeout=60)).strip()
-        if summary:
-            return summary
+        base = Path(_find_project_root(path_str)).resolve()
+        target = (base / path_str).resolve()
+        if not target.is_relative_to(base) or not target.is_file():
+            return ""
+        suffix = target.suffix.lower()
+        client = await _lsp_client_for(suffix)
+        if not client:
+            return ""
+        uri = target.as_uri()
+        text = target.read_text(encoding="utf-8", errors="replace")
+        client.push_text(uri, text, LSP_LANGUAGE_IDS.get(suffix, ""))
+        diags = await client.wait_diagnostics(uri)
+        problems = [d for d in diags if d.get("severity") in (1, 2)]  # errors + warnings
+        if not problems:
+            return ""
+        lines = [f"\n\nLSP diagnostics ({client.name}) — fix these before finishing:"]
+        for d in problems[:20]:
+            pos = (d.get("range") or {}).get("start") or {}
+            sev = {1: "error", 2: "warning"}.get(d.get("severity"), "info")
+            lines.append(f"  [{sev}] line {pos.get('line', 0) + 1}: {str(d.get('message', ''))[:300]}")
+        return "\n".join(lines)
     except Exception:
-        pass
-    return _clip_for_model(transcript, 2000)
+        return ""  # LSP feedback is best-effort — never break the agent turn
+
+@app.get("/api/lsp/status")
+async def lsp_status():
+    registry = _lsp_registry()
+    if not registry:
+        return {"enabled": False, "servers": []}
+    servers = []
+    for name, spec in registry.items():
+        client = _lsp_clients.get(name)
+        cmd0 = spec["command"][0]
+        available = cmd0 in ("npx", "node") or bool(shutil.which(cmd0))
+        state = ("running" if (client and not client.dead)
+                 else "error" if _lsp_last_errors.get(name)
+                 else "available" if available else "missing")
+        servers.append({
+            "name": name, "command": spec["command"], "extensions": spec.get("extensions", []),
+            "state": state, "error": _lsp_last_errors.get(name, "") if state == "error" else "",
+        })
+    return {"enabled": True, "servers": servers}
 
 
-async def _compact_conversation_if_needed(conv: list, model: str, system_prompt_chars: int) -> list:
-    """Keeps a long agent run (or a long saved conversation resumed from
-    before) from silently overflowing the model's context window. Ollama
-    doesn't error when a request overflows num_ctx — it just quietly drops
-    earlier context, which reads to the user as the model "forgetting" the
-    task partway through a long multi-tool run. Instead of losing that
-    history for free, fold whatever would be dropped into one compact
-    summary turn first — replaces the old MAX_HISTORY_MESSAGES blind slice
-    (frontend/index.html), which only ever dropped history outright with
-    nothing kept in its place.
-
-    Budgets on character count (~4 chars/token, the standard estimator used
-    when a real tokenizer isn't available) rather than an exact token count —
-    good enough to trigger compaction comfortably before the real limit,
-    which is all a safety margin needs to do.
-    """
-    context_tokens = await _get_model_context_length(model)
-    # Compact at 60% of the window, not 90%+, so there's still headroom left
-    # for one big tool result (a large file read, a long command's output)
-    # on the very next turn without immediately tipping over again.
-    budget_chars = int(context_tokens * 4 * 0.6) - system_prompt_chars
-    total_chars = sum(len(m.get("content", "") or "") for m in conv)
-    if budget_chars <= 0 or total_chars <= budget_chars:
-        return conv
-
-    # Walk backward keeping the most recent messages verbatim — what the
-    # model actually needs to continue the current step — reserving at most
-    # half the budget for them so there's always real room left for the
-    # summary plus this turn's own reply.
-    keep_chars = budget_chars // 2
-    split_idx = len(conv)
-    running = 0
-    for i in range(len(conv) - 1, -1, -1):
-        running += len(conv[i].get("content", "") or "")
-        if running > keep_chars:
-            break
-        split_idx = i
-    if split_idx <= 0:
-        return conv  # everything is "recent" — nothing old enough to fold away
-
-    old, recent = conv[:split_idx], conv[split_idx:]
-    summary = await _summarize_dropped_turns(model, old)
-    return [{"role": "user", "content": f"[Summary of earlier turns, compacted to stay within context: {summary}]"}] + recent
-
-
-async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str = ""):
+async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str = "",
+                       allow_sudo: bool = True, allow_subagents: bool = True):
     """Runs the tool-use agent loop, yielding structured event dicts. Shared by
-    the interactive /api/agent endpoint (streamed to the browser) and scheduled
-    routine execution (collected into a final result) below. `conv` is mutated
-    in place and included in terminal events so the caller can persist the
-    full history (including tool calls/results) for the next turn."""
+    the interactive /api/agent endpoint (streamed to the browser), scheduled
+    routine execution (collected into a final result), and the `task` tool's
+    nested subagent runs below. `conv` is mutated in place and included in
+    terminal events so the caller can persist the full history (including
+    tool calls/results) for the next turn. `allow_sudo=False` turns the sudo
+    human-gate into a plain refusal — used by subagents, which must never put
+    a password prompt in front of the user with no visible step to attribute
+    it to."""
     response_text = ""
+    usage = None
+    # Auto-skill discovery: match the incoming request against the skill/
+    # agent directory once, and nudge the model toward the best-fitting
+    # entries every turn — skills/agents get used because the system prompt
+    # names them, not only when the user asks.
+    _hint = ""
+    for _m in reversed(conv):
+        if (_m.get("role") == "user" and _m.get("content")
+                and not str(_m["content"]).startswith(_COMPACT_MARKER)):
+            _hint = _relevant_skills_hint(str(_m["content"]))
+            break
     # Set the moment a search or code tool actually runs — gates the
     # end-of-session auto-skill distillation below so a plain Q&A turn (no
     # tool use at all) never fires an extra LLM call for nothing.
     used_learnable_tool = False
     for turn in range(max_turns):
-        system_msg = {"role": "system", "content": build_system_prompt(system or UNCENSORED_SYSTEM) + "\n\n" + _agent_tool_instructions()}
-        # Mutates conv in place (per this function's own docstring/contract)
-        # so the caller's reference stays valid either way — folds anything
-        # that would overflow the model's context window into one summary
-        # turn instead of the model silently losing it.
-        conv[:] = await _compact_conversation_if_needed(conv, model, len(system_msg["content"]))
+        # ── Always-on context management (opencode-style auto-compaction) ──
+        # `usage` still holds the previous turn's exact prompt+eval token
+        # counts here (it's reset just below before the next model call). When
+        # that crosses 75% of the model's effective window, fold everything
+        # but the last 6 messages into a model-generated summary and carry
+        # on — local and cloud, interactive chat and subagents alike, no
+        # config flag, nothing for the user to remember to run.
+        if turn > 0 and usage:
+            try:
+                window = await _model_context_window(model)
+                used = (usage.get("prompt_eval_count") or 0) + (usage.get("eval_count") or 0)
+                if window and used > window * 0.75 and len(conv) >= 10:
+                    new_conv, _summary = await _compact_conv(conv, keep_last=6, model=model)
+                    conv[:] = new_conv
+            except Exception:
+                pass  # best-effort — never kill the turn over a failed compaction
+
+        system_msg = {"role": "system", "content":
+                      build_system_prompt(system or UNCENSORED_SYSTEM) + "\n\n" + _agent_tool_instructions()
+                      + (("\n\n" + _hint) if _hint else "")}
         messages = [system_msg] + conv
 
         # turn 0's user message is already the last entry in `conv` (the caller
@@ -3102,13 +4392,36 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
                 # one shot instead of animating word-by-word; everything
                 # downstream (tool-call extraction, sudo flow, etc.) works
                 # identically either way since it only looks at response_text.
-                response_text = await _call_cloud_model(model, messages[1:], system_msg["content"])
+                # slim_history: an agent loop re-sends the entire transcript
+                # every turn, so older tool results get elided (see
+                # _messages_for_cloud) to keep paid-token usage — and the
+                # metered cost — from ballooning. usage comes back with the
+                # exact cached/uncached token counts and estimated cost, and
+                # rides the terminal event to the frontend's cost display.
+                response_text, cloud_usage = await _call_cloud_model(model, messages[1:], system_msg["content"], slim_history=True)
+                # Frontend totals expect Ollama's field names — normalize the
+                # cloud usage into the same shape, keeping the extra cost /
+                # cached-token fields alongside for the cost display.
+                if cloud_usage:
+                    usage = {"prompt_eval_count": cloud_usage.get("input_tokens", 0),
+                             "eval_count": cloud_usage.get("output_tokens", 0), **cloud_usage}
                 yield {"type": "token", "content": response_text}
             else:
+                # Tool-format reliability needs determinism: at Ollama's
+                # default temperature (~0.8) the same prompt flip-flops
+                # between emitting the ```tool fence and politely
+                # acknowledging readiness (confirmed live against both local
+                # models), so the agent loop runs cool. num_ctx is explicit
+                # too — the tool instruction sheet alone is ~4-5k tokens, and
+                # Ollama's default window for some models is small enough to
+                # silently clip it, which reads to the model as "I have no
+                # tools" (also confirmed live: a direct call that DID fit
+                # emitted the fence perfectly while loop calls clipped).
                 async with httpx.AsyncClient(timeout=120) as client:
                     async with client.stream(
                         "POST", f"{OLLAMA}/api/chat",
-                        json={"model": model, "messages": messages, "stream": True}
+                        json={"model": model, "messages": messages, "stream": True,
+                              "options": {"temperature": 0.2, "num_ctx": 16384}}
                     ) as r:
                         async for chunk in r.aiter_bytes():
                             for line in chunk.decode().split("\n"):
@@ -3139,7 +4452,8 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
 
         tool_name = tool_spec["name"]
         tool_args = tool_spec.get("arguments", {}) or {}
-        if tool_name in ("execute_code", "run_command", "web_search"):
+        if tool_name in ("execute_code", "run_command", "web_search", "edit_file",
+                         "write_file", "grep_files", "task"):
             used_learnable_tool = True
 
         yield {"type": "tool_call", "name": tool_name, "arguments": tool_args}
@@ -3160,6 +4474,10 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
                 "anything — just start it on a different port instead, e.g. "
                 "`npx expo start --port 8082` or `--web-port 8082`."
             )
+        elif tool_name == "run_command" and not allow_sudo and re.search(r'\bsudo\b', tool_args.get("command", "")):
+            result = ("Refused: subagents cannot use sudo (no way to show the user an attributable "
+                      "password prompt from a nested run). Find a non-root approach, or finish your "
+                      "report and let the parent agent handle the root-needing step itself.")
         elif tool_name == "run_command" and re.search(r'\bsudo\b', tool_args.get("command", "")):
             # Root needs a human. Pause here — yield a request id the browser
             # turns into a password prompt, then block (with a timeout) on the
@@ -3190,7 +4508,14 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
                 result = await _run_privileged_command(tool_args["command"], target, password)
                 password = None  # drop the reference now that we're done with it
         else:
-            result = await execute_tool(tool_name, tool_args)
+            result = await execute_tool(tool_name, tool_args, model=model, allow_subagents=allow_subagents)
+        # opencode-style LSP feedback: after a file edit, the touched file's
+        # language-server diagnostics ride along on the tool result so the
+        # model sees its own type/syntax errors and self-corrects instead of
+        # declaring victory over broken code. Empty string when LSP is off or
+        # the file is clean.
+        if tool_name in ("edit_file", "write_file"):
+            result += await _lsp_feedback_for_path(str(tool_args.get("path", "")))
         yield {"type": "tool_result", "name": tool_name, "result": _clip_for_model(result)}
 
         # Truncate to just the matched call — a weaker model sometimes crams a
@@ -3220,8 +4545,22 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
 
 @app.post("/api/agent")
 async def agent_loop(req: AgentRequest):
+    # `message` is part of the request model, and anything POSTing to this
+    # endpoint directly (a script, a test, the Routines path via a different
+    # caller) reasonably expects it to reach the model — but it used to be
+    # silently dropped unless the caller ALSO happened to append it to
+    # `conversation` themselves (which is exactly what the frontend does, so
+    # the bug was invisible in the UI: a bare API call got a model staring at
+    # nothing but the system prompt, cheerfully acknowledging readiness).
+    # Seed it into the conversation when it isn't already the last user turn.
+    conv = [dict(m) for m in req.conversation]
+    if req.message.strip() and not (
+        conv and conv[-1].get("role") == "user" and conv[-1].get("content") == req.message
+    ):
+        conv.append({"role": "user", "content": req.message})
+
     async def stream():
-        async for event in _agent_turns(req.model, req.conversation, system=req.system):
+        async for event in _agent_turns(req.model, conv, system=req.system):
             yield json.dumps(event) + "\n"
 
     return StreamingResponse(stream(), media_type="application/x-ndjson")
@@ -3628,11 +4967,28 @@ async def get_config():
 @app.post("/api/config")
 async def set_config(cfg: dict):
     if not isinstance(cfg, dict):
-        raise HTTPException(status_code=422, detail="Expected a JSON object")
+        raise HTTPException(422, detail="Expected a JSON object")
     existing = load_config()
+    # cloud_budget is the monthly paid-model spend ceiling; validate it as a
+    # positive number (or null to disable the meter) before it lands.
+    if "cloud_budget" in cfg:
+        try:
+            v = cfg["cloud_budget"]
+            if v is not None and float(v) < 0:
+                raise ValueError
+            cfg["cloud_budget"] = None if v is None else float(v)
+        except (TypeError, ValueError):
+            raise HTTPException(422, detail="cloud_budget must be a non-negative number or null")
     existing.update(cfg)
     write_config(existing)
     return {"ok": True}
+
+
+@app.get("/api/cost/summary")
+async def cost_summary():
+    """Month-to-date cloud spend vs. the configured budget — powers the
+    '≈$X.XX used · N% left' line under the token count for paid models."""
+    return _cost_summary()
 
 
 # ── Save Project ───────────────────────────────────────────────────────────────
@@ -3911,6 +5267,57 @@ async def analyze_code_project(project_id: str, req: ProjectAnalyzeRequest):
         {"role": "user", "content": prompt},
     ]
     return StreamingResponse(_stream_chat_ndjson(req.model, messages, timeout=300), media_type="application/x-ndjson")
+
+
+class AgentSuggestionsRequest(BaseModel):
+    model: str
+
+@app.post("/api/code-projects/{project_id}/agent-suggestions")
+async def code_project_agent_suggestions(project_id: str, req: AgentSuggestionsRequest):
+    """Proposes 3-5 concrete, ready-to-run agent tasks for this specific
+    project — the "what would a senior dev do next with this codebase" list
+    (bugs to fix, missing error handling, untested paths, obvious polish).
+    Each suggestion's `task` field is written to be handed STRAIGHT to the
+    autonomous agent as-is: self-contained, naming real files/lines from the
+    blob, no 'maybe consider' hedging — the frontend renders them as
+    one-click 'Run in Agent' cards."""
+    proj = _get_code_project_or_404(project_id)
+    blob = _project_code_blob(proj)
+    lang = proj.get("language") or "the project's language"
+    prompt = f"""Analyze this {lang} project and propose the 4 highest-value next tasks for an autonomous AI coding agent to do on it. Prioritize by real impact: actual bugs and unhandled errors first, then missing input/edge-case handling, then meaningful improvements or obvious missing features. Never propose busywork (comment additions, formatting, renaming for taste).
+
+For each task, write `title` (3-6 words) and `task` — a fully self-contained instruction the agent can execute with zero extra context: name the exact file(s) and function(s) involved, what's wrong or missing, and what "done" looks like. Reference real identifiers from the code below, not generic placeholders.
+
+Respond with ONLY a JSON array (no markdown fences, no other text), exactly this shape:
+[{{"title": "...", "task": "..."}}, ...]
+
+Project:
+{blob[:60000]}"""
+    try:
+        content = (await _llm_complete(req.model, [
+            {"role": "system", "content": "You are an expert software engineer planning autonomous agent work."},
+            {"role": "user", "content": prompt},
+        ], timeout=120)).strip()
+    except Exception as e:
+        raise HTTPException(502, f"Model error: {e}")
+
+    suggestions = []
+    match = re.search(r'\[.*\]', content, re.DOTALL)
+    if match:
+        try:
+            parsed = json.loads(match.group(0))
+            if isinstance(parsed, list):
+                for item in parsed:
+                    if isinstance(item, dict) and item.get("title") and item.get("task"):
+                        suggestions.append({
+                            "title": str(item["title"])[:80],
+                            "task": str(item["task"])[:600],
+                        })
+        except json.JSONDecodeError:
+            pass
+    if not suggestions:
+        raise HTTPException(502, "Could not parse suggestions from the model's response — try again.")
+    return {"suggestions": suggestions[:5]}
 
 @app.post("/api/code-projects/{project_id}/apply")
 async def apply_code_project_files(project_id: str, req: ApplyProjectFilesRequest):
@@ -4284,12 +5691,6 @@ EMAIL_PROVIDERS = {
     "zoho":     {"label": "Zoho Mail",                  "imap_host": "imap.zoho.com",         "imap_port": 993, "smtp_host": "smtp.zoho.com",       "smtp_port": 587, "smtp_ssl": False, "note": "Generate an app-specific password in Zoho Account Security."},
     "aol":      {"label": "AOL Mail",                   "imap_host": "imap.aol.com",          "imap_port": 993, "smtp_host": "smtp.aol.com",        "smtp_port": 587, "smtp_ssl": False, "note": "Generate an app password in AOL Account Security."},
     "gmx":      {"label": "GMX Mail",                   "imap_host": "imap.gmx.com",          "imap_port": 993, "smtp_host": "smtp.gmx.com",        "smtp_port": 587, "smtp_ssl": False, "note": ""},
-    # Proton doesn't expose real IMAP/SMTP on its own servers at all (mail
-    # stays end-to-end encrypted there) — Proton Mail Bridge, a small app
-    # Proton ships, runs on this same machine and re-exposes it locally.
-    # Host/port/password all come from Bridge's own UI, not proton.me — the
-    # defaults below are Bridge's standard local ports, not a live endpoint.
-    "protonmail": {"label": "Proton Mail",              "imap_host": "127.0.0.1",             "imap_port": 1143, "smtp_host": "127.0.0.1",           "smtp_port": 1025, "smtp_ssl": False, "note": "Requires Proton Mail Bridge running on this machine (proton.me/mail/bridge) — use the host, port, and password Bridge itself displays, not your real Proton password."},
     "custom":   {"label": "Custom / Other (IMAP+SMTP)", "imap_host": "",                      "imap_port": 993, "smtp_host": "",                    "smtp_port": 587, "smtp_ssl": False, "note": "Works with any standards-compliant IMAP/SMTP server — enter your provider's host/port."},
 }
 
@@ -4304,7 +5705,6 @@ _EMAIL_DOMAIN_MAP = {
     "zoho.com": "zoho",
     "aol.com": "aol",
     "gmx.com": "gmx", "gmx.net": "gmx",
-    "protonmail.com": "protonmail", "proton.me": "protonmail", "pm.me": "protonmail",
 }
 
 def _parse_autoconfig_xml(xml_text: str) -> dict | None:
@@ -4401,11 +5801,6 @@ class DraftRepliesRequest(BaseModel):
     body: str
     instructions: str = ""
 
-class ComposeEmailRequest(BaseModel):
-    model: str
-    to: str = ""
-    instructions: str
-
 class SendEmailRequest(BaseModel):
     account_id: str
     to: str
@@ -4472,6 +5867,22 @@ async def delete_email_account(account_id: str):
     _save_json_list(EMAIL_ACCOUNTS_FILE, accounts)
     return {"ok": True}
 
+class ReorderAccounts(BaseModel):
+    order: list[str]  # account ids in the desired display order
+
+@app.put("/api/email/accounts/reorder")
+async def reorder_email_accounts(body: ReorderAccounts):
+    """Persist a new account order — list position controls both the
+    accounts-list display order and which account the dropdown/inbox
+    defaults to on load (the select's first <option> is whichever
+    account is first in this list)."""
+    accounts = _load_json_list(EMAIL_ACCOUNTS_FILE)
+    by_id = {a.get("id"): a for a in accounts}
+    reordered = [by_id[i] for i in body.order if i in by_id]
+    reordered += [a for a in accounts if a.get("id") not in body.order]  # anything unlisted keeps its place at the end
+    _save_json_list(EMAIL_ACCOUNTS_FILE, reordered)
+    return {"ok": True, "accounts": [_redact_account(a) for a in reordered]}
+
 def _get_email_account(account_id: str) -> dict:
     for a in _load_json_list(EMAIL_ACCOUNTS_FILE):
         if a.get("id") == account_id:
@@ -4488,34 +5899,6 @@ def _decode_mime(value: str) -> str:
     for text, enc in decode_header(value):
         out += text.decode(enc or "utf-8", errors="replace") if isinstance(text, bytes) else text
     return out
-
-def _decode_imap_utf7(name: str) -> str:
-    """IMAP folder names are encoded in RFC 3501's modified UTF-7 ('&' where
-    standard UTF-7 uses '+', ',' where it uses '/', no padding, '&-' as a
-    literal ampersand). Real folder names (INBOX, Sent, Drafts...) are plain
-    ASCII and never hit this path — falls back to the raw name on anything
-    unexpected rather than failing the whole folder list over one oddly
-    named folder."""
-    if "&" not in name:
-        return name
-    try:
-        result, i = [], 0
-        while i < len(name):
-            if name[i] == "&":
-                j = name.index("-", i)
-                chunk = name[i + 1:j]
-                if not chunk:
-                    result.append("&")
-                else:
-                    b64 = (chunk.replace(",", "/") + "=" * (-len(chunk) % 4)).encode("ascii")
-                    result.append(base64.b64decode(b64).decode("utf-16-be"))
-                i = j + 1
-            else:
-                result.append(name[i])
-                i += 1
-        return "".join(result)
-    except Exception:
-        return name
 
 def _extract_body(msg) -> str:
     if msg.is_multipart():
@@ -4560,16 +5943,10 @@ def _imap_fetch(account: dict, folder: str, limit: int, access_token: str = "") 
             return []
         ids = data[0].split()[-limit:]
         for uid_ in reversed(ids):
-            # FLAGS alongside RFC822 in one round trip — msg_data[0] stays the
-            # same (meta-line, raw-bytes) tuple imaplib always returns for a
-            # single fetched item, just with the FLAGS list folded into the
-            # meta line instead of a second server round trip per message.
-            status, msg_data = imap.fetch(uid_, "(FLAGS RFC822)")
+            status, msg_data = imap.fetch(uid_, "(RFC822)")
             if status != "OK" or not msg_data or not msg_data[0]:
                 continue
-            meta, raw = msg_data[0]
-            unread = b"\\Seen" not in (meta or b"")
-            msg = message_from_bytes(raw)
+            msg = message_from_bytes(msg_data[0][1])
             body = _extract_body(msg)
             messages.append({
                 "uid": uid_.decode(),
@@ -4578,57 +5955,8 @@ def _imap_fetch(account: dict, folder: str, limit: int, access_token: str = "") 
                 "date": msg.get("Date", ""),
                 "preview": body.strip()[:200],
                 "body": body.strip()[:20000],
-                "unread": unread,
             })
     return messages
-
-def _imap_list_folders(account: dict, access_token: str = "") -> list:
-    with imaplib.IMAP4_SSL(account["imap_host"], account.get("imap_port", 993)) as imap:
-        _imap_login(imap, account, access_token)
-        status, data = imap.list()
-        if status != "OK" or not data:
-            return [{"name": "INBOX", "unread": 0}]
-        raw_names = []
-        for entry in data:
-            if not entry:
-                continue
-            # A LIST response line looks like: (\HasNoChildren) "/" "INBOX"
-            # — the folder name is always the last quoted (or bare) token.
-            decoded = entry.decode(errors="replace")
-            match = re.search(r'"([^"]*)"\s*$', decoded)
-            raw_names.append(match.group(1) if match else decoded.rsplit(" ", 1)[-1])
-
-        folders = []
-        for raw_name in raw_names:
-            # One STATUS round trip per folder for its unread count (Outlook's
-            # "Inbox 11" badges) — quoted since names with spaces ("Sent
-            # Mail") are otherwise invalid IMAP syntax. Wrapped per-folder so
-            # one folder a server won't report STATUS for (seen on some
-            # [Gmail]/... container folders) doesn't blank out every count.
-            unread = 0
-            try:
-                st, st_data = imap.status(f'"{raw_name}"', "(UNSEEN)")
-                if st == "OK" and st_data and st_data[0]:
-                    m = re.search(rb"UNSEEN\s+(\d+)", st_data[0])
-                    if m:
-                        unread = int(m.group(1))
-            except Exception:
-                pass
-            folders.append({"name": _decode_imap_utf7(raw_name), "unread": unread})
-
-        # INBOX first, then alphabetical — the order every real mail client uses.
-        folders.sort(key=lambda f: (f["name"].upper() != "INBOX", f["name"].lower()))
-        return folders or [{"name": "INBOX", "unread": 0}]
-
-@app.get("/api/email/{account_id}/folders")
-async def get_email_folders(account_id: str):
-    account = _get_email_account(account_id)
-    try:
-        access_token = await _google_access_token(account["google_account_id"]) if account.get("auth") == "oauth" else ""
-        folders = await asyncio.to_thread(_imap_list_folders, account, access_token)
-        return {"folders": folders}
-    except Exception as e:
-        raise HTTPException(502, f"IMAP error: {e}")
 
 @app.get("/api/email/{account_id}/messages")
 async def get_email_messages(account_id: str, folder: str = "INBOX", limit: int = 25):
@@ -4648,97 +5976,6 @@ def _imap_delete(account: dict, folder: str, uid: str, access_token: str = ""):
         imap.select(folder or "INBOX")
         imap.store(uid, "+FLAGS", "\\Deleted")
         imap.expunge()
-
-def _imap_mark_read(account: dict, folder: str, uid: str, access_token: str = ""):
-    with imaplib.IMAP4_SSL(account["imap_host"], account.get("imap_port", 993)) as imap:
-        _imap_login(imap, account, access_token)
-        imap.select(folder or "INBOX")
-        imap.store(uid, "+FLAGS", "\\Seen")
-
-@app.post("/api/email/{account_id}/messages/{uid}/read")
-async def mark_email_read(account_id: str, uid: str, folder: str = "INBOX"):
-    account = _get_email_account(account_id)
-    try:
-        access_token = await _google_access_token(account["google_account_id"]) if account.get("auth") == "oauth" else ""
-        await asyncio.to_thread(_imap_mark_read, account, folder, uid, access_token)
-        return {"ok": True}
-    except Exception as e:
-        raise HTTPException(502, f"IMAP error: {e}")
-
-
-def _imap_archive(account: dict, folder: str, uid: str, access_token: str = "") -> str:
-    """Moves a message to this account's archive-equivalent folder — swipe-
-    to-archive in the frontend. Returns the folder it moved to. Gmail has no
-    real "Archive" folder (archiving there just means removing it from
-    INBOX; the message stays visible under [Gmail]/All Mail, which is what
-    that IMAP folder actually is), so Gmail accounts target that folder
-    specifically; everything else looks for a folder literally named
-    "Archive". Raises ValueError (→ 400, a real "can't do this" answer) when
-    neither exists, rather than silently picking an unrelated folder."""
-    existing = _imap_list_folders(account, access_token)
-    target = None
-    if account.get("provider") == "gmail":
-        target = next((f["name"] for f in existing if f["name"] == "[Gmail]/All Mail"), None)
-    if not target:
-        target = next((f["name"] for f in existing if f["name"].lower() == "archive"), None)
-    if not target:
-        raise ValueError("No Archive folder found on this account — create one (Gmail accounts use [Gmail]/All Mail automatically and don't need one).")
-
-    with imaplib.IMAP4_SSL(account["imap_host"], account.get("imap_port", 993)) as imap:
-        _imap_login(imap, account, access_token)
-        imap.select(folder or "INBOX")
-        # IMAP MOVE (RFC 6851) first — one round trip, supported by Gmail and
-        # every mainstream provider this app lists. COPY + mark-deleted +
-        # EXPUNGE is the fallback for a server that predates it.
-        typ, _ = imap.uid("MOVE", uid, f'"{target}"')
-        if typ != "OK":
-            typ, _ = imap.uid("COPY", uid, f'"{target}"')
-            if typ != "OK":
-                raise ValueError(f"Could not move this message to {target}")
-            imap.uid("STORE", uid, "+FLAGS", "(\\Deleted)")
-            imap.expunge()
-    return target
-
-@app.post("/api/email/{account_id}/messages/{uid}/archive")
-async def archive_email_message(account_id: str, uid: str, folder: str = "INBOX"):
-    account = _get_email_account(account_id)
-    try:
-        access_token = await _google_access_token(account["google_account_id"]) if account.get("auth") == "oauth" else ""
-        target = await asyncio.to_thread(_imap_archive, account, folder, uid, access_token)
-        return {"ok": True, "archived_to": target}
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-    except Exception as e:
-        raise HTTPException(502, f"IMAP error: {e}")
-
-
-def _imap_empty_folder(account: dict, folder: str, access_token: str = "") -> int:
-    """Permanently deletes every message in `folder` — the "Empty Trash/
-    Spam/Junk" action real mail clients offer for exactly those folders.
-    Returns how many were removed. `folder` takes a query param, not a path
-    segment, since real folder names contain "/" (e.g. "[Gmail]/Bin")."""
-    with imaplib.IMAP4_SSL(account["imap_host"], account.get("imap_port", 993)) as imap:
-        _imap_login(imap, account, access_token)
-        imap.select(folder or "INBOX")
-        status, data = imap.search(None, "ALL")
-        if status != "OK" or not data or not data[0]:
-            return 0
-        ids = data[0].split()
-        if not ids:
-            return 0
-        imap.store(b",".join(ids), "+FLAGS", "\\Deleted")
-        imap.expunge()
-        return len(ids)
-
-@app.post("/api/email/{account_id}/folders/empty")
-async def empty_email_folder(account_id: str, folder: str):
-    account = _get_email_account(account_id)
-    try:
-        access_token = await _google_access_token(account["google_account_id"]) if account.get("auth") == "oauth" else ""
-        count = await asyncio.to_thread(_imap_empty_folder, account, folder, access_token)
-        return {"ok": True, "deleted": count}
-    except Exception as e:
-        raise HTTPException(502, f"IMAP error: {e}")
 
 @app.delete("/api/email/{account_id}/messages/{uid}")
 async def delete_email_message(account_id: str, uid: str, folder: str = "INBOX"):
@@ -4821,34 +6058,6 @@ Each reply should be a complete, ready-to-send email body (no subject line). Var
         except json.JSONDecodeError:
             pass
     return {"replies": [content.strip()] if content.strip() else ["(No draft generated — try again.)"]}
-
-
-@app.post("/api/email/compose")
-async def compose_email(req: ComposeEmailRequest):
-    """Drafts a brand-new email (subject + body) from a short instruction —
-    the "Copper AI" compose path, distinct from draft_replies above which
-    always answers an existing message. Same JSON-extraction-with-fallback
-    shape as draft_replies for consistency."""
-    prompt = f"""Draft a new email from scratch based on the instructions below. Respond with ONLY a JSON object (no other text, no markdown fences): {{"subject": string, "body": string}}.
-
-{"Recipient: " + req.to if req.to else ""}
-Instructions: {req.instructions}
-
-The body should be a complete, ready-to-send email — no placeholder brackets like [Your Name] unless the instructions specifically ask for a signature placeholder."""
-    try:
-        content = await _llm_complete(req.model, [{"role": "user", "content": prompt}])
-    except Exception as e:
-        raise HTTPException(502, f"Model error: {e}")
-
-    match = re.search(r'\{.*\}', content, re.DOTALL)
-    if match:
-        try:
-            draft = json.loads(match.group(0))
-            if isinstance(draft, dict) and draft.get("body"):
-                return {"subject": str(draft.get("subject", "")), "body": str(draft.get("body", ""))}
-        except json.JSONDecodeError:
-            pass
-    return {"subject": "", "body": content.strip()}
 
 
 @app.post("/api/email/send")
@@ -5225,6 +6434,190 @@ async def calendar_feed(token: str = ""):
 SKILLS_FILE = Path(__file__).parent.parent / "skills.json"
 LESSONS_FILE = Path(__file__).parent.parent / "core_lessons.json"
 
+# ── humanizer_academic (vendored skill, MIT, github.com/matsuikentaro1/
+# humanizer_academic) ──────────────────────────────────────────────────────────
+# The full SKILL.md ships in skills/humanizer_academic/SKILL.md and is
+# registered into the user's skill library at startup below — that's what
+# get_skill serves for on-demand "humanize this text" requests. The automatic
+# pre-save pass (write_file/edit_file on prose) uses _HUMANIZER_CORE instead:
+# the full skill is ~13k tokens and would crowd out the text being edited on
+# local models, so the distilled core carries the operational rules.
+
+HUMANIZER_SKILL_FILE = Path(__file__).parent.parent / "skills" / "humanizer_academic" / "SKILL.md"
+
+PROSE_EXTS = {".md", ".txt", ".rst", ".tex"}
+
+_HUMANIZER_CORE = """You are a prose editor that removes signs of AI-generated writing so the text reads as naturally and professionally human-written. Apply these rules, in order:
+
+1. SENTENCE RHYTHM FIRST (highest impact): mix short (<15 words) and long (>30 words) sentences. Vary how sentences open — prepositional phrases, subordinate clauses, connectives — instead of starting every sentence with the subject.
+2. ZERO em dashes: replace with commas, parentheses, or split sentences. No exceptions. No curly quotes, no Title Case headings.
+3. Remove AI-tell vocabulary: pivotal, crucial, landscape, evolving landscape, groundbreaking, showcases, profound, comprehensive, holistic, multifaceted, underscore(s), delve, foster, navigate (metaphorical), leverage (as a verb), realm, tapestry, testament to, "It is important to note", "In conclusion". "Additionally" at most once per paragraph.
+4. Copula avoidance becomes "is": "serves as / standing as / representing" -> "is".
+5. No "not only X but also Y" (write "X and Y") and no decorative rule-of-three lists.
+6. Term consistency: the same construct keeps the same term throughout.
+7. Filler becomes plain: "in order to"->"to", "due to the fact that"->"because", "despite the fact that"->"although".
+8. Hedge sensibly: keep one or two real hedges, remove stacked ones ("may suggest ... have the potential to").
+9. Vague attributions ("studies have shown", "experts argue") without a citation become specific or are cut. Cut significance inflation ("a pivotal challenge in the evolving landscape") and content-free verdicts ("this is a noteworthy finding").
+10. Ornamental intensifiers out (markedly, critically, remarkably, strikingly); functional ones stay (slightly, consistently, approximately). Remove intensifiers only as part of rhythm restructuring, never alone.
+11. State each claim once: cut "in other words / that is / essentially" restatements.
+12. PRESERVE real writing: However, Although, Whereas, Thus, Notably, Furthermore, "Based on these results"; citations; legitimate hedging; correct terminology. This is editing, not flattening — do not over-trim.
+13. Keep facts, numbers, citations, and the author's meaning EXACTLY. Rewrite style, never content.
+
+Return ONLY the fully rewritten text — no commentary, no before/after, no markdown fences."""
+
+def _humanize_enabled() -> bool:
+    """config.json "humanize_on_save": false turns the automatic pre-save
+    pass off. Default on — the skill runs on every prose save."""
+    return load_config().get("humanize_on_save", True) is not False
+
+async def _humanize_text(model: str, text: str) -> str:
+    """One LLM pass applying the humanizer_academic skill's core rules.
+    Returns the ORIGINAL text on any failure or implausible output — the
+    humanizer is best-effort and must never block or corrupt a save."""
+    if not text.strip() or len(text) > 60_000 or not model:
+        return text
+    try:
+        out = (await _llm_complete(model, [
+            {"role": "system", "content": _HUMANIZER_CORE},
+            {"role": "user", "content":
+                "Rewrite this text to remove AI-writing patterns. "
+                "Return ONLY the rewritten text, nothing else:\n\n" + text},
+        ], timeout=180)).strip()
+        if out and len(out) > len(text) * 0.5:
+            return out
+        return text
+    except Exception:
+        return text
+
+async def _register_builtin_skills():
+    """Registers the vendored humanizer_academic skill, then bulk-imports
+    every Claude-format SKILL.md found under skills/vendor/ (cloned
+    third-party collections; the dir is gitignored). Idempotent by name —
+    restart after dropping a new repo in, and its skills appear. Called from
+    the lifespan (this app's @app.on_event handlers never fire)."""
+    try:
+        if HUMANIZER_SKILL_FILE.is_file():
+            body = HUMANIZER_SKILL_FILE.read_text(encoding="utf-8")
+            skills = _load_json_list(SKILLS_FILE)
+            if not any(s.get("name") == "humanizer_academic" for s in skills):
+                skills.append({
+                    "id": uuid.uuid4().hex[:12],
+                    "name": "humanizer_academic",
+                    "description": "Remove signs of AI-generated writing from prose (34-pattern skill, auto-applied to prose saves). Use when editing or reviewing any text that must not read as AI-written.",
+                    "instructions": body,
+                    "source": "builtin",
+                })
+                _save_json_list(SKILLS_FILE, skills)
+    except Exception:
+        pass
+    _import_vendor_skills()
+
+# Import preference order — first repo to define a skill name wins, so the
+# focused collections take precedence over the big aggregates.
+_VENDOR_ORDER = ["agent-skills", "superpowers", "skills", "marketingskills",
+                 "scientific-agent-skills", "awesome-llm-apps", "awesome-claude-skills"]
+
+def _parse_skill_md(path: Path):
+    """Tolerant Claude-skills frontmatter parser: name/description when the
+    YAML cooperates, sensible fallbacks (parent dir name, first body line)
+    when it doesn't. Returns (name, description, full_text)."""
+    text = path.read_text(encoding="utf-8", errors="replace")
+    name, desc = "", ""
+    m = re.match(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", text, re.DOTALL)
+    if m:
+        fm, _ = m.group(1), m.group(2)
+        nm = re.search(r"^name:\s*(.+)$", fm, re.MULTILINE)
+        if nm:
+            name = nm.group(1).strip().strip("\"'")
+        dm = re.search(r"^description:\s*(.+?)(?=^\s*\w[\w-]*:|\Z)", fm, re.MULTILINE | re.DOTALL)
+        if dm:
+            raw = dm.group(1).strip()
+            if raw in ("|", ">", "|-", ">-", "|+", ">+"):
+                block = []
+                for ln in fm[dm.end():].splitlines():
+                    if ln.strip() and not ln.startswith((" ", "\t")):
+                        break
+                    block.append(ln.strip())
+                desc = " ".join(x for x in block if x)
+            else:
+                desc = " ".join(x.strip() for x in raw.splitlines() if x.strip())
+    if not name:
+        name = (path.stem if path.parent.name == "agents" or path.name.endswith(".agent.md")
+                else path.parent.name)
+    if not desc:
+        for ln in text.splitlines():
+            s = ln.strip().lstrip("#").strip()
+            if s and not s.startswith("---"):
+                desc = s
+                break
+    return name.strip()[:120], desc.strip()[:500], text
+
+def _import_vendor_skills() -> int:
+    """Scans skills/vendor/ for Claude-format SKILL.md files (kind=skill)
+    and agent definition .md files (kind=agent: */agents/*.md, *.agent.md)
+    and registers any name not already in the library. Returns the number
+    added (0 on a repeat boot)."""
+    vendor = Path(__file__).parent.parent / "skills" / "vendor"
+    if not vendor.is_dir():
+        return 0
+
+    def _repo_md(repo: Path):
+        if not repo.is_dir():
+            return []
+        return [p for p in repo.rglob("*.md") if "/.git/" not in str(p)]
+
+    def _is_agent_md(p: Path) -> bool:
+        return (p.name.endswith(".agent.md") or p.parent.name == "agents") \
+            and p.name != "SKILL.md" and not p.name.lower().startswith("readme")
+
+    skill_paths, agent_paths = [], []
+    repos = [vendor / r for r in _VENDOR_ORDER]
+    repos += [d for d in sorted(vendor.iterdir())
+              if d.is_dir() and d.name not in _VENDOR_ORDER and d.name != ".git"]
+    for repo in repos:
+        skill_paths += [p for p in _repo_md(repo) if p.name == "SKILL.md"]
+    for repo in repos:
+        agent_paths += [p for p in _repo_md(repo) if _is_agent_md(p)]
+    if not skill_paths and not agent_paths:
+        return 0
+
+    skills = _load_json_list(SKILLS_FILE)
+    existing = {str(s.get("name", "")).lower() for s in skills}
+    added = 0
+
+    def _register(path: Path, kind: str):
+        nonlocal added
+        if added >= 3000:
+            return
+        try:
+            name, desc, text = _parse_skill_md(path)
+        except Exception:
+            return
+        if kind == "agent" and not re.search(r"^name:", text[:600], re.MULTILINE):
+            name = path.name[:-len(".agent.md")] if path.name.endswith(".agent.md") else path.stem
+        if not name or name.lower() in existing or len(text) < 80:
+            return
+        skills.append({
+            "id": uuid.uuid4().hex[:12],
+            "name": name,
+            "description": desc or "(imported skill — fetch instructions for details)",
+            "instructions": text,
+            "kind": kind,
+            "source": f"agent:{path.relative_to(vendor).parts[0]}" if kind == "agent"
+                      else f"imported:{path.relative_to(vendor).parts[0]}",
+            "created_at": datetime.now().isoformat(),
+        })
+        existing.add(name.lower())
+        added += 1
+
+    for path in skill_paths:
+        _register(path, "skill")
+    for path in agent_paths:
+        _register(path, "agent")
+    if added:
+        _save_json_list(SKILLS_FILE, skills)
+    return added
+
 class Lesson(BaseModel):
     id: str = ""
     title: str
@@ -5334,6 +6727,101 @@ Content to learn from:
     raise HTTPException(502, "Could not parse a skill from the model's response — try again or edit manually.")
 
 
+_COMPACT_MARKER = "[Compacted conversation summary"
+
+async def _compact_conv(conv: list, keep_last: int, model: str):
+    """Core of /api/compact AND the agent loop's always-on auto-compaction:
+    summarize everything except the last `keep_last` messages into one dense
+    summary message (marked so the frontend renders it as a context divider,
+    not a user bubble). Returns (replacement_messages, short_summary or None
+    when the conversation was too short). Raises on model failure — the
+    endpoint maps that to a 502, the agent loop just skips this turn."""
+    msgs = [m for m in conv if m.get("content")]
+    if len(msgs) <= keep_last + 1:
+        return msgs, None
+    to_summarize, tail = msgs[:-keep_last], msgs[-keep_last:]
+    transcript = "\n".join(
+        f"{m['role']}: {str(m.get('content', ''))[:2000]}" for m in to_summarize[-40:]
+    )
+    prompt = f"""Summarize this AI-assistant conversation so work can continue seamlessly with only this summary in context. Keep: the user's actual goal(s), decisions made and by whom, files created/edited (with paths), commands run and their outcomes, bugs found/fixed, anything the model was mid-way through, and any explicitly stated preferences or constraints. Drop: pleasantries, narration, full file contents, and verbose tool output. Be dense — bullet points, no preamble.
+
+Conversation:
+{transcript}"""
+    summary = (await _llm_complete(model, [{"role": "user", "content": prompt}], timeout=120)).strip()
+    if not summary:
+        raise ValueError("compaction returned an empty summary")
+    summary_msg = {"role": "user", "content":
+        f"{_COMPACT_MARKER} — earlier messages were summarized to save context; "
+        f"treat this as established history, not a new request]\n\n{summary}"}
+    return [summary_msg] + tail, summary[:400]
+
+_MODEL_CTX_CACHE: dict = {}
+
+async def _model_context_window(model: str) -> int:
+    """Effective context window for auto-compaction. Local models: the agent
+    loop sends an explicit num_ctx of 16384, so that's the real budget even
+    when the model advertises more (fetched from Ollama's /api/show once and
+    cached). Cloud models: their provider's real window — big enough that
+    compaction almost never fires, but it's wired the same regardless."""
+    if "/" in model and model.split("/", 1)[0] in CLOUD_PROVIDERS:
+        return {"anthropic": 200_000, "openai": 128_000, "google": 1_000_000}.get(
+            model.split("/", 1)[0], 128_000)
+    if model in _MODEL_CTX_CACHE:
+        return _MODEL_CTX_CACHE[model]
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.post(f"{OLLAMA}/api/show", json={"name": model})
+            ctx = (r.json().get("details") or {}).get("context_length") or 16384
+    except Exception:
+        ctx = 16384
+    _MODEL_CTX_CACHE[model] = min(int(ctx), 16384)
+    return _MODEL_CTX_CACHE[model]
+
+class CompactRequest(BaseModel):
+    model: str
+    messages: list[dict] = []
+    keep_last: int = 6
+
+@app.post("/api/compact")
+async def compact_conversation(req: CompactRequest):
+    """opencode/Claude-Code-style context compaction: summarize everything
+    except the last `keep_last` messages into one dense summary message, and
+    return the replacement conversation. Tool call/result entries are folded
+    into the summarized transcript (their results matter to the summary, but
+    keeping them verbatim is exactly the context bloat compaction exists to
+    remove). The agent loop now also calls this automatically when a turn
+    approaches the model's window — this endpoint stays as the manual /compact."""
+    try:
+        new_msgs, summary = await _compact_conv(req.messages, req.keep_last, req.model)
+    except Exception as e:
+        raise HTTPException(502, f"Model error during compaction: {e}")
+    if summary is None:
+        return {"messages": new_msgs, "summary": "(conversation too short to compact)"}
+    return {"messages": new_msgs, "summary": summary}
+
+
+class TitleRequest(BaseModel):
+    model: str
+    text: str
+
+@app.post("/api/title")
+async def generate_title(req: TitleRequest):
+    """3-6 word conversation title (opencode/ChatGPT-style auto session names).
+    Deliberately tiny prompt, tiny max answer, and a hard strip of quotes/
+    markup so a chatty local model can't turn it into a paragraph."""
+    prompt = ("Write a 3-6 word title (no quotes, no punctuation at the ends, Title Case) "
+              "summarizing what this conversation is about. Respond with ONLY the title.\n\n"
+              + req.text[:3000])
+    try:
+        title = (await _llm_complete(req.model, [{"role": "user", "content": prompt}], timeout=60)).strip()
+    except Exception as e:
+        raise HTTPException(502, f"Model error: {e}")
+    title = title.strip('"\'` \n\r\t').split("\n")[0][:60]
+    if not title:
+        raise HTTPException(502, "Empty title")
+    return {"title": title}
+
+
 def build_system_prompt(base: str) -> str:
     # Local models otherwise have no way to know "today" and fall back to a
     # guess from their training data (confirmed live: asked for today's date
@@ -5345,13 +6833,69 @@ def build_system_prompt(base: str) -> str:
     skills = _load_json_list(SKILLS_FILE)
     if not skills:
         return base
-    directory = "\n".join(f"- {s['name']}: {s['description']}" for s in skills if s.get("name"))
+    # The library can hold 1000+ skills (imported collections live in
+    # skills/vendor/) — listing every one in the prompt would eat the local
+    # models' 16k window. Show a bounded, prioritized slice (manual > builtin
+    # > imported > auto, newest first) and hint the rest exist by name: the
+    # full library is always reachable through get_skill.
+    _prio = {"manual": 3, "builtin": 2, "": 2, "imported": 1}
+    ranked = sorted(
+        skills,
+        key=lambda s: (_prio.get(str(s.get("source", "")).split(":")[0], 1),
+                       str(s.get("created_at", "")), s.get("name", "")),
+        reverse=True)
+    agents = [s for s in ranked if s.get("kind") == "agent"][:40]
+    shown = [s for s in ranked if s.get("kind") != "agent"][:80]
+    directory = "\n".join(
+        f"- {s['name']}: {str(s.get('description', ''))[:160]}"
+        for s in shown if s.get("name"))
+    agent_dir = "\n".join(
+        f"- {s['name']}: {str(s.get('description', ''))[:160]}"
+        for s in agents if s.get("name"))
+    more = len(skills) - len(shown) - len(agents)
+    more_note = f"\n(and {more} more — call get_skill with an exact name if you know one)" if more > 0 else ""
+    agents_section = ""
+    if agent_dir:
+        agents_section = f"""
+
+Specialist subagents: call the task tool with {{"description": "...", "agent": "<exact name>"}} and that specialist's persona will drive a fresh subagent with the same tools (no sudo). Delegate to one whenever the request matches its specialty instead of doing it yourself.
+Available agents:
+{agent_dir}"""
     return f"""{base}
 
 You have access to a library of saved skills (reusable playbooks). If the user's request matches one, call the get_skill tool with its exact name to fetch full instructions before proceeding.
 
 Available skills:
-{directory}"""
+{directory}{more_note}{agents_section}"""
+
+
+def _relevant_skills_hint(text: str) -> str:
+    """Cheap keyword-overlap match between the user's request and the skill/
+    agent directory — surfaces the most relevant entries by name so the
+    model fetches (get_skill) or delegates (task agent=) without being told
+    to. No LLM call, just substring matching over names+descriptions."""
+    if not text:
+        return ""
+    skills = _load_json_list(SKILLS_FILE)
+    if len(skills) > 3000:
+        skills = skills[-3000:]
+    words = set(re.findall(r"[a-z][a-z0-9-]{2,}", text.lower()))
+    if not words:
+        return ""
+    scored = []
+    for s in skills:
+        hay = f"{s.get('name', '')} {s.get('description', '')}".lower()
+        if len(hay) < 5:
+            continue
+        score = sum(1 for w in words if w in hay)
+        if score >= 3:
+            scored.append((score, s.get("kind", "skill"), s.get("name", "")))
+    if not scored:
+        return ""
+    scored.sort(key=lambda x: -x[0])
+    lines = ["The request seems related to these library entries — fetch them (get_skill) before starting, or delegate to the agent ones (task with agent=):"]
+    lines += [f"- {name} ({kind})" for _, kind, name in scored[:3]]
+    return "\n".join(lines)
 
 
 # ── Routines: scheduled AI tasks ────────────────────────────────────────────────
