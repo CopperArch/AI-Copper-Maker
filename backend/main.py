@@ -2,6 +2,7 @@ import asyncio
 import base64
 import difflib
 import glob
+import hashlib
 import imaplib
 import json
 import os
@@ -2713,6 +2714,54 @@ async def search_models(q: str, provider: str = "all"):
             pass
 
     return {"results": results}
+
+@app.get("/api/models/check-update")
+async def check_model_update(model: str):
+    """Compares the installed build's digest against the Ollama registry's
+    current manifest digest for the same name:tag. Ollama tags are mutable —
+    publishers can republish a newer build under the same tag — so a digest
+    difference means the registry has a newer build than what's on disk.
+    Pulling the same name:tag again fetches the new build and replaces the
+    old weights in place (that's how the frontend's Update button works)."""
+    if not model:
+        raise HTTPException(400, "Missing model")
+    if "/" in model and model.split("/", 1)[0] in CLOUD_PROVIDERS:
+        raise HTTPException(400, "Cloud models can't be checked against the Ollama registry")
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        try:
+            r = await client.get(f"{OLLAMA}/api/tags")
+            local = next((m.get("digest") for m in r.json().get("models", [])
+                          if m.get("name") == model), None)
+        except Exception:
+            local = None
+    if not local:
+        raise HTTPException(404, "Model not installed locally")
+
+    # "ns/repo:tag" → registry path "ns/repo", tag; "repo:tag" → "library/repo"
+    if ":" in model.split("/")[-1]:
+        path, tag = model.rsplit(":", 1)
+    else:
+        path, tag = model, "latest"
+    if "/" not in path:
+        path = "library/" + path
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            rm = await client.get(
+                f"https://registry.ollama.ai/v2/{path}/manifests/{tag}",
+                headers={"Accept": "application/vnd.docker.distribution.manifest.v2+json, "
+                                   "application/vnd.oci.image.manifest.v1+json"})
+        if rm.status_code == 404:
+            # third-party repo deleted / never existed in the registry
+            return {"model": model, "update_available": False, "unknown": True}
+        rm.raise_for_status()
+        remote = hashlib.sha256(rm.content).hexdigest()
+    except Exception as e:
+        return {"model": model, "update_available": False, "error": str(e)[:200]}
+
+    return {"model": model, "update_available": remote != local,
+            "current_digest": local, "latest_digest": remote}
 
 @app.post("/api/models/pull")
 async def pull_model(req: PullRequest):

@@ -730,6 +730,10 @@
     align-items: baseline; gap: 10px;
   }
   .models-section-title span { font-size: 11px; font-weight: 400; color: var(--muted); }
+  .update-badge {
+    font-size: 11px; font-weight: 600; color: var(--warn);
+    padding: 2px 8px; border: 1px solid var(--warn); border-radius: 999px;
+  }
   .model-card {
     background: var(--surface); border: 1px solid var(--border);
     border-radius: 8px; padding: 14px 16px; margin-bottom: 10px;
@@ -1740,6 +1744,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('model-select').addEventListener('change', e => {
     localStorage.setItem('selectedModel', e.target.value);
     checkModelFit(e.target.value);
+    checkModelUpdates(e.target.value);
   });
 
   const input = document.getElementById('chat-input');
@@ -1988,8 +1993,56 @@ async function loadModels() {
     else if (prev && allModels.includes(prev)) sel.value = prev;
     renderModelsTab();
     checkModelFit(sel.value);
+    checkModelUpdates(sel.value);
   } catch {}
   loadModelContextLengths();
+}
+
+// ── Local model update checks (registry digest vs installed build) ────────────
+// Ollama tags are mutable — publishers can push a newer build under the same
+// name:tag. Once per model per session (or when the user switches to it), ask
+// the backend to compare the installed digest with the registry's current one;
+// if they differ, badge the card in Models → Local and offer a one-click update
+// (pulling the same name:tag replaces the old weights in place).
+
+let modelUpdates = {};            // model name → true (newer build in registry)
+let updateChecksDone = new Set(); // model names already checked this session
+
+function dismissedModelUpdates() {
+  try { return JSON.parse(localStorage.getItem('dismissedModelUpdates') || '{}'); }
+  catch { return {}; }
+}
+
+async function checkModelUpdates(model) {
+  if (!model || model.includes('/')) return;  // cloud models (provider/model) — not registry-backed
+  if (updateChecksDone.has(model)) return;
+  updateChecksDone.add(model);
+  try {
+    const r = await fetch(`${API}/api/models/check-update?model=${encodeURIComponent(model)}`);
+    if (!r.ok) return;
+    const d = await r.json();
+    if (d.error || d.unknown) return;
+    if (d.update_available) {
+      const dismissed = dismissedModelUpdates();
+      if (dismissed[model] === d.latest_digest) return;  // user already declined this exact build
+      modelUpdates[model] = true;
+      renderModelsTab();
+      showToast(`Update available for ${model} — a newer build is on the registry.`, 8000);
+    }
+  } catch {}
+}
+
+function dismissModelUpdate(model) {
+  fetch(`${API}/api/models/check-update?model=${encodeURIComponent(model)}`)
+    .then(r => r.ok ? r.json() : null)
+    .then(d => {
+      const dismissed = dismissedModelUpdates();
+      dismissed[model] = d?.latest_digest || 'unknown';
+      localStorage.setItem('dismissedModelUpdates', JSON.stringify(dismissed));
+      delete modelUpdates[model];
+      renderModelsTab();
+    })
+    .catch(() => { delete modelUpdates[model]; renderModelsTab(); });
 }
 
 // ── Token / context usage (sidebar, always visible) ──────────────────────────
@@ -3813,6 +3866,7 @@ function renderModelsTab() {
     const id = m.name.replace(/[:.\/]/g, '_');
     const sizeLabel = m.size_gb == null ? '' : m.size_gb >= 20 ? `${m.size_gb} GB — needs CPU offload` : `${m.size_gb} GB`;
     const providerBadge = `<span class="model-badge">${provider === 'lmstudio' ? 'LM Studio' : 'Ollama'}</span>`;
+    const updatable = provider === 'ollama' && modelUpdates[m.name];
     const ctx = provider === 'ollama' && modelContextLengths[m.name]
       ? `<div class="model-size">${(modelContextLengths[m.name] / 1024).toFixed(0)}k context</div>` : '';
     return `
@@ -3825,10 +3879,13 @@ function renderModelsTab() {
           <div class="pull-progress" id="progress-${id}"></div>
         </div>
         <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">
+          ${updatable ? '<span class="update-badge">⬆ Update available</span>' : ''}
           <span class="model-status ${installed ? '' : 'not-installed'}">${installed ? 'Installed' : 'Not installed'}</span>
           ${installed
             ? (provider === 'ollama'
-                ? `<button class="btn btn-accent btn-sm" onclick="useModel('${escHtml(m.name)}')">Use</button>
+                ? `${updatable ? `<button class="btn btn-accent btn-sm" onclick="pullModel('${escHtml(m.name)}', document.getElementById('progress-${escHtml(id)}'))">⬆ Update</button>
+                   <button class="btn btn-secondary btn-sm" onclick="dismissModelUpdate('${escHtml(m.name)}')" title="Skip this build">✕</button>` : ''}
+                   <button class="btn ${updatable ? 'btn-secondary' : 'btn-accent'} btn-sm" onclick="useModel('${escHtml(m.name)}')">Use</button>
                    <button class="btn btn-secondary btn-sm" onclick="deleteModel('${escHtml(m.name)}')">Remove</button>`
                 : `<span style="font-size:11px;color:var(--muted)" title="Chat/Agent only talks to Ollama models right now">Installed in LM Studio</span>`)
             : `<button class="btn btn-accent btn-sm" onclick="pullModel('${escHtml(m.name)}', document.getElementById('progress-${escHtml(id)}'), '${provider}')">Pull</button>`
@@ -4054,6 +4111,10 @@ async function pullModel(modelName, progressEl, provider = 'ollama') {
       progressEl.innerHTML = `<span style="color:var(--danger)">Error: ${escHtml(errorMsg)}</span>`;
     } else {
       progressEl.innerHTML = '<span style="color:var(--accent)">✓ Download complete</span>';
+      delete modelUpdates[modelName];   // fresh build pulled — no update pending anymore
+      const dismissed = dismissedModelUpdates();
+      delete dismissed[modelName];
+      localStorage.setItem('dismissedModelUpdates', JSON.stringify(dismissed));
     }
     await loadModels();
   } catch (err) {
