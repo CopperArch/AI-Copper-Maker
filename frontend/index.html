@@ -725,6 +725,11 @@
   .models-panel { padding: 24px; overflow-y: auto; max-width: 860px; }
   .models-panel h2 { font-size: 18px; font-weight: 600; margin-bottom: 6px; }
   .models-panel p { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+  .models-section-title {
+    font-size: 13px; font-weight: 600; margin: 18px 0 10px; display: flex;
+    align-items: baseline; gap: 10px;
+  }
+  .models-section-title span { font-size: 11px; font-weight: 400; color: var(--muted); }
   .model-card {
     background: var(--surface); border: 1px solid var(--border);
     border-radius: 8px; padding: 14px 16px; margin-bottom: 10px;
@@ -1333,13 +1338,10 @@
         <div class="catalog-toolbar">
           <input type="text" id="catalog-search" placeholder="Search models..." oninput="renderModelsTab()">
           <div class="catalog-filters">
-            <button class="filter-btn active" onclick="setCatalogFilter('all', this)">All</button>
-            <button class="filter-btn" onclick="setCatalogFilter('coding', this)">Coding</button>
-            <button class="filter-btn" onclick="setCatalogFilter('general', this)">General</button>
-            <button class="filter-btn" onclick="setCatalogFilter('vision', this)">Vision</button>
+            <button class="filter-btn active" onclick="setCatalogFilter('local', this)">Local</button>
             <button class="filter-btn" onclick="setCatalogFilter('uncensored', this)">Uncensored</button>
-            <button class="filter-btn" onclick="setCatalogFilter('small', this)">&lt; 4 GB</button>
-            <button class="filter-btn" onclick="setCatalogFilter('installed', this)">Installed</button>
+            <button class="filter-btn" onclick="setCatalogFilter('free', this)">Free</button>
+            <button class="filter-btn" onclick="setCatalogFilter('paid', this)">Paid</button>
           </div>
         </div>
 
@@ -1674,7 +1676,8 @@ let lastAnalyzerAppName = '';
 let lastAnalyzerFeatures = [];
 let pendingApkContext = '';
 let catalog = [];
-let catalogFilter = 'all';
+let catalogFilter = 'local';
+let cloudModelDetails = [];   // /api/models/cloud/details — paid section cards
 let suggestedModel = null;
 let ramInfo = null;
 let ramInfoTime = 0;
@@ -3768,6 +3771,11 @@ async function loadCatalog() {
     checkModelFit(document.getElementById('model-select').value);
   } catch { catalog = []; }
   try {
+    const r = await fetch(`${API}/api/models/cloud/details`);
+    cloudModelDetails = (await r.json()).models || [];
+    renderModelsTab();
+  } catch { cloudModelDetails = []; }
+  try {
     const ram = await getRAMInfo();
     const note = document.getElementById('models-ram-note');
     if (note && ram.total_gb) note.textContent = `This machine has ${ram.total_gb} GB RAM (${ram.available_gb} GB free).`;
@@ -3782,64 +3790,132 @@ function setCatalogFilter(filter, btn) {
   renderModelsTab();
 }
 
+// opencode-style sectioned model browser: Local / Uncensored / Free / Paid.
+const UNCENSORED_RE = /abliterat|uncensor|dolphin|unaligned|euryale|mythomax|noromaid/i;
+
 function renderModelsTab() {
+  const el = document.getElementById('catalog-list');
+  if (!el) return;
   const search = (document.getElementById('catalog-search')?.value || '').toLowerCase();
-  const isInstalled = (name, provider) => {
+  const matchesSearch = (name, desc = '') =>
+    !search || name.toLowerCase().includes(search) || (desc || '').toLowerCase().includes(search);
+  const isInstalled = (name, provider = 'ollama') => {
     const list = provider === 'lmstudio' ? installedModelsLmstudio : installedModels;
     return list.some(im => im === name || im.startsWith(name.split(':')[0] + ':'));
   };
 
-  let items = catalog.filter(m => {
-    if (catalogFilter === 'small')     return m.size_gb < 4;
-    if (catalogFilter === 'installed') return isInstalled(m.name, m.provider);
-    if (catalogFilter !== 'all')       return m.category === catalogFilter;
-    return true;
-  }).filter(m => !search || m.name.toLowerCase().includes(search) || m.desc.toLowerCase().includes(search));
+  const sectionTitle = (icon, title, sub) =>
+    `<h3 class="models-section-title">${icon} ${title}<span>${sub}</span></h3>`;
 
-  // Prepend any installed models not in the catalog (custom pulls)
-  if (catalogFilter === 'installed' || catalogFilter === 'all') {
-    const catalogNames = new Set(catalog.map(m => m.name));
-    const extra = installedModels
-      .filter(n => !catalogNames.has(n) && (!search || n.toLowerCase().includes(search)))
-      .map(n => ({ name: n, desc: 'Custom / unlisted model', size_gb: null, category: 'general' }));
-    if (catalogFilter === 'installed') items = [...extra, ...items];
-    else items = [...items, ...extra];
-  }
-
-  const el = document.getElementById('catalog-list');
-  if (!el) return;
-
-  if (!items.length) {
-    el.innerHTML = '<p style="font-size:13px;color:var(--muted)">No models match your search.</p>';
-    return;
-  }
-
-  el.innerHTML = items.map(m => {
+  const card = (m) => {
     const provider = m.provider || 'ollama';
     const installed = isInstalled(m.name, provider);
     const id = m.name.replace(/[:.\/]/g, '_');
     const sizeLabel = m.size_gb == null ? '' : m.size_gb >= 20 ? `${m.size_gb} GB — needs CPU offload` : `${m.size_gb} GB`;
     const providerBadge = `<span class="model-badge">${provider === 'lmstudio' ? 'LM Studio' : 'Ollama'}</span>`;
+    const ctx = provider === 'ollama' && modelContextLengths[m.name]
+      ? `<div class="model-size">${(modelContextLengths[m.name] / 1024).toFixed(0)}k context</div>` : '';
     return `
       <div class="model-card" id="card-${id}">
         <div class="model-info">
           <div class="model-name">${escHtml(m.name)} ${providerBadge}</div>
           <div class="model-desc">${escHtml(m.desc)}</div>
           ${sizeLabel ? `<div class="model-size">${escHtml(sizeLabel)}</div>` : ''}
+          ${ctx}
           <div class="pull-progress" id="progress-${id}"></div>
         </div>
         <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">
           <span class="model-status ${installed ? '' : 'not-installed'}">${installed ? 'Installed' : 'Not installed'}</span>
           ${installed
             ? (provider === 'ollama'
-                ? `<button class="btn btn-accent btn-sm" onclick="useModel('${m.name}')">Use</button>
-                   <button class="btn btn-secondary btn-sm" onclick="deleteModel('${m.name}')">Remove</button>`
+                ? `<button class="btn btn-accent btn-sm" onclick="useModel('${escHtml(m.name)}')">Use</button>
+                   <button class="btn btn-secondary btn-sm" onclick="deleteModel('${escHtml(m.name)}')">Remove</button>`
                 : `<span style="font-size:11px;color:var(--muted)" title="Chat/Agent only talks to Ollama models right now">Installed in LM Studio</span>`)
-            : `<button class="btn btn-accent btn-sm" onclick="pullModel('${m.name}', document.getElementById('progress-${id}'), '${provider}')">Pull</button>`
+            : `<button class="btn btn-accent btn-sm" onclick="pullModel('${escHtml(m.name)}', document.getElementById('progress-${escHtml(id)}'), '${provider}')">Pull</button>`
           }
         </div>
       </div>`;
-  }).join('');
+  };
+
+  const emptyNote = (msg) =>
+    `<p style="font-size:13px;color:var(--muted)">${msg}</p>`;
+  let html = '';
+
+  if (catalogFilter === 'local') {
+    const catalogByName = new Map(catalog.map(c => [c.name, c]));
+    const rows = [];
+    for (const n of installedModels) {
+      const c = catalogByName.get(n) || catalog.find(c => n.startsWith(c.name.split(':')[0] + ':')) || {};
+      rows.push({ name: n, desc: c.desc || 'Custom / unlisted model', size_gb: c.size_gb ?? null, category: c.category || 'general', provider: 'ollama' });
+    }
+    for (const n of installedModelsLmstudio) {
+      rows.push({ name: n, desc: 'LM Studio model (local, on this machine)', size_gb: null, category: 'general', provider: 'lmstudio' });
+    }
+    const filtered = rows.filter(r => matchesSearch(r.name, r.desc));
+    html += sectionTitle('💾', 'Local', 'installed on this machine — private, no per-token cost');
+    html += filtered.length
+      ? filtered.map(card).join('')
+      : emptyNote('No local models installed yet — pull one from Free or Uncensored.');
+  }
+
+  else if (catalogFilter === 'uncensored') {
+    const rows = [];
+    for (const n of installedModels) {
+      if (UNCENSORED_RE.test(n)) {
+        const c = catalog.find(c => c.name === n) || {};
+        rows.push({ name: n, desc: c.desc || 'Uncensored model (installed)', size_gb: c.size_gb ?? null, category: 'uncensored', provider: 'ollama' });
+      }
+    }
+    for (const c of catalog) {
+      if (c.category === 'uncensored' && !rows.some(r => r.name === c.name))
+        rows.push({ ...c });
+    }
+    const filtered = rows.filter(r => matchesSearch(r.name, r.desc));
+    html += sectionTitle('🔓', 'Uncensored', 'abliterated / no-refusal models — installed ones and pull-able picks');
+    html += filtered.length
+      ? filtered.map(card).join('')
+      : emptyNote('No uncensored models match — try "Search Online" below for abliterated variants.');
+  }
+
+  else if (catalogFilter === 'free') {
+    const rows = catalog.filter(c => c.category !== 'uncensored');
+    const filtered = rows.filter(r => matchesSearch(r.name, r.desc));
+    html += sectionTitle('🆓', 'Free', 'open-weight models — free to download, free to run, yours forever');
+    html += filtered.length
+      ? filtered.map(card).join('')
+      : emptyNote('No catalog models match your search.');
+  }
+
+  else if (catalogFilter === 'paid') {
+    html += sectionTitle('💳', 'Paid', 'cloud providers — metered per million tokens, budget-capped');
+    const rows = cloudModelDetails.filter(r => matchesSearch(`${r.provider} ${r.model}`));
+    html += rows.length
+      ? rows.map(r => `
+        <div class="model-card">
+          <div class="model-info">
+            <div class="model-name">${escHtml(r.label)} <span class="model-badge">${escHtml(r.model)}</span></div>
+            <div class="model-desc">≈$${r.input_per_mtok?.toFixed(2) ?? '—'} in / $${r.output_per_mtok?.toFixed(2) ?? '—'} out per 1M tokens</div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">
+            <span class="model-status ${r.configured ? '' : 'not-installed'}">${r.configured ? 'Key configured' : 'No API key'}</span>
+            ${r.configured
+              ? `<button class="btn btn-accent btn-sm" onclick="useCloudModel('${escHtml(r.provider + '/' + r.model)}')">Use</button>`
+              : `<span style="font-size:11px;color:var(--muted)">Add a key below ↓</span>`}
+          </div>
+        </div>`).join('')
+      : emptyNote('No cloud models match your search.');
+  }
+
+  el.innerHTML = html;
+}
+
+function useCloudModel(name) {
+  const sel = document.getElementById('model-select');
+  if ([...sel.options].some(o => o.value === name)) {
+    sel.value = name;
+    localStorage.setItem('selectedModel', name);
+    switchTab('chat');
+  }
 }
 
 async function renderCloudProviders() {

@@ -2861,6 +2861,21 @@ async def list_cloud_models():
     keys = _load_api_keys()
     return {"models": [f"{p}/{meta['default_model']}" for p, meta in CLOUD_PROVIDERS.items() if keys.get(p)]}
 
+@app.get("/api/models/cloud/details")
+async def cloud_model_details():
+    """Cards for the Models tab's Paid section: per-provider default model,
+    key status, and the estimated per-million-token rates from PRICING."""
+    keys = _load_api_keys()
+    out = []
+    for p, meta in CLOUD_PROVIDERS.items():
+        rates = PRICING.get(p, {}).get(meta["default_model"]) or PRICING.get(p, {}).get("default", {})
+        out.append({
+            "provider": p, "label": meta["label"], "model": meta["default_model"],
+            "configured": bool(keys.get(p)),
+            "input_per_mtok": rates.get("input"), "output_per_mtok": rates.get("output"),
+        })
+    return {"models": out}
+
 
 def _messages_for_cloud(messages: list, slim: bool = False) -> list:
     """None of the three cloud calls below use that provider's native
