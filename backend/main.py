@@ -101,6 +101,24 @@ CLOUD_PROVIDERS = {
     "openrouter": {"label": "OpenRouter (any model)", "default_model": "anthropic/claude-sonnet-4.5"},
 }
 
+# OpenRouter proxies hundreds of models behind one key/endpoint, unlike the
+# other providers here which each expose one fixed default_model — the Paid
+# section's OpenRouter card lets the user pick from this curated list instead
+# of being stuck on a single hardcoded model. The choice persists in
+# config.json ("openrouter_model") so it survives a reload/poll rather than
+# resetting to the hardcoded default.
+OPENROUTER_MODEL_CHOICES = [
+    {"model": "anthropic/claude-sonnet-4.5", "label": "Claude Sonnet 4.5"},
+    {"model": "anthropic/claude-opus-4", "label": "Claude Opus 4"},
+    {"model": "openai/gpt-4o", "label": "GPT-4o"},
+    {"model": "openai/gpt-4o-mini", "label": "GPT-4o mini"},
+    {"model": "deepseek/deepseek-chat", "label": "DeepSeek V3 (deepseek-chat)"},
+    {"model": "deepseek/deepseek-r1", "label": "DeepSeek R1 (reasoning)"},
+]
+
+def _openrouter_model() -> str:
+    return load_config().get("openrouter_model") or CLOUD_PROVIDERS["openrouter"]["default_model"]
+
 # ── Cloud-model pricing + spend tracking ──────────────────────────────────────
 # USD per MILLION tokens, from each provider's published price page. "cache_read"
 # is the discounted rate for tokens served from a prompt cache (Anthropic prompt
@@ -139,6 +157,8 @@ PRICING = {
         "anthropic/claude-opus-4": {"input": 15.0, "output": 75.0, "cache_read": 1.50, "cache_write": 18.75},
         "openai/gpt-4o": {"input": 2.50, "output": 10.0, "cache_read": 1.25},
         "openai/gpt-4o-mini": {"input": 0.15, "output": 0.60, "cache_read": 0.075},
+        "deepseek/deepseek-chat": {"input": 0.27, "output": 1.10, "cache_read": 0.07},
+        "deepseek/deepseek-r1": {"input": 0.55, "output": 2.19, "cache_read": 0.14},
     },
 }
 
@@ -3302,26 +3322,51 @@ async def set_expo_key(req: ExpoTokenRequest):
     _save_api_keys(keys)
     return {"ok": True}
 
+def _cloud_model_for(provider: str, meta: dict) -> str:
+    return _openrouter_model() if provider == "openrouter" else meta["default_model"]
+
 @app.get("/api/models/cloud")
 async def list_cloud_models():
     """Only lists a provider's model as usable once a key is actually
     configured for it — no point offering a model the app can't call."""
     keys = _load_api_keys()
-    return {"models": [f"{p}/{meta['default_model']}" for p, meta in CLOUD_PROVIDERS.items() if keys.get(p)]}
+    return {"models": [f"{p}/{_cloud_model_for(p, meta)}" for p, meta in CLOUD_PROVIDERS.items() if keys.get(p)]}
 
 @app.get("/api/models/cloud/details")
 async def cloud_model_details():
-    """Cards for the Models tab's Paid section: per-provider default model,
-    key status, and the estimated per-million-token rates from PRICING."""
+    """Cards for the Models tab's Paid section: per-provider default model
+    (the user's persisted pick for OpenRouter, since it isn't fixed to one
+    model like the others), key status, and the estimated per-million-token
+    rates. OpenRouter's rate (both for the currently-selected model and every
+    option in `models`, the curated picker list) comes from OpenRouter's own
+    live pricing API rather than the hardcoded PRICING table — those numbers
+    drift (see _openrouter_live_pricing's docstring) and OpenRouter is the one
+    provider here with a public endpoint that reports current prices
+    directly. The other providers stay on PRICING (their published price
+    pages), same as before."""
     keys = _load_api_keys()
+    live_prices = await _openrouter_live_pricing()
     out = []
     for p, meta in CLOUD_PROVIDERS.items():
-        rates = PRICING.get(p, {}).get(meta["default_model"]) or PRICING.get(p, {}).get("default", {})
-        out.append({
-            "provider": p, "label": meta["label"], "model": meta["default_model"],
+        model = _cloud_model_for(p, meta)
+        if p == "openrouter":
+            rates = live_prices.get(model) or PRICING.get(p, {}).get(model) or PRICING.get(p, {}).get("default", {})
+        else:
+            rates = PRICING.get(p, {}).get(model) or PRICING.get(p, {}).get("default", {})
+        entry = {
+            "provider": p, "label": meta["label"], "model": model,
             "configured": bool(keys.get(p)),
             "input_per_mtok": rates.get("input"), "output_per_mtok": rates.get("output"),
-        })
+        }
+        if p == "openrouter":
+            entry["models"] = [
+                {**choice, **({"input_per_mtok": live_prices[choice["model"]]["input"],
+                               "output_per_mtok": live_prices[choice["model"]]["output"],
+                               "is_free": live_prices[choice["model"]]["is_free"]}
+                              if choice["model"] in live_prices else {"is_free": choice["model"].endswith(":free")})}
+                for choice in OPENROUTER_MODEL_CHOICES
+            ]
+        out.append(entry)
     return {"models": out}
 
 
@@ -3371,12 +3416,113 @@ async def _fetch_openrouter_models() -> list:
     return []
 
 
+OPENROUTER_PRICING_CACHE_FILE = Path(__file__).parent.parent / "openrouter_pricing_cache.json"
+OPENROUTER_PRICING_CACHE_TTL = 86400  # 24h — matches the rankings cache below
+
+async def _openrouter_live_pricing() -> dict:
+    """Per-token prices hand-typed into PRICING drift out of date (caught one
+    on the DeepSeek entries added alongside this: input was off by ~8%, output
+    by ~14%, against OpenRouter's own public API). This fetches that API —
+    unauthenticated, no key needed — and caches the result for
+    OPENROUTER_PRICING_CACHE_TTL so every request doesn't refetch it, but a
+    session that runs longer than that always picks up current prices rather
+    than trusting a hardcoded number indefinitely. Returns {model_id:
+    {"input": $/Mtok, "output": $/Mtok, "is_free": bool}}."""
+    try:
+        if OPENROUTER_PRICING_CACHE_FILE.exists():
+            cached = json.loads(OPENROUTER_PRICING_CACHE_FILE.read_text())
+            if time.time() - cached.get("fetched_at", 0) < OPENROUTER_PRICING_CACHE_TTL:
+                return cached["prices"]
+    except Exception:
+        pass
+
+    models = await _fetch_openrouter_models()
+    prices = {}
+    for m in models:
+        mid = m.get("id")
+        pricing = m.get("pricing") or {}
+        try:
+            input_ppm = float(pricing.get("prompt", 0)) * 1_000_000
+            output_ppm = float(pricing.get("completion", 0)) * 1_000_000
+        except (TypeError, ValueError):
+            continue
+        if mid:
+            prices[mid] = {"input": round(input_ppm, 4), "output": round(output_ppm, 4),
+                            "is_free": input_ppm == 0 and output_ppm == 0}
+
+    if prices:  # don't overwrite a good cache with an empty one from a failed fetch
+        try:
+            OPENROUTER_PRICING_CACHE_FILE.write_text(json.dumps({"fetched_at": time.time(), "prices": prices}))
+        except Exception:
+            pass
+    return prices
+
+
+
+# Public, stable domain knowledge about which model FAMILIES are strongest at
+# code generation — used as a fallback signal for models the curated CATALOG
+# entry doesn't label "coding" (paid frontier models have no CATALOG entry at
+# all; a custom/unlisted Ollama pull won't match one either). Matched by
+# substring against the lowercased model name, first match wins, ordered
+# most-specific first. These are relative tiers (0-1), not literal benchmark
+# scores — SWE-bench/HumanEval standings shift with every release, this only
+# needs to stay roughly right and be easy to extend as new families ship.
+_CODING_FAMILY_TIERS = [
+    ("coder", 1.0), ("codestral", 1.0), ("starcoder", 1.0), ("deepseek-coder", 1.0),
+    ("qwen2.5-coder", 1.0), ("qwen3-coder", 1.0), ("codegemma", 0.95), ("codellama", 0.9),
+    ("opus", 0.95), ("sonnet", 0.9), ("claude", 0.85),
+    ("deepseek-r1", 0.85), ("deepseek-v3", 0.8), ("deepseek", 0.75),
+    ("gpt-5", 0.9), ("gpt-4.1", 0.85), ("gpt-4o", 0.75), ("o1", 0.85), ("o3", 0.88),
+    ("qwen3", 0.65), ("qwen2.5", 0.6),
+    ("gemini-2.5-pro", 0.75), ("gemini", 0.6),
+    ("llama-3.3", 0.55), ("llama", 0.45),
+]
+_CODING_KEYWORDS = {"coding", "programming", "software engineering", "agentic coding",
+                     "agentic workflows", "terminal tasks", "code generation"}
+
+def _coding_score(name: str, catalog_entry: dict | None = None) -> float:
+    """0-1 estimate of how strong a model is at writing code — the primary
+    signal every /api/models/rankings section is now weighted on. Prefers the
+    curated CATALOG's own category/good_at (more specific than a name guess)
+    and falls back to the family-tier table above for anything not in it."""
+    if catalog_entry:
+        if catalog_entry.get("category") == "coding":
+            return 1.0
+        good_at = " ".join(catalog_entry.get("good_at", [])).lower()
+        if any(kw in good_at for kw in _CODING_KEYWORDS):
+            return 0.75
+        if catalog_entry.get("category") == "reasoning":
+            return 0.5
+    lname = name.lower()
+    for keyword, tier in _CODING_FAMILY_TIERS:
+        if keyword in lname:
+            return tier
+    return 0.2  # unknown model — small non-zero baseline, not a hard zero
+
+def _catalog_entry_for(name: str) -> dict | None:
+    """Same name/family matching the frontend already does for installed-vs-
+    catalog cross-referencing (renderModelsTab's `card()`), mirrored here so
+    an installed model like "qwen2.5-coder:14b" still finds the catalog's
+    "qwen2.5-coder:7b" entry and inherits its category/good_at."""
+    for c in CATALOG:
+        if c["name"] == name:
+            return c
+    base = name.split(":")[0]
+    for c in CATALOG:
+        if c["name"].split(":")[0] == base:
+            return c
+    return None
+
+RANKINGS_CACHE_VERSION = 2  # bump whenever the scoring formula changes, so a stale on-disk cache from before that change doesn't keep serving old ranks for up to 24h
+
 @app.get("/api/models/rankings")
 async def list_model_rankings():
-    """Return ranked positions for models in each section (Local / Free / Paid),
-    computed from multiple independent sources: Ollama pull counts, HuggingFace
-    downloads/likes, and OpenRouter provider signals.  Includes rank #, score,
-    and source list per model so the UI can sort and display badges."""
+    """Return ranked positions for models in each section (Local / Free / Paid).
+    Coding ability (_coding_score) is the dominant weight in every section —
+    everything else here (Ollama pull counts, HuggingFace downloads/likes,
+    OpenRouter price/recency/context signals) is a smaller tie-breaker on top
+    of it. Includes rank #, score, and source list per model so the UI can
+    sort and display badges."""
     import json, time, re
     from pathlib import Path
 
@@ -3385,7 +3531,7 @@ async def list_model_rankings():
     if cache_file.exists():
         try:
             data = json.loads(cache_file.read_text())
-            if time.time() - data.get("fetched_at", 0) < 86400:
+            if data.get("cache_version") == RANKINGS_CACHE_VERSION and time.time() - data.get("fetched_at", 0) < 86400:
                 cached = data
         except Exception:
             pass
@@ -3413,9 +3559,12 @@ async def list_model_rankings():
         pulls = await _fetch_ollama_pulls(name)
         # context_length from details
         ctx = (m.get("details") or {}).get("context_length") or 0
+        popularity = min(pulls / 10000, 1.0) if pulls else 0.0
+        coding = _coding_score(name, _catalog_entry_for(name))
         local_models.append({
             "name": name,
-            "score": min(pulls / 10000, 1.0) if pulls else 0.0,  # normalize to 0-1
+            "score": round(0.7 * coding + 0.3 * popularity, 3),
+            "coding_score": round(coding, 3),
             "pulls": pulls,
             "sources": ["ollama"],
             "context_length": ctx,
@@ -3428,19 +3577,22 @@ async def list_model_rankings():
         if c.get("category") not in ("uncensored", "paid"):
             # Augment with HF downloads/likes
             hf = await _fetch_hf_model_meta(c.get("hf_id", c["name"]))
-            score = 0.0
+            popularity = 0.0
             if hf["downloads"] > 0:
-                score += 0.4 * min(hf["downloads"] / 500000, 1.0)
+                popularity += 0.4 * min(hf["downloads"] / 500000, 1.0)
             if hf["likes"] > 0:
-                score += 0.2 * min(hf["likes"] / 5000, 1.0)
+                popularity += 0.2 * min(hf["likes"] / 5000, 1.0)
             # also add a small ollama-pull boost if the model appears in Ollama
             ollama_boost = next((m["score"] for m in local_models if m["name"] == c["name"]), 0)
-            score += 0.4 * ollama_boost
-            score = min(score, 1.0)
+            popularity += 0.4 * ollama_boost
+            popularity = min(popularity, 1.0)
+            coding = _coding_score(c["name"], c)
+            score = round(0.6 * coding + 0.4 * popularity, 3)
             free_models.append({
                 "name": c["name"],
                 "desc": c.get("desc", ""),
                 "score": score,
+                "coding_score": round(coding, 3),
                 "sources": ["hf"] + (["ollama"] if ollama_boost > 0 else []),
                 "hf_downloads": hf["downloads"],
                 "hf_likes": hf["likes"],
@@ -3455,13 +3607,24 @@ async def list_model_rankings():
     or_by_id = {m.get("id"): m for m in or_data}
     for p, meta in CLOUD_PROVIDERS.items():
         configured = bool(keys.get(p))
-        default_model = meta["default_model"]
+        default_model = _cloud_model_for(p, meta)
         # OpenRouter provides per-model data; use default model's tier signals
         or_model = or_by_id.get(default_model)
         if or_model:
             # Signals: context length, pricing tier, recency (created)
             ctx = or_model.get("context_length", 0)
             pricing = or_model.get("pricing", {})
+            # input_r/output_r assigned here too (previously only in the else
+            # branch) — Python locals are function-scoped, so leaving them
+            # unset here meant this branch silently reused whatever the
+            # PREVIOUS provider in the loop had last set them to. Confirmed
+            # live: openrouter's cached entry was showing google's $0.10/$0.40
+            # rate (the provider immediately before it in CLOUD_PROVIDERS).
+            try:
+                input_r = float(pricing.get("prompt", 0)) * 1_000_000
+                output_r = float(pricing.get("completion", 0)) * 1_000_000
+            except (TypeError, ValueError):
+                input_r = output_r = 0
             # Simple scoring: newer + cheaper + larger context = higher rank
             recency = 0
             if "created" in or_model:
@@ -3474,7 +3637,7 @@ async def list_model_rankings():
             # Normalize: inverse price (cheaper higher), recency, context size
             price_score = max(0, 1 - min(tier / 100, 1))  # cheaper = higher score
             ctx_score = min(ctx / 100_000, 1.0) if ctx else 0.0  # context up to 100k tokens
-            score = 0.4 * price_score + 0.3 * recency + 0.3 * ctx_score
+            secondary_score = 0.4 * price_score + 0.3 * recency + 0.3 * ctx_score
         else:
             # No OpenRouter data; fallback to PRICING-only estimate
             rates = PRICING.get(p, {}).get(default_model) or PRICING.get(p, {}).get("default", {})
@@ -3482,12 +3645,15 @@ async def list_model_rankings():
             output_r = rates.get("output", 0)
             # Cheaper models rank higher: normalize by inverse cost
             price_score = max(0, 1 - (input_r + output_r) / 50)  # $50 threshold
-            score = 0.7 * price_score + 0.3 * (1 if configured else 0)
+            secondary_score = 0.7 * price_score + 0.3 * (1 if configured else 0)
+        coding = _coding_score(default_model)
+        score = round(0.7 * coding + 0.3 * secondary_score, 3)
         paid_models.append({
             "name": default_model,
             "provider": p,
             "label": meta["label"],
-            "score": round(score, 3),
+            "score": score,
+            "coding_score": round(coding, 3),
             "sources": ["openrouter"] if or_model else ["pricing"],
             "configured": configured,
             "input_per_mtok": input_r,
@@ -3503,7 +3669,7 @@ async def list_model_rankings():
 
     # Cache for 24h
     try:
-        cached_json = {"rankings": rankings, "fetched_at": time.time()}
+        cached_json = {"rankings": rankings, "fetched_at": time.time(), "cache_version": RANKINGS_CACHE_VERSION}
         cache_file.write_text(json.dumps(cached_json))
     except Exception:
         pass
@@ -5917,7 +6083,7 @@ def _test_imap_login(host: str, port: int, username: str, password: str) -> None
     """Raises with the real IMAP error on failure. Runs in a worker thread —
     imaplib is blocking — so the add-account request doesn't stall the event
     loop while it connects."""
-    with imaplib.IMAP4_SSL(host, port) as imap:
+    with imaplib.IMAP4_SSL(host, port, timeout=30) as imap:
         imap.login(username, password)
 
 @app.post("/api/email/accounts")
@@ -6022,7 +6188,7 @@ def _imap_login(imap: imaplib.IMAP4_SSL, account: dict, access_token: str = ""):
 
 def _imap_fetch(account: dict, folder: str, limit: int, access_token: str = "") -> list:
     messages = []
-    with imaplib.IMAP4_SSL(account["imap_host"], account.get("imap_port", 993)) as imap:
+    with imaplib.IMAP4_SSL(account["imap_host"], account.get("imap_port", 993), timeout=30) as imap:
         _imap_login(imap, account, access_token)
         imap.select(folder or "INBOX")
         status, data = imap.search(None, "ALL")
@@ -6058,7 +6224,7 @@ async def get_email_messages(account_id: str, folder: str = "INBOX", limit: int 
 
 
 def _imap_delete(account: dict, folder: str, uid: str, access_token: str = ""):
-    with imaplib.IMAP4_SSL(account["imap_host"], account.get("imap_port", 993)) as imap:
+    with imaplib.IMAP4_SSL(account["imap_host"], account.get("imap_port", 993), timeout=30) as imap:
         _imap_login(imap, account, access_token)
         imap.select(folder or "INBOX")
         imap.store(uid, "+FLAGS", "\\Deleted")
@@ -6078,7 +6244,7 @@ async def delete_email_message(account_id: str, uid: str, folder: str = "INBOX")
 def _imap_count_new(account: dict, last_seen_uid, access_token: str = "") -> tuple:
     """Cheap poll: just counts UIDs greater than the last one we saw, no
     fetch of message bodies. Returns (new_count, latest_uid_str)."""
-    with imaplib.IMAP4_SSL(account["imap_host"], account.get("imap_port", 993)) as imap:
+    with imaplib.IMAP4_SSL(account["imap_host"], account.get("imap_port", 993), timeout=30) as imap:
         _imap_login(imap, account, access_token)
         imap.select("INBOX")
         status, data = imap.search(None, "ALL")

@@ -1269,6 +1269,7 @@
           <div class="runner-toolbar">
             <h2>🤖 Agent Mode</h2>
             <span style="font-size:12px;color:var(--muted)">Autonomous agent with tool access: code execution, web search, file ops, image gen</span>
+            <button class="btn btn-secondary btn-sm" onclick="newAgentConversation()" style="margin-left:auto" title="Start a fresh agent task — past ones stay in the sidebar">+ New Agent Task</button>
           </div>
           <div id="agent-conversation" style="flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:12px;padding:12px 0">
             <div class="analyze-placeholder" id="agent-placeholder">
@@ -1861,6 +1862,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (e.target.classList.contains('conv-menu-btn')) {
       e.stopPropagation();
       toggleConvMenu(e.target.dataset.cid, e.target);
+    } else if (item.dataset.mode === 'agent') {
+      loadAgentConversation(item.dataset.cid);
     } else {
       loadConversation(item.dataset.cid);
     }
@@ -2070,6 +2073,15 @@ async function loadModels() {
 
 let modelUpdates = {};            // model name → true (newer build in registry)
 let updateChecksDone = new Set(); // model names already checked this session
+
+// In-flight model pulls, keyed by the same id `card()` uses for element ids
+// (model name with :./ stripped). renderModelsTab() re-renders the whole
+// catalog list on every 15s status poll, search keystroke, and update check —
+// each re-render used to blank out the pull-progress div and orphan the
+// elements pullModel() was writing to, making an active download's progress
+// bar silently vanish before it finished. Keeping the live state here lets
+// card() repaint it on every re-render instead of resetting to empty.
+let activePulls = {}; // id → { status, pct, error, cancelled, controller }
 
 function dismissedModelUpdates() {
   try { return JSON.parse(localStorage.getItem('dismissedModelUpdates') || '{}'); }
@@ -2372,6 +2384,10 @@ function newConversation() {
 
 function loadConversation(id) {
   currentConvId = id;
+  // The sidebar now lists Agent-tab conversations alongside Chat ones (both
+  // share this list), so a click here may be arriving from a different tab —
+  // switch back to Chat, matching loadAgentConversation()'s equivalent switch.
+  switchTab('chat');
   renderConvList();
   renderMessages();
   const conv = conversations.find(c => c.id === id);
@@ -2391,11 +2407,16 @@ function loadConversation(id) {
 function deleteConversation(id) {
   const conv = conversations.find(c => c.id === id);
   if (conv && !confirm(`Delete "${conv.title}"? This can't be undone.`)) return;
+  if (conv?.mode === 'agent' && id === currentAgentConvId && agentAbortController) {
+    alert('This agent task is still running — stop it before deleting.');
+    return;
+  }
   const stream = activeStreams.get(id);
   if (stream && stream.abortController) stream.abortController.abort();
   turnQueues.delete(id);
   conversations = conversations.filter(c => c.id !== id);
   if (currentConvId === id) { currentConvId = null; renderMessages(); }
+  if (currentAgentConvId === id) { currentAgentConvId = null; renderAgentMessages(); }
   saveConvs();
   renderConvList();
 }
@@ -2484,12 +2505,18 @@ function renderConvList() {
     list.innerHTML = '<div style="padding:12px;font-size:12px;color:var(--muted);text-align:center">No conversations yet</div>';
     return;
   }
-  list.innerHTML = conversations.map(c => `
-    <div class="conv-item ${c.id === currentConvId ? 'active' : ''}" data-cid="${c.id}">
-      <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${activeStreams.has(c.id) ? '<span class="conv-streaming-dot" title="Still working…"></span>' : '💬'} ${escHtml(c.title)}</span>
+  list.innerHTML = conversations.map(c => {
+    const isAgent = c.mode === 'agent';
+    const isActive = isAgent ? c.id === currentAgentConvId : c.id === currentConvId;
+    const icon = activeStreams.has(c.id) ? '<span class="conv-streaming-dot" title="Still working…"></span>'
+      : isAgent ? '🤖' : '💬';
+    return `
+    <div class="conv-item ${isActive ? 'active' : ''}" data-cid="${c.id}" data-mode="${isAgent ? 'agent' : 'chat'}">
+      <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${icon} ${escHtml(c.title)}</span>
       <button class="conv-menu-btn" data-cid="${c.id}" title="More">⋮</button>
     </div>
-  `).join('');
+  `;
+  }).join('');
 }
 
 function currentConv() { return conversations.find(c => c.id === currentConvId); }
@@ -2614,8 +2641,9 @@ async function handleSudoRequired(data) {
 // Renders a tool result for the collapsed row body. ```diff fences (returned
 // by edit_file/write_file) get proper +/-/@@ coloring so file changes read
 // like opencode/Claude-Code diffs; everything else is escaped plain text.
-function renderToolResultHtml(result, limit = 900) {
-  const text = (result || '').slice(0, limit);
+function renderToolResultHtml(result, limit = 8000) {
+  const full = result || '';
+  const text = full.slice(0, limit);
   const parts = text.split(/```diff\n/);
   let html = '';
   parts.forEach((part, i) => {
@@ -2633,6 +2661,12 @@ function renderToolResultHtml(result, limit = 900) {
     }).join('\n') + `</code></pre>`;
     if (tail.trim()) html += `<pre><code>${escHtml(tail.trim())}</code></pre>`;
   });
+  // Only ever cut off pathologically large output (a full file dump, a huge
+  // grep) rather than silently hiding it — flag it plainly instead of just
+  // stopping mid-output with no indication anything was left out.
+  if (full.length > limit) {
+    html += `<div class="tool-row-label" style="color:var(--danger)">⚠ truncated — ${(full.length - limit).toLocaleString()} more characters not shown</div>`;
+  }
   return html || '<pre><code>(no output)</code></pre>';
 }
 
@@ -2692,7 +2726,7 @@ function renderToolRow(callMsg, resultMsg, id) {
     const done = todos.filter(t => t.status === 'completed').length;
     const summary = resultMsg ? `${done}/${todos.length} done` : 'planning…';
     return `
-      <details class="tool-row tool-row-todo"${idAttr}>
+      <details class="tool-row tool-row-todo" open${idAttr}>
         <summary>
           <span class="tool-row-name">📋 plan</span>
           <span class="tool-row-preview">${escHtml(summary)}</span>
@@ -2702,7 +2736,7 @@ function renderToolRow(callMsg, resultMsg, id) {
       </details>`;
   }
   return `
-    <details class="tool-row"${idAttr}>
+    <details class="tool-row" open${idAttr}>
       <summary>
         <span class="tool-row-name">${escHtml(callMsg.name)}</span>
         <span class="tool-row-preview">${escHtml(shortPreview)}</span>
@@ -2741,11 +2775,14 @@ function renderMessageGroups(messages) {
         }
       }
 const idxAttr = assistantIdx >= 0 ? ` data-msg-idx="${assistantIdx}"` : '';
-       const bubbleActions = assistantIdx >= 0 ? `
+       // Shown even for tool-only turns with no narration — addBubbleActions()
+       // falls back to the whole bubble's text (tool rows included) when there's
+       // no assistant message to resolve via data-msg-idx.
+       const bubbleActions = `
          <div class="bubble-actions">
            <button data-action="copy-bubble" title="Copy response">📋 Copy</button>
            <button data-action="download-bubble" title="Download as .md">⬇ Download</button>
-         </div>` : '';
+         </div>`;
        html.push(`
          <div class="message">
            <div class="avatar ai-av">🤖</div>
@@ -2779,14 +2816,15 @@ function renderMsg(msg, idx) {
     ? `<div class="file-attachments" style="padding:0 0 6px">${msg.attachments.map(renderAttachmentPill).join('')}</div>`
     : '';
   // data-msg-idx lets addCopyButtons() offer an Edit button on assistant code
-  // blocks — it maps a rendered <pre> back to conv.messages[idx] so edits can
-  // be written back into the stored conversation.
-const idxAttr = !isUser ? ` data-msg-idx="${idx}"` : '';
-   const bubbleActions = !isUser ? `
+  // blocks (it maps a rendered <pre> back to conv.messages[idx] so edits can
+  // be written back into the stored conversation) and lets addBubbleActions()
+  // resolve the source message for Copy/Download on every bubble, user or AI.
+const idxAttr = ` data-msg-idx="${idx}"`;
+   const bubbleActions = `
      <div class="bubble-actions">
-       <button data-action="copy-bubble" title="Copy response">📋 Copy</button>
+       <button data-action="copy-bubble" title="Copy message">📋 Copy</button>
        <button data-action="download-bubble" title="Download as .md">⬇ Download</button>
-     </div>` : '';
+     </div>`;
    return `
      <div class="message ${isUser ? 'user' : ''}">
        <div class="avatar ${isUser ? 'user-av' : 'ai-av'}">${isUser ? '👤' : '🤖'}</div>
@@ -2843,14 +2881,18 @@ pre.style.position = 'relative';
  }
 
  function addBubbleActions() {
-   document.querySelectorAll('.message:not(.user) .bubble').forEach(bubble => {
+   document.querySelectorAll('.message .bubble').forEach(bubble => {
      const copyBtn = bubble.querySelector('[data-action="copy-bubble"]');
      const downloadBtn = bubble.querySelector('[data-action="download-bubble"]');
      if (!copyBtn && !downloadBtn) return;
      const msgIdx = bubble.dataset.msgIdx;
      const conv = currentConv();
      const msg = msgIdx !== undefined ? conv?.messages[parseInt(msgIdx, 10)] : null;
-     const text = msg?.content || bubble.querySelector('.agent-turn-text')?.textContent || bubble.textContent.replace(/📋 Copy|⬇ Download/g, '').trim();
+     // User messages: prefer the same displayText renderMsg() shows (raw typed
+     // text, without attachment file contents appended) over the full content.
+     const text = (msg?.role === 'user' ? (msg.displayText ?? msg.content) : msg?.content)
+       || bubble.querySelector('.agent-turn-text')?.textContent
+       || bubble.textContent.replace(/📋 Copy|⬇ Download/g, '').trim();
      const escaped = text.replace(/<[^>]*>/g, ''); // strip markdown HTML
 
      if (copyBtn) {
@@ -4004,14 +4046,45 @@ function renderModelsTab() {
   const card = (m) => {
     const rank = modelRankMap[m.name] || 0;
     const provider = m.provider || 'ollama';
-    const installed = isInstalled(m.name, provider);
+    // OpenRouter (and any other cloud-only source) has no local install step —
+    // there's nothing to "Pull", it's always just callable via API key. Only
+    // Ollama/LM Studio models go through isInstalled()'s local-disk check.
+    const isCloudOnly = provider === 'openrouter';
+    const installed = !isCloudOnly && isInstalled(m.name, provider);
     const id = m.name.replace(/[:.\/]/g, '_');
     const sizeLabel = m.size_gb == null ? '' : m.size_gb >= 20 ? `${m.size_gb} GB — needs CPU offload` : `${m.size_gb} GB`;
-    const providerBadge = `<span class="model-badge">${provider === 'lmstudio' ? 'LM Studio' : 'Ollama'}</span>`;
+    const providerBadge = `<span class="model-badge">${provider === 'lmstudio' ? 'LM Studio' : provider === 'openrouter' ? 'OpenRouter' : 'Ollama'}</span>`;
     const rankBadge = rank !== 0 ? `<span class="model-badge" style="background:var(--accent);color:#fff;padding:2px 6px;border-radius:4px;font-size:10px;margin-left:4px">#${rank}</span>` : '';
     const updatable = provider === 'ollama' && modelUpdates[m.name];
     const ctx = provider === 'ollama' && modelContextLengths[m.name]
       ? `<div class="model-size">${(modelContextLengths[m.name] / 1024).toFixed(0)}k context</div>` : '';
+    const pull = activePulls[id];
+    const pullHtml = !pull ? '' : pull.error
+      ? `<span style="color:var(--danger)">${pull.cancelled ? 'Cancelled' : `Error: ${escHtml(pull.error)}`}</span>`
+      : `<progress max="100" value="${pull.pct || 0}" id="pb-${id}"></progress><div id="pstatus-${id}">${escHtml(pull.status || 'Starting download...')}</div>
+         <button class="btn btn-secondary btn-sm" onclick="cancelPull('${id}')" style="margin-top:4px">✕ Cancel</button>`;
+    let statusAndAction;
+    if (isCloudOnly) {
+      const hasKey = cloudModelDetails.find(c => c.provider === 'openrouter')?.configured;
+      statusAndAction = `
+        <span class="model-status">Free via OpenRouter</span>
+        ${hasKey
+          ? `<button class="btn btn-accent btn-sm" onclick="useCloudModel('openrouter/${escHtml(m.name)}')">Use</button>`
+          : `<span style="font-size:11px;color:var(--muted)">Needs an OpenRouter API key — add one in Paid ↓</span>`}`;
+    } else if (installed) {
+      statusAndAction = `
+        <span class="model-status">Installed</span>
+        ${provider === 'ollama'
+          ? `${updatable ? `<button class="btn btn-accent btn-sm" onclick="pullModel('${escHtml(m.name)}', document.getElementById('progress-${escHtml(id)}'))">⬆ Update</button>
+             <button class="btn btn-secondary btn-sm" onclick="dismissModelUpdate('${escHtml(m.name)}')" title="Skip this build">✕</button>` : ''}
+             <button class="btn ${updatable ? 'btn-secondary' : 'btn-accent'} btn-sm" onclick="useModel('${escHtml(m.name)}')">Use</button>
+             <button class="btn btn-secondary btn-sm" onclick="deleteModel('${escHtml(m.name)}')">Remove</button>`
+          : `<span style="font-size:11px;color:var(--muted)" title="Chat/Agent only talks to Ollama models right now">Installed in LM Studio</span>`}`;
+    } else {
+      statusAndAction = `
+        <span class="model-status not-installed">Not installed</span>
+        <button class="btn btn-accent btn-sm" onclick="pullModel('${escHtml(m.name)}', document.getElementById('progress-${escHtml(id)}'), '${provider}')">Pull</button>`;
+    }
     return `
       <div class="model-card" id="card-${id}">
         <div class="model-info">
@@ -4019,19 +4092,11 @@ function renderModelsTab() {
           <div class="model-desc">${escHtml(m.desc)}</div>
           ${sizeLabel ? `<div class="model-size">${escHtml(sizeLabel)}</div>` : ''}
           ${ctx}
-          <div class="pull-progress" id="progress-${id}"></div>
+          <div class="pull-progress" id="progress-${id}">${pullHtml}</div>
         </div>
         <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">
           ${updatable ? '<span class="update-badge">⬆ Update available</span>' : ''}
-          <span class="model-status ${installed ? '' : 'not-installed'}">${installed ? 'Installed' : 'Not installed'}</span>
-          ${installed
-            ? (provider === 'ollama'
-                ? `${updatable ? `<button class="btn btn-accent btn-sm" onclick="pullModel('${escHtml(m.name)}', document.getElementById('progress-${escHtml(id)}'))">⬆ Update</button>
-                   <button class="btn btn-secondary btn-sm" onclick="dismissModelUpdate('${escHtml(m.name)}')" title="Skip this build">✕</button>` : ''}
-                   <button class="btn ${updatable ? 'btn-secondary' : 'btn-accent'} btn-sm" onclick="useModel('${escHtml(m.name)}')">Use</button>
-                   <button class="btn btn-secondary btn-sm" onclick="deleteModel('${escHtml(m.name)}')">Remove</button>`
-                : `<span style="font-size:11px;color:var(--muted)" title="Chat/Agent only talks to Ollama models right now">Installed in LM Studio</span>`)
-            : `<button class="btn btn-accent btn-sm" onclick="pullModel('${escHtml(m.name)}', document.getElementById('progress-${escHtml(id)}'), '${provider}')">Pull</button>`}
+          ${statusAndAction}
         </div>
       </div>`;
   };
@@ -4107,19 +4172,41 @@ else if (catalogFilter === 'free') {
     html += sectionTitle('💳', 'Paid', 'cloud providers — metered per million tokens, budget-capped');
     const rows = cloudModelDetails.filter(r => matchesSearch(`${r.provider} ${r.model}`));
     html += rows.length
-      ? rows.map(r => `
+      ? rows.map(r => {
+        // OpenRouter proxies hundreds of models behind one key, unlike the
+        // other providers here which each have exactly one fixed model — give
+        // it a picker instead of a static name, defaulting to whatever's
+        // currently selected (persisted server-side via setOpenrouterModel()).
+        const isOpenrouter = r.provider === 'openrouter' && Array.isArray(r.models);
+        // <option> can't hold rich markup, so price/Free goes straight into the
+        // label text — live from OpenRouter's own pricing API (see
+        // _openrouter_live_pricing on the backend), not a hardcoded guess.
+        const optionLabel = (m) => m.is_free
+          ? `${m.label} — Free`
+          : `${m.label}${m.input_per_mtok != null ? ` — ≈$${m.input_per_mtok.toFixed(2)}/$${m.output_per_mtok.toFixed(2)} per M` : ''}`;
+        const modelField = isOpenrouter
+          ? `<select id="openrouter-model-select" onchange="setOpenrouterModel(this.value)" style="margin-top:4px;font-size:12px;padding:4px 6px">
+              ${r.models.map(m => `<option value="${escHtml(m.model)}" ${m.model === r.model ? 'selected' : ''}>${escHtml(optionLabel(m))}</option>`).join('')}
+            </select>`
+          : `<span class="model-badge">${escHtml(r.model)}</span>`;
+        const useOnclick = isOpenrouter
+          ? `useCloudModel('openrouter/' + document.getElementById('openrouter-model-select').value)`
+          : `useCloudModel('${escHtml(r.provider + '/' + r.model)}')`;
+        return `
         <div class="model-card">
           <div class="model-info">
-            <div class="model-name">${escHtml(r.label)} <span class="model-badge">${escHtml(r.model)}</span></div>
-            <div class="model-desc">≈$${r.input_per_mtok?.toFixed(2) ?? '—'} in / $${r.output_per_mtok?.toFixed(2) ?? '—'} out per 1M tokens</div>
+            <div class="model-name">${escHtml(r.label)} ${isOpenrouter ? '' : modelField}</div>
+            ${isOpenrouter ? modelField : ''}
+            <div class="model-desc">${r.input_per_mtok === 0 && r.output_per_mtok === 0 ? 'Free' : `≈$${r.input_per_mtok?.toFixed(2) ?? '—'} in / $${r.output_per_mtok?.toFixed(2) ?? '—'} out per 1M tokens`}</div>
           </div>
           <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">
             <span class="model-status ${r.configured ? '' : 'not-installed'}">${r.configured ? 'Key configured' : 'No API key'}</span>
             ${r.configured
-              ? `<button class="btn btn-accent btn-sm" onclick="useCloudModel('${escHtml(r.provider + '/' + r.model)}')">Use</button>`
+              ? `<button class="btn btn-accent btn-sm" onclick="${useOnclick}">Use</button>`
               : `<span style="font-size:11px;color:var(--muted)">Add a key below ↓</span>`}
           </div>
-        </div>`).join('')
+        </div>`;
+      }).join('')
       : emptyNote('No cloud models match your search.');
   }
 
@@ -4128,11 +4215,33 @@ else if (catalogFilter === 'free') {
 
 function useCloudModel(name) {
   const sel = document.getElementById('model-select');
-  if ([...sel.options].some(o => o.value === name)) {
-    sel.value = name;
-    localStorage.setItem('selectedModel', name);
-    switchTab('chat');
+  // The OpenRouter picker's onchange saves the new choice and refreshes this
+  // select's Cloud optgroup, but that's an async round-trip — if Use is
+  // clicked before it lands, the option for the just-picked model may not
+  // exist here yet. Add it on the fly rather than silently doing nothing.
+  if (![...sel.options].some(o => o.value === name)) {
+    let group = sel.querySelector('optgroup[label="Cloud"]');
+    if (!group) { group = document.createElement('optgroup'); group.label = 'Cloud'; sel.appendChild(group); }
+    const opt = document.createElement('option');
+    opt.value = name; opt.textContent = name;
+    group.appendChild(opt);
   }
+  sel.value = name;
+  localStorage.setItem('selectedModel', name);
+  switchTab('chat');
+}
+
+async function setOpenrouterModel(model) {
+  await fetch(`${API}/api/config`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ openrouter_model: model })
+  }).catch(() => {});
+  try {
+    const r = await fetch(`${API}/api/models/cloud/details`);
+    cloudModelDetails = (await r.json()).models || [];
+  } catch {}
+  renderModelsTab();
+  await loadModels(); // refreshes #model-select's Cloud optgroup to the new choice
 }
 
 async function loadLspStatus() {
@@ -4254,14 +4363,29 @@ async function searchOnlineModels() {
   }
 }
 
+async function cancelPull(id) {
+  activePulls[id]?.controller?.abort();
+}
+
 async function pullModel(modelName, progressEl, provider = 'ollama') {
   const id = modelName.replace(/[:.\/]/g, '_');
-  progressEl.innerHTML = `<progress max="100" value="0" id="pb-${id}"></progress><div id="pstatus-${id}">Starting download...</div>`;
+  // liveEl() re-queries by id on every update instead of trusting the
+  // progressEl reference: renderModelsTab() can replace the whole catalog
+  // list mid-download (15s status poll, search, update check), which
+  // detaches progressEl from the document. activePulls is the source of
+  // truth so a re-render always repaints the current state; this direct
+  // write is just for a snappier in-place update when no re-render happened.
+  const liveEl = () => document.getElementById(`progress-${id}`) || progressEl;
+  const controller = new AbortController();
+  activePulls[id] = { status: 'Starting download...', pct: 0, controller };
+  liveEl().innerHTML = `<progress max="100" value="0" id="pb-${id}"></progress><div id="pstatus-${id}">Starting download...</div>
+    <button class="btn btn-secondary btn-sm" onclick="cancelPull('${id}')" style="margin-top:4px">✕ Cancel</button>`;
   try {
     const res = await fetch(`${API}/api/models/pull`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: modelName, provider })
+      body: JSON.stringify({ model: modelName, provider }),
+      signal: controller.signal,
     });
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
@@ -4278,17 +4402,22 @@ async function pullModel(modelName, progressEl, provider = 'ollama') {
           const d = JSON.parse(line);
           if (d.error) errorMsg = d.error;
           if (d.status === 'error') errorMsg = errorMsg || 'Download failed.';
+          const status = d.status || d.error || '';
+          const pct = (d.total && d.completed) ? Math.round((d.completed / d.total) * 100) : (activePulls[id]?.pct || 0);
+          activePulls[id] = { status, pct, controller };
           const st = document.getElementById(`pstatus-${id}`);
           const pb = document.getElementById(`pb-${id}`);
-          if (st) st.textContent = d.status || d.error || '';
-          if (pb && d.total && d.completed) pb.value = Math.round((d.completed / d.total) * 100);
+          if (st) st.textContent = status;
+          if (pb) pb.value = pct;
         } catch {}
       }
     }
     if (errorMsg) {
-      progressEl.innerHTML = `<span style="color:var(--danger)">Error: ${escHtml(errorMsg)}</span>`;
+      activePulls[id] = { error: errorMsg };
+      liveEl().innerHTML = `<span style="color:var(--danger)">Error: ${escHtml(errorMsg)}</span>`;
     } else {
-      progressEl.innerHTML = '<span style="color:var(--accent)">✓ Download complete</span>';
+      delete activePulls[id];
+      liveEl().innerHTML = '<span style="color:var(--accent)">✓ Download complete</span>';
       delete modelUpdates[modelName];   // fresh build pulled — no update pending anymore
       const dismissed = dismissedModelUpdates();
       delete dismissed[modelName];
@@ -4296,7 +4425,12 @@ async function pullModel(modelName, progressEl, provider = 'ollama') {
     }
     await loadModels();
   } catch (err) {
-    progressEl.innerHTML = `<span style="color:var(--danger)">Error: ${escHtml(err.message)}</span>`;
+    const cancelled = err.name === 'AbortError';
+    activePulls[id] = { error: cancelled ? 'Cancelled' : err.message, cancelled };
+    liveEl().innerHTML = cancelled
+      ? `<span style="color:var(--danger)">Cancelled</span>`
+      : `<span style="color:var(--danger)">Error: ${escHtml(err.message)}</span>`;
+    if (cancelled) await loadModels();
   }
 }
 
@@ -4446,6 +4580,14 @@ function switchTab(name) {
   if (name === 'lessons' && !lessonsInitedOnce) { lessonsInitedOnce = true; loadLessons(); }
   if (name === 'routines' && !routinesInitedOnce) { routinesInitedOnce = true; loadRoutines(); }
   if (name === 'search' && !searchIndexCheckedOnce) { searchIndexCheckedOnce = true; checkSearchIndexStatus(); }
+  // Resume the most recent agent task on first visit, same as reopening any
+  // other established agent surface drops you back into your last session
+  // instead of a blank slate — only when nothing has been typed/run yet.
+  if (name === 'agent' && !agentTabInitedOnce) {
+    agentTabInitedOnce = true;
+    const mostRecent = conversations.find(c => c.mode === 'agent');
+    if (mostRecent) { currentAgentConvId = mostRecent.id; renderAgentMessages(); renderConvList(); }
+  }
 }
 
 // ── Code Runner ─────────────────────────────────────────────────────────────────
@@ -6020,8 +6162,67 @@ function fileCloseEditor() {
 // ── Agent Mode ────────────────────────────────────────────────────────────────
 
 let agentAbortController = null;
-let agentMessages = [];
+let currentAgentConvId = null;
 let agentTier = 'free';  // 'free' | 'paid'
+let agentTabInitedOnce = false;
+
+// Agent-tab conversations live in the SAME `conversations` array/conversations.json
+// as Chat — before this, Agent mode kept its whole history in a bare in-memory
+// array (agentMessages) that vanished on page reload and never showed up
+// anywhere, so there was no way to see or return to a past agent run. Every
+// established multi-turn agent surface (Claude Code sessions, ChatGPT/Claude.ai
+// threads, Cursor's agent chats) persists and lists its sessions the same way
+// it lists regular conversations — `mode: 'agent'` is the only thing that
+// distinguishes one of these entries from a Chat-tab conversation; everything
+// else (save/load/rename/delete/search/auto-title) is the exact same code path.
+function currentAgentConv() { return conversations.find(c => c.id === currentAgentConvId); }
+
+function newAgentConversation() {
+  const id = Date.now().toString() + '-a';
+  conversations.unshift({ id, title: 'New agent task', mode: 'agent', messages: [], agentHistory: [], created: Date.now() });
+  currentAgentConvId = id;
+  saveConvs();
+  renderConvList();
+  renderAgentMessages();
+  document.getElementById('agent-input')?.focus();
+}
+
+// Rebuilds the whole #agent-conversation panel from a stored conversation —
+// used when switching to a past agent session (and after each turn settles).
+// Reuses renderMessageGroups()/addCopyButtons()/addBubbleActions(), the exact
+// same rendering Chat uses, so a saved agent run reads identically to a live
+// one: tool rows open, Copy/Download on every bubble.
+function renderAgentMessages() {
+  const container = document.getElementById('agent-conversation');
+  if (!container) return;
+  const conv = currentAgentConv();
+  if (!conv || !conv.messages.length) {
+    container.innerHTML = `<div class="analyze-placeholder" id="agent-placeholder"><p>Enter a task below and the agent will use its tools to complete it autonomously.</p></div>`;
+    return;
+  }
+  container.innerHTML = renderMessageGroups(conv.messages);
+  addCopyButtons(); addBubbleActions();
+  container.querySelectorAll('pre code').forEach(el => hljs.highlightElement(el));
+  container.scrollTop = container.scrollHeight;
+}
+
+function loadAgentConversation(id) {
+  if (agentAbortController) { alert('An agent task is still running — stop it before switching tasks.'); return; }
+  currentAgentConvId = id;
+  switchTab('agent');
+  renderConvList();
+  renderAgentMessages();
+}
+
+// Resolves true after `ms`, or false immediately if `signal` aborts first
+// (Stop button pressed while runAgent() is waiting out a reconnect backoff).
+function sleepUnlessAborted(ms, signal) {
+  return new Promise(resolve => {
+    if (signal.aborted) { resolve(false); return; }
+    const t = setTimeout(() => resolve(true), ms);
+    signal.addEventListener('abort', () => { clearTimeout(t); resolve(false); }, { once: true });
+  });
+}
 
 async function runAgent() {
   const input = document.getElementById('agent-input');
@@ -6031,15 +6232,24 @@ async function runAgent() {
   const model = document.getElementById('model-select').value;
   if (!model) { alert('Select a model first'); return; }
 
-  const conv = document.getElementById('agent-conversation');
+  if (!currentAgentConvId) newAgentConversation();
+  const conv = currentAgentConv();
+  const container = document.getElementById('agent-conversation');
   const placeholder = document.getElementById('agent-placeholder');
   if (placeholder) placeholder.remove();
 
-  conv.innerHTML += `
+  container.innerHTML += `
     <div class="message user" style="max-width:900px;width:100%;margin-left:auto;flex-direction:row-reverse;display:flex;gap:12px;animation:fadeIn .2s ease">
       <div class="avatar user-av" style="width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0;border:1px solid var(--border);background:var(--accent2)">👤</div>
-      <div class="bubble" style="max-width:calc(100% - 50px);background:rgba(31,111,235,.15);border-color:rgba(31,111,235,.3)">${escHtml(text).replace(/\n/g, '<br>')}</div>
+      <div class="bubble" style="max-width:calc(100% - 50px);background:rgba(31,111,235,.15);border-color:rgba(31,111,235,.3)">
+        <div class="bubble-actions">
+          <button data-action="copy-bubble" title="Copy message">📋 Copy</button>
+          <button data-action="download-bubble" title="Download as .md">⬇ Download</button>
+        </div>
+        ${escHtml(text).replace(/\n/g, '<br>')}
+      </div>
     </div>`;
+  addBubbleActions();
 
   input.value = '';
   const runBtn = document.getElementById('agent-run-btn');
@@ -6049,8 +6259,15 @@ async function runAgent() {
   agentAbortController = new AbortController();
   // Append, don't reset — resetting here wiped the agent's memory of
   // everything it had already done on every single message, which is why
-  // follow-ups like "have you done that?" got nowhere.
-  agentMessages.push({ role: "user", content: text });
+  // follow-ups like "have you done that?" got nowhere. Persisted the same
+  // way Chat tracks a turn: conv.messages is the rendered transcript,
+  // conv.agentHistory is the raw API-format context sent to the model.
+  conv.messages.push({ role: 'user', content: text });
+  if (conv.title === 'New agent task') { conv.title = text.slice(0, 40); conv.titleIsDefault = true; }
+  const turnStartIdx = conv.messages.length; // where THIS turn's own entries begin — see retry reset below
+  ensureAgentHistory(conv).push({ role: 'user', content: text });
+  saveConvs();
+  renderConvList();
 
   let fullText = '';
   const thinkingId = 'agent-thinking-' + Date.now();
@@ -6059,11 +6276,18 @@ async function runAgent() {
   // reads as one continuous block, with the running/typed narration always
   // last (at the bottom) instead of ending up pinned above the tool rows it
   // was actually based on.
-  conv.innerHTML += `
+  container.innerHTML += `
     <div class="message" style="max-width:900px;width:100%;display:flex;gap:12px;animation:fadeIn .2s ease" id="${thinkingId}">
       <div class="avatar ai-av" style="width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0;border:1px solid var(--border);background:var(--surface)">🤖</div>
-      <div class="bubble" style="max-width:calc(100% - 50px)"><div class="agent-turn-text"><div class="thinking"><span></span><span></span><span></span></div></div></div>
+      <div class="bubble" style="max-width:calc(100% - 50px)">
+        <div class="bubble-actions">
+          <button data-action="copy-bubble" title="Copy response">📋 Copy</button>
+          <button data-action="download-bubble" title="Download as .md">⬇ Download</button>
+        </div>
+        <div class="agent-turn-text"><div class="thinking"><span></span><span></span><span></span></div></div>
+      </div>
     </div>`;
+  addBubbleActions();
 
   function agentTextEl() {
     return document.getElementById(thinkingId)?.querySelector('.agent-turn-text') || null;
@@ -6072,7 +6296,17 @@ async function runAgent() {
   let pendingToolRowId = null;
   let receivedTerminalEvent = false;
   let wasAborted = false;
+  let networkRetryCount = 0;
 
+  // A dropped connection (backend restart, Wi-Fi blip, Ollama hiccup) used to
+  // just dead-end the turn with a static "Error: Failed to fetch" — the agent
+  // had already done real work (tool calls, files edited) that the user had
+  // no way to resume short of retyping the whole request. Retry with capped
+  // backoff instead, indefinitely, until it reconnects or Stop is pressed —
+  // conv.agentHistory already holds everything up to the last successful
+  // event, and /api/agent dedupes a resent user message, so replaying the
+  // same request is always safe.
+  retryLoop: while (true) {
   try {
     // Resolve teacher model if paid tier is selected
     let effectiveModel = model;
@@ -6089,7 +6323,7 @@ async function runAgent() {
     const res = await fetch(`${API}/api/agent`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: effectiveModel, message: text, conversation: agentMessages, tier: agentTier }),
+      body: JSON.stringify({ model: effectiveModel, message: text, conversation: conv.agentHistory, tier: agentTier }),
       signal: agentAbortController.signal
     });
 
@@ -6106,28 +6340,30 @@ async function runAgent() {
             fullText += data.content;
             const textEl = agentTextEl();
             if (textEl) textEl.innerHTML = renderMarkdown(fullText);
-            conv.scrollTop = conv.scrollHeight;
+            container.scrollTop = container.scrollHeight;
           } else if (data.type === 'tool_call') {
             fullText = ''; // that much of the response was just the tool-call fence, not real narration
+            conv.messages.push({ role: 'tool_call', name: data.name, arguments: data.arguments });
             const textEl = agentTextEl();
             if (textEl) {
               pendingToolRowId = 'agent-tool-row-' + Math.random().toString(36).slice(2);
               textEl.insertAdjacentHTML('beforebegin', renderToolRow({ name: data.name, arguments: data.arguments }, null, pendingToolRowId));
               textEl.innerHTML = '<div class="thinking"><span></span><span></span><span></span></div>';
             }
-            conv.scrollTop = conv.scrollHeight;
+            container.scrollTop = container.scrollHeight;
           } else if (data.type === 'tool_result') {
+            conv.messages.push({ role: 'tool_result', name: data.name, result: data.result });
             const row = pendingToolRowId ? document.getElementById(pendingToolRowId) : null;
             completeToolRow(row, data.result);
             pendingToolRowId = null;
-            conv.scrollTop = conv.scrollHeight;
+            container.scrollTop = container.scrollHeight;
           } else if (data.type === 'sudo_required') {
             const textEl = agentTextEl();
             if (textEl) textEl.insertAdjacentHTML('beforebegin', `
               <div class="tool-row" style="padding:6px 10px;display:flex;align-items:center;gap:6px;font-family:'JetBrains Mono','Fira Code',monospace;color:var(--muted)">
                 🔒 Waiting for your sudo password to run: <code>${escHtml(data.command)}</code>
               </div>`);
-            conv.scrollTop = conv.scrollHeight;
+            container.scrollTop = container.scrollHeight;
             handleSudoRequired(data);
           } else if (data.type === 'done') {
             receivedTerminalEvent = true;
@@ -6135,7 +6371,7 @@ async function runAgent() {
             // Adopt the server's authoritative conversation state — it
             // includes every tool call/result from this run, so the next
             // message actually has full context instead of starting blind.
-            if (data.conversation) agentMessages = data.conversation;
+            if (data.conversation) conv.agentHistory = data.conversation;
             if (data.usage) {
               const totalTokens = data.usage.prompt_eval_count + (data.usage.eval_count || 0);
               addToWeeklyTokenUsage(totalTokens);
@@ -6146,34 +6382,71 @@ async function runAgent() {
             receivedTerminalEvent = true;
             const textEl = agentTextEl();
             if (textEl) textEl.innerHTML = 'Error: ' + escHtml(data.content);
-            if (data.conversation) agentMessages = data.conversation;
+            if (data.conversation) conv.agentHistory = data.conversation;
           }
         } catch {}
       }
-      conv.scrollTop = conv.scrollHeight;
+      container.scrollTop = container.scrollHeight;
     }
 
     if (fullText) {
+      conv.messages.push({ role: 'assistant', content: fullText });
       const textEl = agentTextEl();
       if (textEl) {
         textEl.innerHTML = renderMarkdown(fullText);
         textEl.querySelectorAll('pre code').forEach(el => hljs.highlightElement(el));
       }
+      const bubbleEl = document.getElementById(thinkingId)?.querySelector('.bubble');
+      if (bubbleEl) bubbleEl.dataset.msgIdx = conv.messages.length - 1;
     } else if (receivedTerminalEvent) {
       // Turn ended right after a tool call with no further narration — drop
       // the stale dots instead of leaving them bouncing forever.
       agentTextEl()?.remove();
     }
+    saveConvs();
+    renderConvList();
+    maybeAutoTitle(conv.id);
+    break retryLoop; // stream completed (success or a handled backend 'error' event) — don't retry those
   } catch (err) {
     if (err.name === 'AbortError') {
       wasAborted = true;
       const textEl = agentTextEl();
       if (textEl && !fullText) textEl.textContent = 'Stopped.';
-    } else {
-      const textEl = agentTextEl();
-      if (textEl) textEl.textContent = 'Error: ' + err.message;
+      break retryLoop;
+    }
+    // A real connection failure (backend restarted, network blip) rather
+    // than an application-level error — those come back as a normal
+    // 'error' stream event above and never throw. Back off and retry
+    // instead of leaving the turn dead.
+    networkRetryCount++;
+    const waitMs = Math.min(2000 * networkRetryCount, 20000);
+    const textEl = agentTextEl();
+    if (textEl) textEl.innerHTML = `<span style="color:var(--danger)">⚠ Connection lost (${escHtml(err.message)}) — reconnecting in ${Math.round(waitMs / 1000)}s… (attempt ${networkRetryCount})</span>`;
+    const keepGoing = await sleepUnlessAborted(waitMs, agentAbortController.signal);
+    if (!keepGoing) {
+      wasAborted = true;
+      const el = agentTextEl();
+      if (el) el.textContent = 'Stopped.';
+      break retryLoop;
+    }
+    // Reset this attempt's transient state — a retry replays the whole turn
+    // from scratch server-side, so anything partially rendered (tool rows,
+    // partial narration, and any tool_call/tool_result already pushed into
+    // conv.messages) from the failed attempt is stale.
+    fullText = '';
+    pendingToolRowId = null;
+    receivedTerminalEvent = false;
+    conv.messages.length = turnStartIdx;
+    // Clear stale tool rows and narration only — replacing the whole bubble
+    // would also wipe out its Copy/Download buttons.
+    const bubble = document.getElementById(thinkingId)?.querySelector('.bubble');
+    if (bubble) {
+      bubble.querySelectorAll('.tool-row').forEach(el => el.remove());
+      const ate = bubble.querySelector('.agent-turn-text');
+      if (ate) ate.innerHTML = '<div class="thinking"><span></span><span></span><span></span></div>';
     }
   }
+  } // retryLoop
 
   runBtn.style.display = '';
   stopBtn.style.display = 'none';
