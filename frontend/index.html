@@ -6077,6 +6077,16 @@ let agentAbortController = null;
 let agentMessages = [];
 let agentTier = 'free';  // 'free' | 'paid'
 
+// Resolves true after `ms`, or false immediately if `signal` aborts first
+// (Stop button pressed while runAgent() is waiting out a reconnect backoff).
+function sleepUnlessAborted(ms, signal) {
+  return new Promise(resolve => {
+    if (signal.aborted) { resolve(false); return; }
+    const t = setTimeout(() => resolve(true), ms);
+    signal.addEventListener('abort', () => { clearTimeout(t); resolve(false); }, { once: true });
+  });
+}
+
 async function runAgent() {
   const input = document.getElementById('agent-input');
   const text = input.value.trim();
@@ -6092,8 +6102,15 @@ async function runAgent() {
   conv.innerHTML += `
     <div class="message user" style="max-width:900px;width:100%;margin-left:auto;flex-direction:row-reverse;display:flex;gap:12px;animation:fadeIn .2s ease">
       <div class="avatar user-av" style="width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0;border:1px solid var(--border);background:var(--accent2)">👤</div>
-      <div class="bubble" style="max-width:calc(100% - 50px);background:rgba(31,111,235,.15);border-color:rgba(31,111,235,.3)">${escHtml(text).replace(/\n/g, '<br>')}</div>
+      <div class="bubble" style="max-width:calc(100% - 50px);background:rgba(31,111,235,.15);border-color:rgba(31,111,235,.3)">
+        <div class="bubble-actions">
+          <button data-action="copy-bubble" title="Copy message">📋 Copy</button>
+          <button data-action="download-bubble" title="Download as .md">⬇ Download</button>
+        </div>
+        ${escHtml(text).replace(/\n/g, '<br>')}
+      </div>
     </div>`;
+  addBubbleActions();
 
   input.value = '';
   const runBtn = document.getElementById('agent-run-btn');
@@ -6116,8 +6133,15 @@ async function runAgent() {
   conv.innerHTML += `
     <div class="message" style="max-width:900px;width:100%;display:flex;gap:12px;animation:fadeIn .2s ease" id="${thinkingId}">
       <div class="avatar ai-av" style="width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0;border:1px solid var(--border);background:var(--surface)">🤖</div>
-      <div class="bubble" style="max-width:calc(100% - 50px)"><div class="agent-turn-text"><div class="thinking"><span></span><span></span><span></span></div></div></div>
+      <div class="bubble" style="max-width:calc(100% - 50px)">
+        <div class="bubble-actions">
+          <button data-action="copy-bubble" title="Copy response">📋 Copy</button>
+          <button data-action="download-bubble" title="Download as .md">⬇ Download</button>
+        </div>
+        <div class="agent-turn-text"><div class="thinking"><span></span><span></span><span></span></div></div>
+      </div>
     </div>`;
+  addBubbleActions();
 
   function agentTextEl() {
     return document.getElementById(thinkingId)?.querySelector('.agent-turn-text') || null;
@@ -6126,7 +6150,17 @@ async function runAgent() {
   let pendingToolRowId = null;
   let receivedTerminalEvent = false;
   let wasAborted = false;
+  let networkRetryCount = 0;
 
+  // A dropped connection (backend restart, Wi-Fi blip, Ollama hiccup) used to
+  // just dead-end the turn with a static "Error: Failed to fetch" — the agent
+  // had already done real work (tool calls, files edited) that the user had
+  // no way to resume short of retyping the whole request. Retry with capped
+  // backoff instead, indefinitely, until it reconnects or Stop is pressed —
+  // agentMessages already holds everything up to the last successful event,
+  // and /api/agent dedupes a resent user message, so replaying the same
+  // request is always safe.
+  retryLoop: while (true) {
   try {
     // Resolve teacher model if paid tier is selected
     let effectiveModel = model;
@@ -6218,16 +6252,45 @@ async function runAgent() {
       // the stale dots instead of leaving them bouncing forever.
       agentTextEl()?.remove();
     }
+    break retryLoop; // stream completed (success or a handled backend 'error' event) — don't retry those
   } catch (err) {
     if (err.name === 'AbortError') {
       wasAborted = true;
       const textEl = agentTextEl();
       if (textEl && !fullText) textEl.textContent = 'Stopped.';
-    } else {
-      const textEl = agentTextEl();
-      if (textEl) textEl.textContent = 'Error: ' + err.message;
+      break retryLoop;
+    }
+    // A real connection failure (backend restarted, network blip) rather
+    // than an application-level error — those come back as a normal
+    // 'error' stream event above and never throw. Back off and retry
+    // instead of leaving the turn dead.
+    networkRetryCount++;
+    const waitMs = Math.min(2000 * networkRetryCount, 20000);
+    const textEl = agentTextEl();
+    if (textEl) textEl.innerHTML = `<span style="color:var(--danger)">⚠ Connection lost (${escHtml(err.message)}) — reconnecting in ${Math.round(waitMs / 1000)}s… (attempt ${networkRetryCount})</span>`;
+    const keepGoing = await sleepUnlessAborted(waitMs, agentAbortController.signal);
+    if (!keepGoing) {
+      wasAborted = true;
+      const el = agentTextEl();
+      if (el) el.textContent = 'Stopped.';
+      break retryLoop;
+    }
+    // Reset this attempt's transient state — a retry replays the whole turn
+    // from scratch server-side, so anything partially rendered (tool rows,
+    // partial narration) from the failed attempt is stale.
+    fullText = '';
+    pendingToolRowId = null;
+    receivedTerminalEvent = false;
+    // Clear stale tool rows and narration only — replacing the whole bubble
+    // would also wipe out its Copy/Download buttons.
+    const bubble = document.getElementById(thinkingId)?.querySelector('.bubble');
+    if (bubble) {
+      bubble.querySelectorAll('.tool-row').forEach(el => el.remove());
+      const ate = bubble.querySelector('.agent-turn-text');
+      if (ate) ate.innerHTML = '<div class="thinking"><span></span><span></span><span></span></div>';
     }
   }
+  } // retryLoop
 
   runBtn.style.display = '';
   stopBtn.style.display = 'none';
