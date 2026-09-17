@@ -360,6 +360,83 @@
   .todo-pending .todo-icon, .todo-pending .todo-text { opacity: .6; }
   .todo-progress { margin-top: 6px; font-size: 10px; text-transform: uppercase; letter-spacing: .4px; color: var(--muted); }
 
+  /* ── File Explorer (Windows Explorer style) ── */
+  .explorer { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
+  .ex-toolbar { display: flex; align-items: center; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  .ex-nav {
+    width: 30px; height: 28px; border-radius: 6px; border: 1px solid transparent; cursor: pointer;
+    background: transparent; color: var(--text); font-size: 11px; transition: background .12s;
+  }
+  .ex-nav:hover:not(:disabled) { background: rgba(127,127,127,.15); }
+  .ex-nav:disabled { opacity: .35; cursor: default; }
+  .ex-breadcrumb {
+    flex: 1; display: flex; align-items: center; gap: 2px; overflow: hidden; height: 28px; min-width: 60px;
+    border: 1px solid var(--border); border-radius: 6px; background: var(--surface); padding: 0 6px;
+  }
+  .ex-crumb {
+    font-size: 12px; color: var(--text); padding: 3px 6px; border-radius: 4px; cursor: pointer;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 160px; flex-shrink: 0;
+  }
+  .ex-crumb:hover { background: rgba(127,127,127,.15); }
+  .ex-crumb-sep { color: var(--muted); font-size: 11px; flex-shrink: 0; }
+  #ex-search {
+    width: 170px; height: 28px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--surface); color: var(--text); padding: 0 10px; font-size: 12px; flex-shrink: 0;
+    font-family: inherit;
+  }
+  #ex-search:focus { outline: none; border-color: var(--accent2); }
+  .ex-cmdbar { display: flex; align-items: center; gap: 6px; padding: 6px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  .ex-btn {
+    font-size: 12px; padding: 4px 10px; border-radius: 6px; cursor: pointer; font-family: inherit;
+    border: 1px solid var(--border); background: var(--surface); color: var(--text); transition: background .12s;
+  }
+  .ex-btn:hover { background: rgba(127,127,127,.12); }
+  .ex-header {
+    display: grid; grid-template-columns: minmax(160px,1fr) 150px 150px 90px;
+    padding: 0 12px; flex-shrink: 0; border-bottom: 1px solid var(--border); background: var(--surface);
+  }
+  .ex-hcol {
+    font-size: 11px; font-weight: 600; color: var(--muted); padding: 6px 8px; cursor: pointer;
+    user-select: none; display: flex; align-items: center; gap: 4px; white-space: nowrap;
+  }
+  .ex-hcol:hover { color: var(--text); }
+  .ex-hsize { justify-content: flex-end; }
+  .ex-sortind { font-size: 9px; }
+  .ex-list { flex: 1; overflow-y: auto; outline: none; min-height: 0; }
+  .ex-row {
+    display: grid; grid-template-columns: minmax(160px,1fr) 150px 150px 90px;
+    align-items: center; padding: 0 12px; height: 32px; font-size: 12px; cursor: default;
+  }
+  .ex-row:hover { background: rgba(127,127,127,.08); }
+  .ex-row.ex-selected { background: rgba(31,111,235,.22); }
+  .ex-row.ex-selected:hover { background: rgba(31,111,235,.3); }
+  .ex-cell { padding: 0 8px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .ex-name { display: flex; align-items: center; gap: 8px; }
+  .ex-name svg { flex-shrink: 0; }
+  .ex-modified, .ex-type { color: var(--muted); font-size: 11.5px; }
+  .ex-size { text-align: right; color: var(--muted); font-size: 11.5px; }
+  .ex-status {
+    flex-shrink: 0; padding: 4px 12px; border-top: 1px solid var(--border);
+    font-size: 11px; color: var(--muted); background: var(--surface);
+  }
+  .ex-context {
+    position: fixed; z-index: 1000; display: none; min-width: 190px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0,0,0,.4); padding: 4px;
+  }
+  .ex-context-item {
+    padding: 7px 12px; font-size: 12px; border-radius: 5px; cursor: pointer;
+    display: flex; gap: 8px; align-items: center;
+  }
+  .ex-context-item:hover { background: var(--accent); color: #fff; }
+  .ex-context-item.danger:hover { background: var(--danger); }
+  .ex-context-sep { height: 1px; background: var(--border); margin: 4px 8px; }
+  .ex-rename-input {
+    font: inherit; font-size: 12px; background: var(--bg); color: var(--text);
+    border: 1px solid var(--accent2); border-radius: 3px; padding: 1px 4px; width: 100%; outline: none;
+  }
+  .ex-creating-hint { padding: 4px 12px; font-size: 11px; color: var(--muted); }
+
   /* Slash-command autocomplete popup, anchored above the input row */
   .slash-popup {
     display: none; position: absolute; bottom: 100%; left: 0; right: 0; z-index: 500;
@@ -1152,34 +1229,39 @@
       </div>
     </div>
 
-    <!-- Files Tab -->
+    <!-- Files Tab (Windows Explorer style) -->
     <div class="tab-panel" id="tab-files">
-      <div class="runner-layout">
-        <div class="runner-panel">
-          <div class="runner-toolbar">
-            <h2>📁 Files</h2>
-            <span style="font-size:12px;color:var(--muted)">~/ (your whole home directory)</span>
+      <div class="explorer">
+        <div class="ex-toolbar">
+          <button class="ex-nav" id="ex-back-btn" onclick="exBack()" title="Back">◀</button>
+          <button class="ex-nav" id="ex-fwd-btn" onclick="exForward()" title="Forward">▶</button>
+          <button class="ex-nav" id="ex-up-btn" onclick="exGoUp()" title="Up">▲</button>
+          <div class="ex-breadcrumb" id="ex-breadcrumb"></div>
+          <input type="text" id="ex-search" placeholder="Search" oninput="exRender()" onkeydown="if(event.key==='Escape'){this.value='';exRender();}" title="Filter the current folder by name">
+        </div>
+        <div class="ex-cmdbar">
+          <button class="ex-btn" id="ex-new-file-btn" onclick="exNewFile()" title="New file in this folder">📄 New file</button>
+          <button class="ex-btn" id="ex-new-dir-btn" onclick="exNewDir()" title="New folder in this folder">📁 New folder</button>
+          <button class="ex-btn" onclick="exRefresh()" title="Refresh">⟳ Refresh</button>
+        </div>
+        <div class="ex-header" id="ex-header">
+          <div class="ex-hcol ex-sortable" data-key="name">Name<span class="ex-sortind" id="ex-sort-name"></span></div>
+          <div class="ex-hcol ex-sortable" data-key="modified">Date modified<span class="ex-sortind" id="ex-sort-modified"></span></div>
+          <div class="ex-hcol ex-sortable" data-key="type">Type<span class="ex-sortind" id="ex-sort-type"></span></div>
+          <div class="ex-hcol ex-sortable ex-hsize" data-key="size">Size<span class="ex-sortind" id="ex-sort-size"></span></div>
+        </div>
+        <div class="ex-list" id="file-list" tabindex="0"></div>
+        <div class="ex-status"><span id="ex-status">0 items</span></div>
+        <div id="file-editor-area" style="display:none;flex-direction:column;gap:8px;padding-top:8px;border-top:1px solid var(--border);flex:0 0 45%">
+          <div style="display:flex;gap:8px;align-items:center">
+            <span id="file-editor-path" style="font-size:12px;color:var(--muted)"></span>
+            <button class="btn btn-primary btn-sm" onclick="fileSave()">💾 Save</button>
+            <button class="btn btn-secondary btn-sm" onclick="fileCloseEditor()">✕ Close</button>
           </div>
-          <div style="display:flex;gap:8px;flex-shrink:0">
-            <button class="btn btn-secondary btn-sm" onclick="fileGoUp()">⬆ Up</button>
-            <span id="file-current-path" style="font-size:12px;color:var(--muted);padding:4px 0">/</span>
-          </div>
-          <div id="file-list" style="flex:1;overflow-y:auto" class="runner-output"></div>
-          <div style="display:flex;gap:8px;flex-shrink:0;padding-top:8px;border-top:1px solid var(--border)">
-            <input type="text" id="file-new-name" placeholder="filename.ext" style="flex:1;font-size:12px">
-            <button class="btn btn-secondary btn-sm" onclick="fileCreate()">+ File</button>
-            <button class="btn btn-secondary btn-sm" onclick="fileCreateDir()">+ Dir</button>
-          </div>
-          <div id="file-editor-area" style="display:none;flex-direction:column;flex:1;gap:8px;padding-top:8px;border-top:1px solid var(--border)">
-            <div style="display:flex;gap:8px;align-items:center">
-              <span id="file-editor-path" style="font-size:12px;color:var(--muted)"></span>
-              <button class="btn btn-primary btn-sm" onclick="fileSave()">💾 Save</button>
-              <button class="btn btn-secondary btn-sm" onclick="fileCloseEditor()">✕ Close</button>
-            </div>
-            <textarea id="file-editor" style="flex:1;font-family:monospace;font-size:13px;padding:12px;background:#0d1117;border:1px solid var(--border);border-radius:8px;color:var(--text);resize:none"></textarea>
-          </div>
+          <textarea id="file-editor" style="flex:1;font-family:monospace;font-size:13px;padding:12px;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);resize:none"></textarea>
         </div>
       </div>
+      <div class="ex-context" id="ex-context"></div>
     </div>
 
     <!-- Search Tab -->
@@ -4033,7 +4115,7 @@ function switchTab(name) {
     p.classList.toggle('active', p.id === 'tab-' + name);
   });
   if (name === 'codeprojects') loadCodeProjects();
-  if (name === 'files' && !filesLoadedOnce) { filesLoadedOnce = true; loadFileList(''); }
+  if (name === 'files' && !filesLoadedOnce) { filesLoadedOnce = true; exInit(); loadFileList(''); }
   if (name === 'email' && !emailInitedOnce) { emailInitedOnce = true; initEmailTab(); }
   if (name === 'calendar' && !calendarInitedOnce) { calendarInitedOnce = true; initCalendarTab(); }
   if (name === 'skills' && !skillsInitedOnce) { skillsInitedOnce = true; loadSkills(); }
@@ -5071,38 +5153,377 @@ async function doImageGen() {
   }
 }
 
-// ── File Browser ──────────────────────────────────────────────────────────────
+// ── File Explorer (Windows Explorer style) ────────────────────────────────────
 
-let fileCurrentPath = '';
+let fileCurrentPath = '';            // relative path under home ('' = root)
+let exAllEntries = [];               // current listing: [{name, path, isDir, size, modified}]
+let exHistory = [];
+let exHistoryIdx = -1;
+let exSortKey = 'name';
+let exSortDir = 1;
+let exSelected = null;
+let exCreating = null;               // 'file' | 'dir' while the inline name box is open
+let exInited = false;
 
-async function loadFileList(path) {
-  fileCurrentPath = path || '';
+const EX_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+
+function exExt(name) { const m = /\.([^.]+)$/.exec(name); return m ? m[1].toLowerCase() : ''; }
+
+const EX_TYPE_LABELS = {
+  txt: 'Text Document', md: 'Markdown Document', log: 'Log File', pdf: 'PDF Document',
+  html: 'HTML Document', htm: 'HTML Document', css: 'Style Sheet', js: 'JavaScript File',
+  ts: 'TypeScript File', py: 'Python File', rs: 'Rust Source File', go: 'Go Source File',
+  c: 'C Source File', cpp: 'C++ Source File', h: 'Header File', sh: 'Shell Script',
+  json: 'JSON File', xml: 'XML Document', yaml: 'YAML Document', yml: 'YAML Document',
+  png: 'PNG Image', jpg: 'JPG File', jpeg: 'JPEG File', gif: 'GIF File', svg: 'SVG Document',
+  webp: 'WebP Image', bmp: 'Bitmap Image', ico: 'Icon File',
+  mp3: 'MP3 Audio', wav: 'Wave Sound', flac: 'FLAC Audio', ogg: 'OGG Audio',
+  mp4: 'MP4 Video', mkv: 'MKV Video', webm: 'WebM Video', avi: 'AVI Video',
+  zip: 'ZIP Archive', tar: 'TAR Archive', gz: 'GZip Archive', '7z': '7-Zip Archive', xz: 'XZ Archive',
+  exe: 'Application', msi: 'Installer Package', deb: 'Debian Package', rpm: 'RPM Package',
+  apk: 'Android Package', iso: 'Disc Image', torrent: 'Torrent File',
+};
+
+const EX_ICON_COLORS = {
+  py: '#3776ab', js: '#b9972e', ts: '#3178c6', html: '#e34c26', css: '#2965f1', json: '#b58a0c',
+  rs: '#d97706', go: '#0088a8', c: '#55606b', cpp: '#00599c', sh: '#4e8f2f', java: '#b07219',
+  md: '#7d8590', txt: '#7d8590', log: '#7d8590',
+  png: '#a855f7', jpg: '#a855f7', jpeg: '#a855f7', gif: '#a855f7', webp: '#a855f7', svg: '#a855f7', bmp: '#a855f7', ico: '#a855f7',
+  mp3: '#22c55e', wav: '#22c55e', flac: '#22c55e', ogg: '#22c55e',
+  mp4: '#ec4899', mkv: '#ec4899', webm: '#ec4899', avi: '#ec4899',
+  zip: '#d97706', tar: '#d97706', gz: '#d97706', '7z': '#d97706', xz: '#d97706',
+  pdf: '#dc2626', exe: '#0d9488', msi: '#0d9488', deb: '#0d9488', rpm: '#0d9488', apk: '#22c55e', iso: '#6b7280',
+};
+
+function exTypeLabel(e) {
+  if (e.isDir) return 'File folder';
+  const ext = exExt(e.name);
+  return EX_TYPE_LABELS[ext] || (ext ? ext.toUpperCase() + ' File' : 'File');
+}
+
+function exFormatSize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+  if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + ' MB';
+  return (bytes / 1073741824).toFixed(1) + ' GB';
+}
+
+function exFormatDate(ts) {
+  if (!ts) return '';
+  const d = new Date(ts * 1000);
+  return d.toLocaleString([], { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+}
+
+function exIconSvg(e) {
+  if (e.isDir) {
+    return `<svg width="20" height="20" viewBox="0 0 24 24"><path d="M2.5 5.5A1.5 1.5 0 0 1 4 4h4.7c.5 0 .97.2 1.32.55L11.4 6h8.1A1.5 1.5 0 0 1 21 7.5v11a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5z" fill="#f0b64a" stroke="#b98a4a" stroke-width="1"/><path d="M3 9.7h18" stroke="#c98d2e" stroke-width="1"/></svg>`;
+  }
+  const ext = exExt(e.name);
+  const color = EX_ICON_COLORS[ext] || '#6b7280';
+  const label = (ext || 'FILE').toUpperCase().slice(0, 4);
+  const fs = label.length >= 4 ? 5 : 6;
+  return `<svg width="20" height="20" viewBox="0 0 24 24"><path d="M6 2.5h8l5 5V21a.5.5 0 0 1-.5.5h-12A.5.5 0 0 1 6 21z" fill="#e9edf2" stroke="#9aa4b2" stroke-width="1"/><path d="M14 2.5v5h5" fill="none" stroke="#9aa4b2" stroke-width="1"/><text x="12.5" y="18" text-anchor="middle" font-size="${fs}" font-weight="700" fill="${color}" font-family="Segoe UI, sans-serif">${escHtml(label)}</text></svg>`;
+}
+
+function exInit() {
+  if (exInited) return;
+  exInited = true;
   const list = document.getElementById('file-list');
-  document.getElementById('file-current-path').textContent = '/' + path;
-  try {
-    const r = await fetch(`${API}/api/files/list?path=${encodeURIComponent(path)}`);
-    const data = await r.json();
-    if (!data.dirs && !data.files) {
-      list.innerHTML = '<div style="padding:20px;color:var(--muted);text-align:center">No projects yet. Generate one first.</div>';
+  const menu = document.getElementById('ex-context');
+
+  // Click: select the row (clicking empty space clears selection)
+  list.addEventListener('click', ev => {
+    if (ev.target.closest('.ex-rename-input')) return;
+    const row = ev.target.closest('.ex-row');
+    if (!row || row.dataset.path === undefined) {
+      if (!exCreating) { exSelected = null; exRender(); }
       return;
     }
-    let html = '';
-    for (const d of data.dirs) {
-      html += `<div class="conv-item" onclick="loadFileList('${escHtml(d.path)}')" style="cursor:pointer">📁 ${escHtml(d.name)}</div>`;
+    list.focus();
+    exSelected = row.dataset.path;
+    exRender();
+  });
+
+  // Double-click: open (navigate into a folder, open a file in the editor)
+  list.addEventListener('dblclick', ev => {
+    if (ev.target.closest('.ex-rename-input')) return;
+    const row = ev.target.closest('.ex-row');
+    if (!row || row.dataset.path === undefined) return;
+    exOpen(row.dataset.path, row.dataset.isdir === '1');
+  });
+
+  // Right-click: context menu (item menu or empty-space menu)
+  list.addEventListener('contextmenu', ev => {
+    ev.preventDefault();
+    const row = ev.target.closest('.ex-row');
+    if (row && row.dataset.path !== undefined) {
+      exSelected = row.dataset.path;
+      exRender();
+      exShowMenu(ev.clientX, ev.clientY, [
+        { act: 'open', label: '📂 Open', path: row.dataset.path },
+        { act: 'rename', label: '✏️ Rename', path: row.dataset.path },
+        { sep: true },
+        { act: 'delete', label: '🗑️ Delete', path: row.dataset.path, danger: true },
+      ]);
+    } else {
+      exShowMenu(ev.clientX, ev.clientY, [
+        { act: 'newfile', label: '📄 New file' },
+        { act: 'newdir', label: '📁 New folder' },
+        { sep: true },
+        { act: 'refresh', label: '⟳ Refresh' },
+      ]);
     }
-    for (const f of data.files) {
-      html += `<div class="conv-item" onclick="fileOpen('${escHtml(f.path)}')" style="cursor:pointer">📄 ${escHtml(f.name)} <span style="font-size:11px;color:var(--muted);margin-left:auto">${(f.size / 1024).toFixed(1)} KB</span></div>`;
+  });
+
+  // Keyboard: F2 rename, Delete, Enter open, Backspace up, arrows move selection
+  list.addEventListener('keydown', ev => {
+    if (ev.key === 'F2' && exSelected) { ev.preventDefault(); exStartRename(exSelected); }
+    else if (ev.key === 'Delete' && exSelected) { ev.preventDefault(); exDelete(exSelected); }
+    else if (ev.key === 'Enter' && exSelected) {
+      ev.preventDefault();
+      const e = exFind(exSelected);
+      if (e) exOpen(exSelected, e.isDir);
     }
-    list.innerHTML = html || '<div style="padding:20px;color:var(--muted);text-align:center">Empty directory</div>';
-  } catch (err) {
-    list.innerHTML = `<span class="stderr">Error: ${err.message}</span>`;
+    else if (ev.key === 'Backspace' && document.activeElement === list) { ev.preventDefault(); exGoUp(); }
+    else if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') { ev.preventDefault(); exArrow(ev.key === 'ArrowDown' ? 1 : -1); }
+  });
+
+  // Column headers: click to sort, click again to flip direction
+  document.getElementById('ex-header').addEventListener('click', ev => {
+    const col = ev.target.closest('.ex-hcol');
+    if (col) exSetSort(col.dataset.key);
+  });
+
+  // Breadcrumb segments: click to jump to that folder
+  document.getElementById('ex-breadcrumb').addEventListener('click', ev => {
+    const c = ev.target.closest('.ex-crumb');
+    if (c) exNavigate(c.dataset.path || '');
+  });
+
+  menu.addEventListener('click', ev => {
+    const item = ev.target.closest('.ex-context-item');
+    if (!item) return;
+    menu.style.display = 'none';
+    const act = item.dataset.act, path = item.dataset.path;
+    if (act === 'open') { const e = exFind(path); if (e) exOpen(path, e.isDir); }
+    else if (act === 'rename') exStartRename(path);
+    else if (act === 'delete') exDelete(path);
+    else if (act === 'newfile') exNewFile();
+    else if (act === 'newdir') exNewDir();
+    else if (act === 'refresh') exRefresh();
+  });
+
+  document.addEventListener('click', () => { menu.style.display = 'none'; });
+  document.addEventListener('keydown', ev => { if (ev.key === 'Escape') menu.style.display = 'none'; });
+}
+
+function exShowMenu(x, y, items) {
+  const menu = document.getElementById('ex-context');
+  menu.innerHTML = items.map(it => it.sep
+    ? '<div class="ex-context-sep"></div>'
+    : `<div class="ex-context-item${it.danger ? ' danger' : ''}" data-act="${it.act}" data-path="${escHtml(it.path || '')}">${escHtml(it.label)}</div>`
+  ).join('');
+  menu.style.display = 'block';
+  const rect = menu.getBoundingClientRect();
+  menu.style.left = Math.min(x, window.innerWidth - rect.width - 8) + 'px';
+  menu.style.top = Math.min(y, window.innerHeight - rect.height - 8) + 'px';
+}
+
+function exSetSort(key) {
+  if (exSortKey === key) exSortDir = -exSortDir;
+  else { exSortKey = key; exSortDir = 1; }
+  exRender();
+}
+
+function exVisibleEntries() {
+  const q = (document.getElementById('ex-search').value || '').trim().toLowerCase();
+  const all = exAllEntries.filter(e => !q || e.name.toLowerCase().includes(q));
+  all.sort((a, b) => {
+    if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;   // folders always first (Explorer default)
+    let r = 0;
+    if (exSortKey === 'name') r = EX_COLLATOR.compare(a.name, b.name);
+    else if (exSortKey === 'modified') r = (a.modified || 0) - (b.modified || 0);
+    else if (exSortKey === 'size') r = (a.size || 0) - (b.size || 0);
+    else r = EX_COLLATOR.compare(exTypeLabel(a), exTypeLabel(b));
+    if (!r && exSortKey !== 'name') r = EX_COLLATOR.compare(a.name, b.name);
+    return r * exSortDir;
+  });
+  return all;
+}
+
+function exRender() {
+  const list = document.getElementById('file-list');
+  // Breadcrumb: 🏠 Home + one crumb per path segment
+  const parts = fileCurrentPath ? fileCurrentPath.split('/').filter(Boolean) : [];
+  let bc = `<span class="ex-crumb" data-path="" title="Home">🏠 Home</span>`;
+  parts.forEach((p, i) => {
+    bc += `<span class="ex-crumb-sep">▸</span><span class="ex-crumb" data-path="${escHtml(parts.slice(0, i + 1).join('/'))}" title="${escHtml(p)}">${escHtml(p)}</span>`;
+  });
+  document.getElementById('ex-breadcrumb').innerHTML = bc;
+  // Sort indicators
+  for (const k of ['name', 'modified', 'type', 'size'])
+    document.getElementById('ex-sort-' + k).textContent = k === exSortKey ? (exSortDir > 0 ? '▲' : '▼') : '';
+  // Nav buttons
+  document.getElementById('ex-back-btn').disabled = exHistoryIdx <= 0;
+  document.getElementById('ex-fwd-btn').disabled = exHistoryIdx >= exHistory.length - 1;
+  document.getElementById('ex-up-btn').disabled = !fileCurrentPath;
+  // Rows
+  const entries = exVisibleEntries();
+  let html = '';
+  if (exCreating) {
+    const icon = exCreating === 'dir' ? exIconSvg({ isDir: true }) : exIconSvg({ isDir: false, name: 'x.txt' });
+    const defaultName = exCreating === 'dir' ? 'New folder' : 'New file.txt';
+    html += `<div class="ex-row"><div class="ex-cell ex-name">${icon}<input id="ex-creating-input" class="ex-rename-input" value="${escHtml(defaultName)}"></div><div class="ex-cell"></div><div class="ex-cell"></div><div class="ex-cell"></div></div>`;
+  }
+  for (const e of entries) {
+    html += `<div class="ex-row${e.path === exSelected ? ' ex-selected' : ''}" data-path="${escHtml(e.path)}" data-isdir="${e.isDir ? 1 : 0}">
+      <div class="ex-cell ex-name">${exIconSvg(e)}<span>${escHtml(e.name)}</span></div>
+      <div class="ex-cell ex-modified">${exFormatDate(e.modified)}</div>
+      <div class="ex-cell ex-type">${escHtml(exTypeLabel(e))}</div>
+      <div class="ex-cell ex-size">${e.isDir ? '' : exFormatSize(e.size || 0)}</div>
+    </div>`;
+  }
+  if (!entries.length && !exCreating) {
+    const q = (document.getElementById('ex-search').value || '').trim();
+    html += `<div style="padding:24px;color:var(--muted);text-align:center;font-size:12px">${q ? 'No items match your search.' : 'This folder is empty.'}</div>`;
+  }
+  list.innerHTML = html;
+  // Status bar (Explorer style: "12 items | 1 item selected")
+  document.getElementById('ex-status').textContent =
+    entries.length + (entries.length === 1 ? ' item' : ' items') +
+    (exSelected && entries.some(e => e.path === exSelected) ? ' | 1 item selected' : '');
+  // Wire + focus the inline creation box
+  if (exCreating) {
+    const input = document.getElementById('ex-creating-input');
+    const dot = input.value.lastIndexOf('.');
+    input.focus();
+    input.setSelectionRange(0, dot > 0 ? dot : input.value.length);
+    input.addEventListener('keydown', ev => {
+      if (ev.key === 'Enter') { ev.preventDefault(); exCommitCreate(input.value.trim()); }
+      else if (ev.key === 'Escape') { ev.preventDefault(); exCreating = null; exRender(); }
+      ev.stopPropagation();
+    });
+    input.addEventListener('blur', () => { if (exCreating) exCommitCreate(input.value.trim()); });
   }
 }
 
-function fileGoUp() {
-  const parts = fileCurrentPath.split('/').filter(Boolean);
-  parts.pop();
-  loadFileList(parts.join('/'));
+async function loadFileList(path, pushHistory = true) {
+  path = path || '';
+  fileCurrentPath = path;
+  exSelected = null;
+  const searchEl = document.getElementById('ex-search');
+  if (searchEl) searchEl.value = '';
+  let data;
+  try {
+    const r = await fetch(`${API}/api/files/list?path=${encodeURIComponent(path)}`);
+    data = await r.json();
+  } catch (err) {
+    document.getElementById('file-list').innerHTML = `<div style="padding:16px;color:var(--danger);font-size:12px">Error: ${escHtml(err.message)}</div>`;
+    return;
+  }
+  exAllEntries = [
+    ...(data.dirs || []).map(d => ({ ...d, isDir: true })),
+    ...(data.files || []).map(f => ({ ...f, isDir: false })),
+  ];
+  if (pushHistory || exHistoryIdx === -1) {
+    exHistory = exHistory.slice(0, exHistoryIdx + 1);
+    exHistory.push(path);
+    exHistoryIdx = exHistory.length - 1;
+  }
+  exRender();
+}
+
+function exNavigate(path) { loadFileList(path, true); }
+function exRefresh() { loadFileList(fileCurrentPath, false); }
+function exBack() { if (exHistoryIdx > 0) { exHistoryIdx--; loadFileList(exHistory[exHistoryIdx], false); } }
+function exForward() { if (exHistoryIdx < exHistory.length - 1) { exHistoryIdx++; loadFileList(exHistory[exHistoryIdx], false); } }
+function exGoUp() { if (!fileCurrentPath) return; const parts = fileCurrentPath.split('/').filter(Boolean); parts.pop(); loadFileList(parts.join('/'), true); }
+function exFind(path) { return exAllEntries.find(e => e.path === path); }
+function exOpen(path, isDir) { if (isDir) loadFileList(path, true); else fileOpen(path); }
+
+function exArrow(delta) {
+  const rows = [...document.querySelectorAll('#file-list .ex-row[data-path]')];
+  if (!rows.length) return;
+  let idx = rows.findIndex(r => r.dataset.path === exSelected);
+  idx = idx === -1 ? (delta > 0 ? 0 : rows.length - 1) : Math.min(rows.length - 1, Math.max(0, idx + delta));
+  exSelected = rows[idx].dataset.path;
+  exRender();
+  const el = document.querySelector(`#file-list .ex-row[data-path="${CSS.escape(exSelected)}"]`);
+  if (el) el.scrollIntoView({ block: 'nearest' });
+}
+
+function exNewFile() { exCreating = 'file'; exRender(); }
+function exNewDir() { exCreating = 'dir'; exRender(); }
+
+async function exCommitCreate(name) {
+  const kind = exCreating;
+  exCreating = null;
+  if (!name) { exRender(); return; }
+  const full = fileCurrentPath ? fileCurrentPath + '/' + name : name;
+  try {
+    const url = kind === 'dir' ? `${API}/api/files/mkdir` : `${API}/api/files/write`;
+    const body = kind === 'dir' ? { path: full } : { path: full, content: '' };
+    const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (!r.ok) throw new Error((await r.json()).detail || 'create failed');
+    await loadFileList(fileCurrentPath, false);
+    exSelected = full;
+    exRender();
+  } catch (err) {
+    alert('Error: ' + err.message);
+    loadFileList(fileCurrentPath, false);
+  }
+}
+
+function exStartRename(path) {
+  const e = exFind(path);
+  if (!e) return;
+  const row = document.querySelector(`#file-list .ex-row[data-path="${CSS.escape(path)}"]`);
+  const span = row && row.querySelector('.ex-name span');
+  if (!span) return;
+  const input = document.createElement('input');
+  input.className = 'ex-rename-input';
+  input.value = e.name;
+  span.replaceWith(input);
+  const dot = e.name.lastIndexOf('.');
+  input.focus();
+  input.setSelectionRange(0, dot > 0 ? dot : e.name.length);
+  let done = false;
+  const finish = async commit => {
+    if (done) return;
+    done = true;
+    input.replaceWith(span);
+    const newName = input.value.trim();
+    if (!commit || !newName || newName === e.name) return;
+    try {
+      const r = await fetch(`${API}/api/files/rename`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, new_name: newName }) });
+      if (!r.ok) throw new Error((await r.json()).detail || 'rename failed');
+      await loadFileList(fileCurrentPath, false);
+      exSelected = path.split('/').slice(0, -1).concat(newName).join('/');
+      exRender();
+    } catch (err) {
+      alert('Error: ' + err.message);
+      exRender();
+    }
+  };
+  input.addEventListener('keydown', ev => {
+    if (ev.key === 'Enter') { ev.preventDefault(); finish(true); }
+    else if (ev.key === 'Escape') { ev.preventDefault(); finish(false); }
+    ev.stopPropagation();
+  });
+  input.addEventListener('blur', () => finish(true));
+}
+
+async function exDelete(path) {
+  const e = exFind(path);
+  if (!e) return;
+  const what = e.isDir ? `folder "${e.name}" and everything in it` : `"${e.name}"`;
+  if (!confirm(`Are you sure you want to permanently delete ${what}?`)) return;
+  try {
+    const r = await fetch(`${API}/api/files/delete`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path }) });
+    if (!r.ok) throw new Error((await r.json()).detail || 'delete failed');
+    exSelected = null;
+    loadFileList(fileCurrentPath, false);
+  } catch (err) { alert('Error: ' + err.message); }
 }
 
 async function fileOpen(path) {
@@ -5113,7 +5534,7 @@ async function fileOpen(path) {
     });
     const data = await r.json();
     if (data.content !== undefined) {
-      document.getElementById('file-editor-path').textContent = path;
+      document.getElementById('file-editor-path').textContent = '~/' + path;
       document.getElementById('file-editor').value = data.content;
       document.getElementById('file-editor-area').style.display = 'flex';
       document.getElementById('file-editor').dataset.path = path;
@@ -5132,7 +5553,7 @@ async function fileSave() {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ path, content })
     });
-    loadFileList(fileCurrentPath);
+    loadFileList(fileCurrentPath, false);
   } catch (err) {
     alert('Error saving: ' + err.message);
   }
@@ -5140,34 +5561,6 @@ async function fileSave() {
 
 function fileCloseEditor() {
   document.getElementById('file-editor-area').style.display = 'none';
-}
-
-async function fileCreate() {
-  const name = document.getElementById('file-new-name').value.trim();
-  if (!name) return;
-  const fullPath = fileCurrentPath ? fileCurrentPath + '/' + name : name;
-  try {
-    await fetch(`${API}/api/files/write`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path: fullPath, content: '' })
-    });
-    document.getElementById('file-new-name').value = '';
-    loadFileList(fileCurrentPath);
-  } catch (err) { alert('Error: ' + err.message); }
-}
-
-async function fileCreateDir() {
-  const name = document.getElementById('file-new-name').value.trim();
-  if (!name) return;
-  try {
-    const fullPath = fileCurrentPath ? fileCurrentPath + '/' + name + '/.gitkeep' : name + '/.gitkeep';
-    await fetch(`${API}/api/files/write`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path: fullPath, content: '' })
-    });
-    document.getElementById('file-new-name').value = '';
-    loadFileList(fileCurrentPath);
-  } catch (err) { alert('Error: ' + err.message); }
 }
 
 // ── Agent Mode ────────────────────────────────────────────────────────────────

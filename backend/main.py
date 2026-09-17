@@ -377,6 +377,16 @@ class FileSearchRequest(BaseModel):
     path: str = ""
     content_search: bool = False
 
+class FileDeleteRequest(BaseModel):
+    path: str
+
+class FileRenameRequest(BaseModel):
+    path: str
+    new_name: str
+
+class FileMkdirRequest(BaseModel):
+    path: str
+
 class AgentRequest(BaseModel):
     model: str
     message: str
@@ -1566,12 +1576,12 @@ async def list_files(path: str = ""):
     files, dirs = [], []
     for entry in _safe_iterdir(target):
         item = {"name": entry.name, "path": str(entry.relative_to(base))}
+        st = _safe_stat(entry)
+        item["modified"] = st.st_mtime if st else 0
         if entry.is_dir():
             dirs.append(item)
         else:
-            st = _safe_stat(entry)
             item["size"] = st.st_size if st else 0
-            item["modified"] = st.st_mtime if st else 0
             files.append(item)
     return {"files": files, "dirs": dirs, "current_path": path}
 
@@ -1601,6 +1611,58 @@ async def write_file(req: FileWriteRequest):
         return {"saved": True, "path": req.path}
     except Exception as e:
         raise HTTPException(500, f"Cannot write file: {e}")
+
+@app.post("/api/files/mkdir")
+async def mkdir_file(req: FileMkdirRequest):
+    base = Path(BASE_PROJECTS).resolve()
+    target = (base / req.path).resolve()
+    if not target.is_relative_to(base) or target == base:
+        raise HTTPException(403, "Path outside allowed directory")
+    if target.exists():
+        raise HTTPException(409, "An item with that name already exists")
+    try:
+        target.mkdir(parents=True)
+        return {"created": True, "path": req.path}
+    except Exception as e:
+        raise HTTPException(500, f"Cannot create folder: {e}")
+
+@app.post("/api/files/delete")
+async def delete_file(req: FileDeleteRequest):
+    base = Path(BASE_PROJECTS).resolve()
+    target = (base / req.path).resolve()
+    if not target.is_relative_to(base) or target == base:
+        raise HTTPException(403, "Path outside allowed directory")
+    if not target.exists():
+        raise HTTPException(404, "Not found")
+    import shutil
+    try:
+        if target.is_dir():
+            shutil.rmtree(target)
+        else:
+            target.unlink()
+        return {"deleted": True, "path": req.path}
+    except Exception as e:
+        raise HTTPException(500, f"Cannot delete: {e}")
+
+@app.post("/api/files/rename")
+async def rename_file(req: FileRenameRequest):
+    base = Path(BASE_PROJECTS).resolve()
+    target = (base / req.path).resolve()
+    if not target.is_relative_to(base) or target == base:
+        raise HTTPException(403, "Path outside allowed directory")
+    if not target.exists():
+        raise HTTPException(404, "Not found")
+    new_name = Path(req.new_name).name  # strip any path components
+    if not new_name or new_name in (".", ".."):
+        raise HTTPException(400, "Invalid name")
+    dest = target.parent / new_name
+    if dest.exists() and dest != target:
+        raise HTTPException(409, "An item with that name already exists")
+    try:
+        target.rename(dest)
+        return {"renamed": True, "old_path": req.path, "new_path": str(dest.relative_to(base))}
+    except Exception as e:
+        raise HTTPException(500, f"Cannot rename: {e}")
 
 
 # ── File Upload ────────────────────────────────────────────────────────────────
