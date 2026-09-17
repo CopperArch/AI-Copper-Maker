@@ -97,6 +97,7 @@ CLOUD_PROVIDERS = {
     "anthropic": {"label": "Claude (Anthropic)", "default_model": "claude-sonnet-4-6"},
     "openai": {"label": "ChatGPT (OpenAI)", "default_model": "gpt-4o"},
     "google": {"label": "Gemini (Google)", "default_model": "gemini-2.0-flash"},
+    "openrouter": {"label": "OpenRouter (any model)", "default_model": "anthropic/claude-sonnet-4.5"},
 }
 
 # ── Cloud-model pricing + spend tracking ──────────────────────────────────────
@@ -130,6 +131,13 @@ PRICING = {
         "gemini-2.0-flash": {"input": 0.10, "output": 0.40, "cache_read": 0.025},
         "gemini-2.5-flash": {"input": 0.30, "output": 2.50, "cache_read": 0.075},
         "gemini-2.5-pro": {"input": 1.25, "output": 10.0, "cache_read": 0.31},
+},
+    "openrouter": {
+        "default": {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75},
+        "anthropic/claude-sonnet-4.5": {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75},
+        "anthropic/claude-opus-4": {"input": 15.0, "output": 75.0, "cache_read": 1.50, "cache_write": 18.75},
+        "openai/gpt-4o": {"input": 2.50, "output": 10.0, "cache_read": 1.25},
+        "openai/gpt-4o-mini": {"input": 0.15, "output": 0.60, "cache_read": 0.075},
     },
 }
 
@@ -205,6 +213,21 @@ FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
 CONFIG_FILE = Path(__file__).parent.parent / "config.json"
 CONVERSATIONS_FILE = Path(__file__).parent.parent / "conversations.json"
 DEFAULT_SAVE_DIR = str(Path.home() / "Downloads" / "LLM-CODER")
+
+
+def _find_project_root(path: str) -> str:
+    """Walk up from *path* to find a project root marker (.git, Cargo.toml,
+    or .hg). Returns the absolute parent directory containing the marker, or
+    the original path's parent if no marker is found."""
+    p = Path(path).resolve()
+    for _ in range(20):  # don't go beyond 20 levels up
+        if any((p / marker).is_dir() for marker in (".git", "Cargo.toml", ".hg")):
+            return str(p)
+        parent = p.parent
+        if parent == p:  # reached filesystem root
+            break
+        p = parent
+    return str(p.parent if p.parent != p else p)
 
 
 def _detect_environment() -> dict:
@@ -2897,6 +2920,9 @@ async def _test_cloud_key(provider: str, key: str) -> None:
                                   headers={"Authorization": f"Bearer {key}"})
         elif provider == "google":
             r = await client.get("https://generativelanguage.googleapis.com/v1beta/models", params={"key": key})
+        elif provider == "openrouter":
+            r = await client.get("https://openrouter.ai/api/v1/models",
+                                  headers={"Authorization": f"Bearer {key}"})
         else:
             return
     if r.status_code != 200:
@@ -2974,6 +3000,192 @@ async def cloud_model_details():
             "input_per_mtok": rates.get("input"), "output_per_mtok": rates.get("output"),
         })
     return {"models": out}
+
+
+async def _fetch_ollama_pulls(model_name: str) -> int:
+    """Scrape ollama.com search results for pull count of a model name."""
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            r = await client.get("https://ollama.com/search", params={"q": model_name})
+            txt = r.text
+            # look for patterns like "1.2k downloads" or "1,234 downloads"
+            import re
+            m = re.search(r'([\d,]+(?:\.\d+)?k?\s*download)', txt, re.I)
+            if m:
+                num_str = m.group(1).replace(",", "").replace("k", "000").replace("download", "").strip()
+                return int(float(num_str))
+    except Exception:
+        pass
+    return 0
+
+
+async def _fetch_hf_model_meta(model_id: str) -> dict:
+    """Fetch Hugging Face model metadata: downloads and likes."""
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            r = await client.get(f"https://huggingface.co/api/models/{model_id}")
+            if r.status_code == 200:
+                j = r.json()
+                return {
+                    "downloads": j.get("downloads", 0),
+                    "likes": j.get("likes", 0),
+                    "tags": j.get("tags", []),
+                }
+    except Exception:
+        pass
+    return {"downloads": 0, "likes": 0, "tags": []}
+
+
+async def _fetch_openrouter_models() -> list:
+    """Fetch public OpenRouter models API — returns model list with pricing/context."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get("https://openrouter.ai/api/v1/models")
+            if r.status_code == 200:
+                return r.json().get("data", [])
+    except Exception:
+        pass
+    return []
+
+
+@app.get("/api/models/rankings")
+async def list_model_rankings():
+    """Return ranked positions for models in each section (Local / Free / Paid),
+    computed from multiple independent sources: Ollama pull counts, HuggingFace
+    downloads/likes, and OpenRouter provider signals.  Includes rank #, score,
+    and source list per model so the UI can sort and display badges."""
+    import json, time, re
+    from pathlib import Path
+
+    cache_file = Path(__file__).parent.parent / "model_rankings_cache.json"
+    cached = None
+    if cache_file.exists():
+        try:
+            data = json.loads(cache_file.read_text())
+            if time.time() - data.get("fetched_at", 0) < 86400:
+                cached = data
+        except Exception:
+            pass
+
+    if cached:
+        return {"rankings": cached["rankings"], "fetched_hours_ago": int((time.time() - cached["fetched_at"]) / 3600)}
+
+    rankings = {"local": [], "free": [], "paid": []}
+
+    # ── 1. Local models: use Ollama installed models + pull counts ──
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            r = await client.get(f"{OLLAMA}/api/tags")
+            ollama_data = r.json().get("models", [])
+    except Exception:
+        ollama_data = []
+
+    installed = {m.get("name"): m for m in ollama_data}
+    # Also check config.json for installed models; the existing list_models already
+    # handles the /api/models call, but we read directly here for pull counts.
+    # Pull count per model from ollama.com search:
+    local_models = []
+    for m in ollama_data:
+        name = m.get("name", "")
+        pulls = await _fetch_ollama_pulls(name)
+        # context_length from details
+        ctx = (m.get("details") or {}).get("context_length") or 0
+        local_models.append({
+            "name": name,
+            "score": min(pulls / 10000, 1.0) if pulls else 0.0,  # normalize to 0-1
+            "pulls": pulls,
+            "sources": ["ollama"],
+            "context_length": ctx,
+        })
+
+    # ── 2. Free/open-weight models: Ollama catalog + HuggingFace metadata ──
+    # The static CATALOG is in the backend; we augment each with HF data.
+    free_models = []
+    for c in CATALOG:
+        if c.get("category") not in ("uncensored", "paid"):
+            # Augment with HF downloads/likes
+            hf = await _fetch_hf_model_meta(c.get("hf_id", c["name"]))
+            score = 0.0
+            if hf["downloads"] > 0:
+                score += 0.4 * min(hf["downloads"] / 500000, 1.0)
+            if hf["likes"] > 0:
+                score += 0.2 * min(hf["likes"] / 5000, 1.0)
+            # also add a small ollama-pull boost if the model appears in Ollama
+            ollama_boost = next((m["score"] for m in local_models if m["name"] == c["name"]), 0)
+            score += 0.4 * ollama_boost
+            score = min(score, 1.0)
+            free_models.append({
+                "name": c["name"],
+                "desc": c.get("desc", ""),
+                "score": score,
+                "sources": ["hf"] + (["ollama"] if ollama_boost > 0 else []),
+                "hf_downloads": hf["downloads"],
+                "hf_likes": hf["likes"],
+                "size_gb": c.get("size_gb"),
+            })
+
+    # ── 3. Paid/cloud models: OpenRouter signals + PRICING tier ──
+    keys = _load_api_keys()
+    paid_models = []
+    or_data = await _fetch_openrouter_models()
+    # Build a lookup: model id → {provider, pricing, etc}
+    or_by_id = {m.get("id"): m for m in or_data}
+    for p, meta in CLOUD_PROVIDERS.items():
+        configured = bool(keys.get(p))
+        default_model = meta["default_model"]
+        # OpenRouter provides per-model data; use default model's tier signals
+        or_model = or_by_id.get(default_model)
+        if or_model:
+            # Signals: context length, pricing tier, recency (created)
+            ctx = or_model.get("context_length", 0)
+            pricing = or_model.get("pricing", {})
+            # Simple scoring: newer + cheaper + larger context = higher rank
+            recency = 0
+            if "created" in or_model:
+                try:
+                    created = int(or_model["created"])
+                    recency = max(0, 1_000_000_000 - (time.time() * 1000 - created)) / 1_000_000_000
+                except Exception:
+                    recency = 0.5
+            tier = pricing.get("output", 0) if pricing else 0
+            # Normalize: inverse price (cheaper higher), recency, context size
+            price_score = max(0, 1 - min(tier / 100, 1))  # cheaper = higher score
+            ctx_score = min(ctx / 100_000, 1.0) if ctx else 0.0  # context up to 100k tokens
+            score = 0.4 * price_score + 0.3 * recency + 0.3 * ctx_score
+        else:
+            # No OpenRouter data; fallback to PRICING-only estimate
+            rates = PRICING.get(p, {}).get(default_model) or PRICING.get(p, {}).get("default", {})
+            input_r = rates.get("input", 0)
+            output_r = rates.get("output", 0)
+            # Cheaper models rank higher: normalize by inverse cost
+            price_score = max(0, 1 - (input_r + output_r) / 50)  # $50 threshold
+            score = 0.7 * price_score + 0.3 * (1 if configured else 0)
+        paid_models.append({
+            "name": default_model,
+            "provider": p,
+            "label": meta["label"],
+            "score": round(score, 3),
+            "sources": ["openrouter"] if or_model else ["pricing"],
+            "configured": configured,
+            "input_per_mtok": input_r,
+            "output_per_mtok": output_r,
+        })
+
+    # ── Sort each section by score descending, assign rank numbers ──
+    for section_key, section_models in [("local", local_models), ("free", free_models), ("paid", paid_models)]:
+        section_models.sort(key=lambda m: m["score"], reverse=True)
+        for rank, m in enumerate(section_models, start=1):
+            m["rank"] = rank
+        rankings[section_key] = section_models
+
+    # Cache for 24h
+    try:
+        cached_json = {"rankings": rankings, "fetched_at": time.time()}
+        cache_file.write_text(json.dumps(cached_json))
+    except Exception:
+        pass
+
+    return {"rankings": rankings, "fetched_hours_ago": 0}
 
 
 def _messages_for_cloud(messages: list, slim: bool = False) -> list:
@@ -3160,6 +3372,28 @@ async def _call_cloud_model(model_ref: str, messages: list, system: str, slim_hi
         text, usage = await _call_openai(model, messages, system, api_key)
     elif provider == "google":
         text, usage = await _call_gemini(model, messages, system, api_key)
+    elif provider == "openrouter":
+        async with httpx.AsyncClient(timeout=120) as client:
+            r = await client.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}", "content-type": "application/json"},
+                json={
+                    "model": model,
+                    "messages": [{"role": "system", "content": system}] + _messages_for_cloud(messages, slim=len(messages) > 8),
+                },
+            )
+            if r.status_code != 200:
+                return f"OpenRouter API error ({r.status_code}): {r.text[:500]}", {}
+            data = r.json()
+            u = data.get("usage", {}) or {}
+            usage = _usage_with_cost(
+                "openrouter", model,
+                input_tokens=u.get("prompt_tokens", 0),
+                output_tokens=u.get("completion_tokens", 0),
+                cached_tokens=(u.get("prompt_tokens_details") or {}).get("cached_tokens", 0),
+            )
+            _record_spend(model_ref, usage.get("cost", 0.0))
+            return data["choices"][0]["message"]["content"] or "", usage
     else:
         return f"Unknown cloud provider '{provider}'.", {}
     _record_spend(model_ref, usage.get("cost", 0.0))
@@ -3580,7 +3814,7 @@ LSP_BUILTINS = {
     "rust":       {"command": ["rust-analyzer"], "extensions": [".rs"]},
     "typescript": {"command": ["npx", "-y", "typescript-language-server", "--stdio"],
                     "extensions": [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"]},
-    "python":     {"command": ["npx", "-y", "pyright-langserver", "--stdio"],
+    "python":     {"command": ["pylsp"],
                     "extensions": [".py", ".pyi"]},
     "bash":       {"command": ["npx", "-y", "bash-language-server", "start"],
                     "extensions": [".sh", ".bash", ".zsh"]},
@@ -3627,14 +3861,14 @@ class _LspClient:
         self._opened = {}
         self.dead = False
 
-    async def start(self):
+    async def start(self, root_path: str | None = None):
         self.proc = await asyncio.create_subprocess_exec(
             *self.command,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
         asyncio.get_event_loop().create_task(self._read_loop())
-        root = Path(BASE_PROJECTS).resolve()
+        root = Path(root_path).resolve() if root_path else Path(BASE_PROJECTS).resolve()
         params = {
             "processId": os.getpid(),
             "rootUri": root.as_uri(),
@@ -3643,7 +3877,10 @@ class _LspClient:
         }
         if self.initialization:
             params["initializationOptions"] = self.initialization
-        await self._request("initialize", params, timeout=40)
+        # 120s: npx-based servers (typescript-language-server, pyright,
+        # bash-language-server) download themselves on first spawn — that
+        # cold download happens before the server ever answers initialize.
+        await self._request("initialize", params, timeout=120)
         self._notify("initialized", {})
         return self
 
@@ -3726,6 +3963,7 @@ class _LspClient:
         return self.diagnostics.get(uri) or []
 
 _lsp_clients: dict = {}
+_lsp_last_errors: dict = {}   # server name → last start failure, for /api/lsp/status
 
 async def _lsp_client_for(suffix: str):
     registry = _lsp_registry()
@@ -3740,12 +3978,15 @@ async def _lsp_client_for(suffix: str):
         return client
     cmd0 = spec["command"][0]
     if cmd0 not in ("npx", "node") and not shutil.which(cmd0):
+        _lsp_last_errors[name] = f"binary not found: {cmd0}"
         return None  # binary genuinely missing — don't try to spawn it every edit
     try:
         client = await _LspClient(name, spec["command"], spec.get("initialization")).start()
         _lsp_clients[name] = client
+        _lsp_last_errors.pop(name, None)
         return client
-    except Exception:
+    except Exception as e:
+        _lsp_last_errors[name] = f"{type(e).__name__}: {str(e)[:200]}"
         return None
 
 async def _lsp_feedback_for_path(path_str: str) -> str:
@@ -3755,7 +3996,7 @@ async def _lsp_feedback_for_path(path_str: str) -> str:
     if not path_str:
         return ""
     try:
-        base = Path(BASE_PROJECTS).resolve()
+        base = Path(_find_project_root(path_str)).resolve()
         target = (base / path_str).resolve()
         if not target.is_relative_to(base) or not target.is_file():
             return ""
@@ -3789,9 +4030,12 @@ async def lsp_status():
         client = _lsp_clients.get(name)
         cmd0 = spec["command"][0]
         available = cmd0 in ("npx", "node") or bool(shutil.which(cmd0))
+        state = ("running" if (client and not client.dead)
+                 else "error" if _lsp_last_errors.get(name)
+                 else "available" if available else "missing")
         servers.append({
             "name": name, "command": spec["command"], "extensions": spec.get("extensions", []),
-            "state": "running" if (client and not client.dead) else ("available" if available else "missing"),
+            "state": state, "error": _lsp_last_errors.get(name, "") if state == "error" else "",
         })
     return {"enabled": True, "servers": servers}
 

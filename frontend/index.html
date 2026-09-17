@@ -226,7 +226,7 @@
     position: absolute; inset: 0; z-index: 0; display: flex;
     align-items: center; justify-content: center; pointer-events: none; overflow: hidden;
   }
-  .logo-watermark img { width: min(48%, 520px); opacity: .05; user-select: none; }
+  .logo-watermark img { width: 100%; max-height: 90%; object-fit: contain; user-select: none; }
   .main > *:not(.logo-watermark) { position: relative; z-index: 1; }
   .tab-panel { display: none; flex: 1; flex-direction: column; overflow: hidden; }
   .tab-panel.active { display: flex; }
@@ -940,7 +940,7 @@
 
   <!-- Main -->
   <div class="main">
-    <div class="logo-watermark"><img src="assets/logo.png" alt=""></div>
+    <div class="logo-watermark"><img src="assets/logo-watermark.png" alt=""></div>
     <div id="update-banner" style="display:none;padding:8px 16px;background:rgba(35,134,54,.15);border-bottom:1px solid rgba(35,134,54,.3);font-size:13px;align-items:center;gap:10px"></div>
     <!-- Tabs -->
     <div class="tabs-row">
@@ -3853,6 +3853,21 @@ async function loadSavedProject(name) {
   }
 }
 
+let modelRankMap = {};  // model name → rank number
+
+// Fetch model rankings (cached server-side for 24h) and populate the rank map.
+async function loadModelRankings() {
+  try {
+    const r = await fetch(`${API}/api/models/rankings`);
+    if (!r.ok) return;
+    const d = await r.json();
+    modelRankMap = {};
+    for (const models of Object.values(d.rankings || {})) {
+      for (const m of models) modelRankMap[m.name] = m.rank;
+    }
+  } catch {}
+}
+
 // ── Models Tab ─────────────────────────────────────────────────────────────────
 
 async function loadCatalog() {
@@ -3868,6 +3883,8 @@ async function loadCatalog() {
     cloudModelDetails = (await r.json()).models || [];
     renderModelsTab();
   } catch { cloudModelDetails = []; }
+  await loadModelRankings();
+  renderModelsTab();
   loadLspStatus();
   try {
     const ram = await getRAMInfo();
@@ -3902,18 +3919,20 @@ function renderModelsTab() {
     `<h3 class="models-section-title">${icon} ${title}<span>${sub}</span></h3>`;
 
   const card = (m) => {
+    const rank = modelRankMap[m.name] || 0;
     const provider = m.provider || 'ollama';
     const installed = isInstalled(m.name, provider);
     const id = m.name.replace(/[:.\/]/g, '_');
     const sizeLabel = m.size_gb == null ? '' : m.size_gb >= 20 ? `${m.size_gb} GB — needs CPU offload` : `${m.size_gb} GB`;
     const providerBadge = `<span class="model-badge">${provider === 'lmstudio' ? 'LM Studio' : 'Ollama'}</span>`;
+    const rankBadge = rank !== 0 ? `<span class="model-badge" style="background:var(--accent);color:#fff;padding:2px 6px;border-radius:4px;font-size:10px;margin-left:4px">#${rank}</span>` : '';
     const updatable = provider === 'ollama' && modelUpdates[m.name];
     const ctx = provider === 'ollama' && modelContextLengths[m.name]
       ? `<div class="model-size">${(modelContextLengths[m.name] / 1024).toFixed(0)}k context</div>` : '';
     return `
       <div class="model-card" id="card-${id}">
         <div class="model-info">
-          <div class="model-name">${escHtml(m.name)} ${providerBadge}</div>
+          <div class="model-name">${escHtml(m.name)} ${providerBadge}${rankBadge}</div>
           <div class="model-desc">${escHtml(m.desc)}</div>
           ${sizeLabel ? `<div class="model-size">${escHtml(sizeLabel)}</div>` : ''}
           ${ctx}
@@ -3929,8 +3948,7 @@ function renderModelsTab() {
                    <button class="btn ${updatable ? 'btn-secondary' : 'btn-accent'} btn-sm" onclick="useModel('${escHtml(m.name)}')">Use</button>
                    <button class="btn btn-secondary btn-sm" onclick="deleteModel('${escHtml(m.name)}')">Remove</button>`
                 : `<span style="font-size:11px;color:var(--muted)" title="Chat/Agent only talks to Ollama models right now">Installed in LM Studio</span>`)
-            : `<button class="btn btn-accent btn-sm" onclick="pullModel('${escHtml(m.name)}', document.getElementById('progress-${escHtml(id)}'), '${provider}')">Pull</button>`
-          }
+            : `<button class="btn btn-accent btn-sm" onclick="pullModel('${escHtml(m.name)}', document.getElementById('progress-${escHtml(id)}'), '${provider}')">Pull</button>`}
         </div>
       </div>`;
   };

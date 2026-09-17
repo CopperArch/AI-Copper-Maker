@@ -18,3 +18,4 @@ release.keystore
 windows-installer/dist/
 usage_cost.json
 .backup-pre-rev1.2/
+model_rankings_cache.json
