@@ -2071,6 +2071,15 @@ async function loadModels() {
 let modelUpdates = {};            // model name → true (newer build in registry)
 let updateChecksDone = new Set(); // model names already checked this session
 
+// In-flight model pulls, keyed by the same id `card()` uses for element ids
+// (model name with :./ stripped). renderModelsTab() re-renders the whole
+// catalog list on every 15s status poll, search keystroke, and update check —
+// each re-render used to blank out the pull-progress div and orphan the
+// elements pullModel() was writing to, making an active download's progress
+// bar silently vanish before it finished. Keeping the live state here lets
+// card() repaint it on every re-render instead of resetting to empty.
+let activePulls = {}; // id → { status, pct, error, cancelled, controller }
+
 function dismissedModelUpdates() {
   try { return JSON.parse(localStorage.getItem('dismissedModelUpdates') || '{}'); }
   catch { return {}; }
@@ -4012,6 +4021,11 @@ function renderModelsTab() {
     const updatable = provider === 'ollama' && modelUpdates[m.name];
     const ctx = provider === 'ollama' && modelContextLengths[m.name]
       ? `<div class="model-size">${(modelContextLengths[m.name] / 1024).toFixed(0)}k context</div>` : '';
+    const pull = activePulls[id];
+    const pullHtml = !pull ? '' : pull.error
+      ? `<span style="color:var(--danger)">${pull.cancelled ? 'Cancelled' : `Error: ${escHtml(pull.error)}`}</span>`
+      : `<progress max="100" value="${pull.pct || 0}" id="pb-${id}"></progress><div id="pstatus-${id}">${escHtml(pull.status || 'Starting download...')}</div>
+         <button class="btn btn-secondary btn-sm" onclick="cancelPull('${id}')" style="margin-top:4px">✕ Cancel</button>`;
     return `
       <div class="model-card" id="card-${id}">
         <div class="model-info">
@@ -4019,7 +4033,7 @@ function renderModelsTab() {
           <div class="model-desc">${escHtml(m.desc)}</div>
           ${sizeLabel ? `<div class="model-size">${escHtml(sizeLabel)}</div>` : ''}
           ${ctx}
-          <div class="pull-progress" id="progress-${id}"></div>
+          <div class="pull-progress" id="progress-${id}">${pullHtml}</div>
         </div>
         <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">
           ${updatable ? '<span class="update-badge">⬆ Update available</span>' : ''}
@@ -4254,14 +4268,29 @@ async function searchOnlineModels() {
   }
 }
 
+async function cancelPull(id) {
+  activePulls[id]?.controller?.abort();
+}
+
 async function pullModel(modelName, progressEl, provider = 'ollama') {
   const id = modelName.replace(/[:.\/]/g, '_');
-  progressEl.innerHTML = `<progress max="100" value="0" id="pb-${id}"></progress><div id="pstatus-${id}">Starting download...</div>`;
+  // liveEl() re-queries by id on every update instead of trusting the
+  // progressEl reference: renderModelsTab() can replace the whole catalog
+  // list mid-download (15s status poll, search, update check), which
+  // detaches progressEl from the document. activePulls is the source of
+  // truth so a re-render always repaints the current state; this direct
+  // write is just for a snappier in-place update when no re-render happened.
+  const liveEl = () => document.getElementById(`progress-${id}`) || progressEl;
+  const controller = new AbortController();
+  activePulls[id] = { status: 'Starting download...', pct: 0, controller };
+  liveEl().innerHTML = `<progress max="100" value="0" id="pb-${id}"></progress><div id="pstatus-${id}">Starting download...</div>
+    <button class="btn btn-secondary btn-sm" onclick="cancelPull('${id}')" style="margin-top:4px">✕ Cancel</button>`;
   try {
     const res = await fetch(`${API}/api/models/pull`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: modelName, provider })
+      body: JSON.stringify({ model: modelName, provider }),
+      signal: controller.signal,
     });
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
@@ -4278,17 +4307,22 @@ async function pullModel(modelName, progressEl, provider = 'ollama') {
           const d = JSON.parse(line);
           if (d.error) errorMsg = d.error;
           if (d.status === 'error') errorMsg = errorMsg || 'Download failed.';
+          const status = d.status || d.error || '';
+          const pct = (d.total && d.completed) ? Math.round((d.completed / d.total) * 100) : (activePulls[id]?.pct || 0);
+          activePulls[id] = { status, pct, controller };
           const st = document.getElementById(`pstatus-${id}`);
           const pb = document.getElementById(`pb-${id}`);
-          if (st) st.textContent = d.status || d.error || '';
-          if (pb && d.total && d.completed) pb.value = Math.round((d.completed / d.total) * 100);
+          if (st) st.textContent = status;
+          if (pb) pb.value = pct;
         } catch {}
       }
     }
     if (errorMsg) {
-      progressEl.innerHTML = `<span style="color:var(--danger)">Error: ${escHtml(errorMsg)}</span>`;
+      activePulls[id] = { error: errorMsg };
+      liveEl().innerHTML = `<span style="color:var(--danger)">Error: ${escHtml(errorMsg)}</span>`;
     } else {
-      progressEl.innerHTML = '<span style="color:var(--accent)">✓ Download complete</span>';
+      delete activePulls[id];
+      liveEl().innerHTML = '<span style="color:var(--accent)">✓ Download complete</span>';
       delete modelUpdates[modelName];   // fresh build pulled — no update pending anymore
       const dismissed = dismissedModelUpdates();
       delete dismissed[modelName];
@@ -4296,7 +4330,12 @@ async function pullModel(modelName, progressEl, provider = 'ollama') {
     }
     await loadModels();
   } catch (err) {
-    progressEl.innerHTML = `<span style="color:var(--danger)">Error: ${escHtml(err.message)}</span>`;
+    const cancelled = err.name === 'AbortError';
+    activePulls[id] = { error: cancelled ? 'Cancelled' : err.message, cancelled };
+    liveEl().innerHTML = cancelled
+      ? `<span style="color:var(--danger)">Cancelled</span>`
+      : `<span style="color:var(--danger)">Error: ${escHtml(err.message)}</span>`;
+    if (cancelled) await loadModels();
   }
 }
 
