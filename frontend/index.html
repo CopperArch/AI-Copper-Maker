@@ -2123,13 +2123,13 @@ async function loadModels() {
     // Studio model selected here was indistinguishable from an Ollama name
     // and _agent_turns() sent it straight to Ollama, which 404'd on it.
     const llamaCppModels = installedModelsLlamaCpp.map(m => `llama-cpp/${m}`);
-    const allModels = [...installedModels, ...lmstudioModels, ...llamaCppModels, ...cloudModels];
+    const allModels = [...installedModels, ...installedModelsLmstudio, ...llamaCppModels, ...cloudModels];
     const sel = document.getElementById('model-select');
     const prev = sel.value;
     sel.innerHTML = allModels.length
       ? [
           installedModels.length ? `<optgroup label="Local">${installedModels.map(m => `<option value="${m}">${m}</option>`).join('')}</optgroup>` : '',
-          lmstudioModels.length ? `<optgroup label="Local (LM Studio)">${lmstudioModels.map((m, i) => `<option value="${m}">${escHtml(installedModelsLmstudio[i])}</option>`).join('')}</optgroup>` : '',
+          installedModelsLmstudio.length ? `<optgroup label="Local (LM Studio)">${installedModelsLmstudio.map((m, i) => `<option value="${m}">${escHtml(installedModelsLmstudio[i])}</option>`).join('')}</optgroup>` : '',
           llamaCppModels.length ? `<optgroup label="Local (llama.cpp)">${llamaCppModels.map((m, i) => `<option value="${m}">${escHtml(installedModelsLlamaCpp[i])}</option>`).join('')}</optgroup>` : '',
           cloudModels.length ? `<optgroup label="Cloud">${cloudModels.map(m => `<option value="${m}">${m}</option>`).join('')}</optgroup>` : '',
         ].join('')
