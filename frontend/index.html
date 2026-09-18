@@ -2064,7 +2064,7 @@ function showAboutModal() {
 function loadHeaderVersion() {
   fetch(`${API}/api/version`).then(r => r.json()).then(d => {
     const el = document.getElementById('header-version');
-    if (el && d.version) el.textContent = ` · v${d.version}`;
+    if (el && d.version) el.textContent = ` · ${d.version}`;
   }).catch(() => {});
 }
 
