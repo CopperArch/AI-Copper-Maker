@@ -90,14 +90,33 @@ async def lifespan(app: FastAPI):
     # A "Run Code" dev server (npx expo start / flutter run) is deliberately
     # left running in the background after its request ends — kill any that
     # are still alive rather than leaking them past this process's lifetime.
-    for state in RUNNING_PROJECT_RUNS.values():
-        proc = state.get("process")
+    # Shutdown must actually wait for these to die (with a kill fallback)
+    # instead of firing a signal and returning immediately — otherwise the
+    # process can sit in a "stopping" state indefinitely on a slow child,
+    # which is what was tripping the OS's TimeoutStopFailureMode=abort
+    # (SIGABRT + coredump) under systemd during ordinary restarts.
+    child_procs = [s.get("process") for s in RUNNING_PROJECT_RUNS.values()]
+    for proc in child_procs:
         if proc and proc.returncode is None:
             proc.kill()
     for client in _lsp_clients.values():
         try:
-            if client.proc:
+            if client.proc and client.proc.returncode is None:
                 client.proc.terminate()
+        except Exception:
+            pass
+    all_procs = child_procs + [c.proc for c in _lsp_clients.values()]
+    for proc in all_procs:
+        if not proc:
+            continue
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=3)
+        except (TimeoutError, asyncio.TimeoutError):
+            try:
+                proc.kill()
+                await asyncio.wait_for(proc.wait(), timeout=2)
+            except Exception:
+                pass
         except Exception:
             pass
     if DB_CONN:
