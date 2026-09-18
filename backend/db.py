@@ -199,7 +199,13 @@ def _msg_to_frontend(m: dict) -> dict:
     return {"role": role, "content": content}
 
 def sessions_list(conn: sqlite3.Connection) -> list[dict]:
-    rows = conn.execute("SELECT * FROM sessions ORDER BY updated_at DESC").fetchall()
+    # id is TEXT PRIMARY KEY, which SQLite does NOT treat as implicitly
+    # NOT NULL (only INTEGER PRIMARY KEY gets that) — a row with id=NULL can
+    # exist (confirmed live: 2 such rows from before session_id handling was
+    # hardened elsewhere), and since there's no valid id to reference, they
+    # can never be deleted through DELETE /api/conversations/{id} — they'd
+    # just resurface on every reload as unremovable ghosts. Filter them out.
+    rows = conn.execute("SELECT * FROM sessions WHERE id IS NOT NULL AND id != '' ORDER BY updated_at DESC").fetchall()
     sessions = []
     for r in rows:
         s = dict(r)
