@@ -253,6 +253,74 @@ pip install --quiet --upgrade pip
 pip install --quiet -r requirements.txt
 success "Python dependencies installed"
 
+# ── 4b. Language Servers (LSP) ──────────────────────────────────────────────────
+# Best-effort, every one of these independently skippable: the backend's LSP
+# panel (Models tab) just shows whichever of these it can't find as "missing"
+# and everything else about the app still works fine — so nothing here is
+# allowed to fail the overall install (each step is its own if/&&/|| chain,
+# which is safe under this script's `set -e`; a bare failing command
+# wouldn't be).
+echo ""
+info "Installing Language Servers (LSP) for inline diagnostics..."
+
+# rust-analyzer — only if a Rust toolchain (rustup) is already present; this
+# script installs Ollama and Python deps, not a whole Rust toolchain just for
+# one LSP server nobody asked for otherwise.
+if command -v rust-analyzer &>/dev/null; then
+    success "rust-analyzer already installed"
+elif command -v rustup &>/dev/null; then
+    rustup component add rust-analyzer &>/dev/null && success "rust-analyzer installed" \
+        || warn "Could not install rust-analyzer via rustup — skipping"
+else
+    info "Skipping rust-analyzer — no Rust toolchain (rustup) found"
+fi
+
+# pylsp (python-lsp-server) — deliberately installed with --user via the
+# SYSTEM pip, not this app's own backend/venv above: its console script needs
+# to land on ~/.local/bin, which the systemd service's PATH (see the service
+# unit below) actually includes — a copy inside backend/venv would be
+# invisible to it.
+if command -v pylsp &>/dev/null; then
+    success "pylsp already installed"
+elif command -v pip3 &>/dev/null; then
+    pip3 install --quiet --user python-lsp-server && success "pylsp installed" \
+        || warn "Could not install pylsp — Python LSP support will show as missing"
+else
+    warn "No system pip3 found — skipping pylsp"
+fi
+
+# clangd (C/C++) comes from the OS package manager, not a per-language
+# installer — best-effort across the package managers this script's other
+# platform checks already assume exist. Needs sudo; since this script is run
+# interactively by hand, that's a normal password prompt here (unlike an
+# automated agent trying to sudo non-interactively).
+if command -v clangd &>/dev/null; then
+    success "clangd already installed"
+elif command -v dnf &>/dev/null; then
+    sudo dnf install -y clang-tools-extra && success "clangd installed" \
+        || warn "Could not install clangd (clang-tools-extra) — you can install it manually with sudo later"
+elif command -v apt-get &>/dev/null; then
+    sudo apt-get install -y clangd && success "clangd installed" \
+        || warn "Could not install clangd — you can install it manually with sudo later"
+elif command -v pacman &>/dev/null; then
+    sudo pacman -S --noconfirm clang && success "clangd installed" \
+        || warn "Could not install clangd — you can install it manually with sudo later"
+elif command -v brew &>/dev/null; then
+    brew install llvm && success "clangd installed (via llvm)" \
+        || warn "Could not install clangd via Homebrew"
+else
+    info "Skipping clangd — no supported package manager detected (dnf/apt/pacman/brew). Install clang-tools-extra (or equivalent) manually for C/C++ LSP support."
+fi
+
+# typescript-language-server / bash-language-server run via `npx -y ...` on
+# first use — nothing to pre-install; npx fetches them itself the first time
+# a .ts/.js/.sh file is opened with LSP enabled.
+if command -v npx &>/dev/null; then
+    success "npx found — typescript/bash language servers will fetch automatically on first use"
+else
+    warn "npx not found — typescript/bash LSP support needs Node.js/npm installed"
+fi
+
 # ── 5. Optional: auto-start service ─────────────────────────────────────────────
 # Running as a service (rather than launching launch.sh by hand) means the app
 # survives logout/login and Routines actually fire on schedule instead of only
