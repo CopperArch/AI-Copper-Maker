@@ -11,6 +11,7 @@ import re
 import shutil
 import smtplib
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -40,6 +41,8 @@ from fastapi.responses import StreamingResponse, JSONResponse, Response, Redirec
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from db import init_db, _migrate_from_json, get_conn, create_session as _db_create_session, get_session as _db_get_session, get_messages as _db_get_messages, save_message as _db_save_message, update_session_summary as _db_update_session_summary, update_session_usage as _db_update_session_usage, create_permission as _db_create_permission, get_permission as _db_get_permission, respond_permission as _db_respond_permission, get_pending_permissions as _db_get_pending_permissions, sessions_list as _db_sessions_list
+
 # Routines (see the "Routines" section far below) need a scheduler running
 # for the lifetime of the app. `_load_and_schedule_routines` is defined later
 # in this module — Python resolves it at call time, well after the whole
@@ -50,10 +53,13 @@ scheduler: AsyncIOScheduler | None = None
 # keyed by run_id — see the "Project Run" section far below. Declared this
 # early because the lifespan shutdown handler needs to clean these up.
 RUNNING_PROJECT_RUNS: dict[str, dict] = {}
+DB_CONN: sqlite3.Connection | None = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global scheduler
+    global scheduler, DB_CONN
+    DB_CONN = init_db()
+    _migrate_from_json(DB_CONN)
     scheduler = AsyncIOScheduler()
     scheduler.start()
     _load_and_schedule_routines()
@@ -94,6 +100,8 @@ async def lifespan(app: FastAPI):
                 client.proc.terminate()
         except Exception:
             pass
+    if DB_CONN:
+        DB_CONN.close()
 
 app = FastAPI(title="AI Copper Maker", lifespan=lifespan)
 
@@ -5616,6 +5624,89 @@ async def lsp_staleness():
     return {"checked_at": None, "servers": []}
 
 
+# ── Permissions (SQLite-backed, auto-approved — nothing is ever denied) ────
+
+@app.post("/api/permissions/approve")
+async def approve_permission(request: Request):
+    data = await request.json()
+    conn = get_conn()
+    pid = data.get("permission_id")
+    _db_respond_permission(conn, pid, True)
+    return {"ok": True}
+
+@app.post("/api/permissions/deny")
+async def deny_permission(request: Request):
+    data = await request.json()
+    conn = get_conn()
+    pid = data.get("permission_id")
+    _db_respond_permission(conn, pid, False)
+    return {"ok": True}
+
+@app.get("/api/permissions/pending")
+async def pending_permissions(session_id: str):
+    conn = get_conn()
+    return _db_get_pending_permissions(conn, session_id)
+
+
+# ── BaseTool interface (OpenCode-compatible) ──────────────────────
+
+class ToolInfo:
+    def __init__(self, name: str, description: str, parameters: dict = None, required: list = None):
+        self.name = name
+        self.description = description
+        self.parameters = parameters or {}
+        self.required = required or []
+
+class ToolResponse:
+    def __init__(self, content: str = "", is_error: bool = False, metadata: str = ""):
+        self.content = content
+        self.is_error = is_error
+        self.metadata = metadata
+
+class BaseTool:
+    """Interface for OpenCode-compatible tool dispatch."""
+    def info(self) -> ToolInfo:
+        raise NotImplementedError
+    def run(self, ctx: dict, call: dict) -> ToolResponse:
+        raise NotImplementedError
+
+_TOOL_REGISTRY: dict[str, BaseTool] = {}
+
+def register_tool(tool: BaseTool):
+    _TOOL_REGISTRY[tool.info().name] = tool
+
+def execute_tool_dispatch(name: str, args: dict, model: str = "") -> str:
+    """Dispatch tool calls through the registry or fall back to legacy execute_tool."""
+    if name in _TOOL_REGISTRY:
+        tool = _TOOL_REGISTRY[name]
+        ctx = {"session_id": "", "message_id": ""}
+        result = tool.run(ctx, {"id": str(uuid.uuid4()), "name": name, "input": json.dumps(args)})
+        return result.content
+    return asyncio.run(execute_tool(name, args, model))
+
+class LegacyToolAdapter(BaseTool):
+    def __init__(self, name: str, description: str):
+        self._info = ToolInfo(name, description)
+    def info(self) -> ToolInfo:
+        return self._info
+    def run(self, ctx: dict, call: dict) -> ToolResponse:
+        args = json.loads(call.get("input", "{}"))
+        try:
+            result = asyncio.run(execute_tool(self._info.name, args))
+            return ToolResponse(content=result)
+        except Exception as e:
+            return ToolResponse(content=str(e), is_error=True)
+
+for _name, _desc in [("execute_code", "Run code in a sandboxed environment"),
+                      ("write_file", "Write content to a file"),
+                      ("edit_file", "Edit a file with surgical precision"),
+                      ("read_file", "Read a file's contents"),
+                      ("grep_files", "Search file contents with regex"),
+                      ("run_command", "Run a shell command"),
+                      ("task", "Launch a subagent to handle a task")]:
+    register_tool(LegacyToolAdapter(_name, _desc))
+
+
 async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str = "",
                        allow_sudo: bool = True, allow_subagents: bool = True, tier: str = "free",
                        continuous: bool = True):
@@ -5742,8 +5833,9 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
                     async with client.stream(
                         "POST", f"{LMSTUDIO}/v1/chat/completions",
                         json={"model": lmstudio_model_id, "messages": messages, "stream": True,
-                              "temperature": 0.2, "stream_options": {"include_usage": True}}
+                               "temperature": 0.2, "stream_options": {"include_usage": True}}
                     ) as r:
+                        _pending_tool_call = None
                         async for chunk in r.aiter_bytes():
                             for line in chunk.decode(errors="replace").split("\n"):
                                 line = line.strip()
@@ -5757,22 +5849,42 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
                                 except json.JSONDecodeError:
                                     continue
                                 choices = data.get("choices") or [{}]
-                                content = (choices[0].get("delta") or {}).get("content")
+                                delta = choices[0].get("delta") or {}
+                                content = delta.get("content")
                                 if content:
                                     response_text += content
                                     yield {"type": "token", "content": content}
+                                # Tool calls via OpenAI-compatible streaming
+                                tool_calls_delta = delta.get("tool_calls")
+                                if tool_calls_delta:
+                                    for tc in tool_calls_delta:
+                                        tc_name = tc.get("name", "")
+                                        tc_id = tc.get("id", "")
+                                        tc_func = tc.get("function", {})
+                                        tc_args = tc_func.get("arguments", "")
+                                        if tc_name and not _pending_tool_call:
+                                            _pending_tool_call = {"name": tc_name, "id": tc_id, "input": ""}
+                                            yield {"type": "tool_use_start", "name": tc_name, "id": tc_id}
+                                        if _pending_tool_call and tc_args:
+                                            _pending_tool_call["input"] += tc_args
+                                            yield {"type": "tool_use_delta", "id": tc_id, "input": tc_args}
                                 usage_field = data.get("usage")
                                 if usage_field:
                                     usage = {"prompt_eval_count": usage_field.get("prompt_tokens", 0),
                                               "eval_count": usage_field.get("completion_tokens", 0)}
+                        if _pending_tool_call:
+                            yield {"type": "tool_use_stop", "id": _pending_tool_call["id"],
+                                   "name": _pending_tool_call["name"],
+                                   "input": _pending_tool_call["input"]}
             elif _is_llama_cpp_model(model):
                 llama_model_id = model.split("/", 1)[1]
                 async with httpx.AsyncClient(timeout=120) as client:
                     async with client.stream(
                         "POST", f"{LLAMA_CPP}/v1/chat/completions",
                         json={"model": llama_model_id, "messages": messages, "stream": True,
-                              "temperature": 0.2, "stream_options": {"include_usage": True}}
+                               "temperature": 0.2, "stream_options": {"include_usage": True}}
                     ) as r:
+                        _pending_tool_call = None
                         async for chunk in r.aiter_bytes():
                             for line in chunk.decode(errors="replace").split("\n"):
                                 line = line.strip()
@@ -5786,14 +5898,30 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
                                 except json.JSONDecodeError:
                                     continue
                                 choices = data.get("choices") or [{}]
-                                content = (choices[0].get("delta") or {}).get("content")
+                                delta = choices[0].get("delta") or {}
+                                content = delta.get("content")
                                 if content:
                                     response_text += content
                                     yield {"type": "token", "content": content}
-                                usage_field = data.get("usage")
-                                if usage_field:
-                                    usage = {"prompt_eval_count": usage_field.get("prompt_tokens", 0),
-                                              "eval_count": usage_field.get("completion_tokens", 0)}
+                                tool_calls_delta = delta.get("tool_calls")
+                                if tool_calls_delta:
+                                    for tc in tool_calls_delta:
+                                        tc_name = tc.get("name", "")
+                                        tc_id = tc.get("id", "")
+                                        tc_func = tc.get("function", {})
+                                        tc_args = tc_func.get("arguments", "")
+                                        if tc_name and not _pending_tool_call:
+                                            _pending_tool_call = {"name": tc_name, "id": tc_id, "input": ""}
+                                            yield {"type": "tool_use_start", "name": tc_name, "id": tc_id}
+                                        if _pending_tool_call and tc_args:
+                                            _pending_tool_call["input"] += tc_args
+                                            yield {"type": "tool_use_delta", "id": tc_id, "input": tc_args}
+                                if data.get("usage"):
+                                    pass  # usage handled at end
+                        if _pending_tool_call:
+                            yield {"type": "tool_use_stop", "id": _pending_tool_call["id"],
+                                   "name": _pending_tool_call["name"],
+                                   "input": _pending_tool_call["input"]}
             else:
                 # Tool-format reliability needs determinism: at Ollama's
                 # default temperature (~0.8) the same prompt flip-flops
@@ -5805,11 +5933,12 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
                 # silently clip it, which reads to the model as "I have no
                 # tools" (also confirmed live: a direct call that DID fit
                 # emitted the fence perfectly while loop calls clipped).
+                _pending_tool_call = None
                 async with httpx.AsyncClient(timeout=120) as client:
                     async with client.stream(
                         "POST", f"{OLLAMA}/api/chat",
                         json={"model": model, "messages": messages, "stream": True,
-                              "options": {"temperature": 0.2, "num_ctx": 16384}}
+                               "options": {"temperature": 0.2, "num_ctx": 16384}}
                     ) as r:
                         async for chunk in r.aiter_bytes():
                             for line in chunk.decode().split("\n"):
@@ -5817,15 +5946,38 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
                                     continue
                                 try:
                                     data = json.loads(line)
-                                    if "message" in data and "content" in data["message"] and data["message"]["content"]:
-                                        content = data["message"]["content"]
+                                    delta = data.get("message", {}).get("delta") or {}
+                                    tool_calls_delta = delta.get("tool_calls")
+                                    if tool_calls_delta:
+                                        for tc in tool_calls_delta:
+                                            tc_name = tc.get("name", "")
+                                            tc_id = tc.get("id", "")
+                                            tc_func = tc.get("function", {})
+                                            tc_args = tc_func.get("arguments", "")
+                                            if tc_name and not _pending_tool_call:
+                                                _pending_tool_call = {"name": tc_name, "id": tc_id, "input": ""}
+                                                yield {"type": "tool_use_start", "name": tc_name, "id": tc_id}
+                                            if _pending_tool_call and tc_args:
+                                                _pending_tool_call["input"] += tc_args
+                                                yield {"type": "tool_use_delta", "id": tc_id, "input": tc_args}
+                                    content = delta.get("content")
+                                    if content:
                                         response_text += content
                                         yield {"type": "token", "content": content}
                                     if data.get("done") and isinstance(data.get("prompt_eval_count"), int):
                                         usage = {"prompt_eval_count": data["prompt_eval_count"],
                                                   "eval_count": data.get("eval_count", 0)}
+                                    if data.get("done") and _pending_tool_call:
+                                        yield {"type": "tool_use_stop", "id": _pending_tool_call["id"],
+                                               "name": _pending_tool_call["name"],
+                                               "input": _pending_tool_call["input"]}
+                                        _pending_tool_call = None
                                 except json.JSONDecodeError:
                                     pass
+                        if _pending_tool_call:
+                            yield {"type": "tool_use_stop", "id": _pending_tool_call["id"],
+                                   "name": _pending_tool_call["name"],
+                                   "input": _pending_tool_call["input"]}
         except Exception as e:
             consecutive_errors += 1
             yield {"type": "error", "content": str(e), "conversation": conv}
@@ -5935,6 +6087,44 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
     yield {"type": "done", "content": honest_text, "conversation": conv, "usage": usage}
 
 
+class FinishReason:
+    ToolUse = "tool_use"
+    EndTurn = "end_turn"
+    Error = "error"
+    Canceled = "canceled"
+    PermissionDenied = "permission_denied"
+
+
+async def _summarize(session_id: str, messages: list, model: str = "") -> str:
+    """Compress conversation into a summary. Like OpenCode's Summarize()."""
+    if not messages:
+        return ""
+    transcript = "\n".join(
+        f"{m.get('role', '')}: {str(m.get('content', ''))[:2000]}"
+        for m in messages[-20:]
+    )
+    prompt = (
+        "Provide a detailed but concise summary of our conversation above. "
+        "Focus on information that would be helpful for continuing the conversation, "
+        "including what we did, what we're doing, which files we're working on, "
+        "and what we're going to do next. Drop pleasantries, narration, full file "
+        "contents, and verbose tool output. Be dense — bullet points, no preamble."
+    )
+    try:
+        response = await _call_cloud_model(model, [{"role": "user", "content": prompt}], "")
+        summary = response.strip() if response else ""
+    except Exception:
+        try:
+            response = await _llm_complete(model, [{"role": "user", "content": prompt}])
+            summary = response.strip() if response else ""
+        except Exception:
+            return ""
+    if summary:
+        if DB_CONN:
+            _db_update_session_summary(DB_CONN, session_id, f"summary_{session_id}")
+    return summary
+
+
 @app.post("/api/agent")
 async def agent_loop(req: AgentRequest):
     # `message` is part of the request model, and anything POSTing to this
@@ -5951,11 +6141,45 @@ async def agent_loop(req: AgentRequest):
     ):
         conv.append({"role": "user", "content": req.message})
 
+    # Create/update SQLite session
+    session_id = req.conversation[0].get("session_id") if req.conversation else str(uuid.uuid4())
+    if DB_CONN:
+        _db_create_session(DB_CONN, session_id, req.message[:50] if req.message else "Agent Session", req.model)
+        for msg in conv:
+            _db_save_message(DB_CONN, str(uuid.uuid4()), session_id, msg.get("role", "user"),
+                             msg.get("content", ""), msg.get("tool_calls", []),
+                             msg.get("finish_reason", ""))
+
     async def stream():
         async for event in _agent_turns(req.model, conv, system=req.system, tier=req.tier):
             yield json.dumps(event) + "\n"
+        # Persist final conversation state
+        if DB_CONN:
+            for msg in conv:
+                _db_save_message(DB_CONN, str(uuid.uuid4()), session_id, msg.get("role", "user"),
+                                 msg.get("content", ""), msg.get("tool_calls", []),
+                                 msg.get("finish_reason", ""))
 
     return StreamingResponse(stream(), media_type="application/x-ndjson")
+
+
+@app.post("/api/agent/summarize")
+async def summarize_session(req: Request):
+    """Compress a session's conversation into a summary. Like OpenCode's Summarize()."""
+    data = await req.json()
+    session_id = data.get("session_id")
+    model = data.get("model", "")
+    if not session_id:
+        raise HTTPException(400, "session_id required")
+    conn = get_conn()
+    session = _db_get_session(conn, session_id)
+    if not session:
+        raise HTTPException(404, "Session not found")
+    messages = _db_get_messages(conn, session_id)
+    summary = await _summarize(session_id, messages, model)
+    if summary:
+        return {"summary": summary, "ok": True}
+    return {"summary": "", "ok": True, "error": "Failed to generate summary"}
 
 
 @app.post("/api/sudo/{request_id}")
@@ -6378,34 +6602,51 @@ Write production-quality code, not demos."""
     return StreamingResponse(_stream_chat_ndjson(req.model, messages, timeout=600), media_type="application/x-ndjson")
 
 
-# ── Conversations ──────────────────────────────────────────────────────────────
+# ── Conversations (SQLite-backed) ──────────────────────────────────────
 
 @app.get("/api/conversations")
 async def get_conversations():
-    if CONVERSATIONS_FILE.exists():
-        try:
-            data = json.loads(CONVERSATIONS_FILE.read_text())
-        except json.JSONDecodeError:
-            return []
-        return data if isinstance(data, list) else []
-    return []
+    conn = get_conn()
+    return _db_sessions_list(conn)
 
 @app.post("/api/conversations")
 async def save_conversations(request: Request):
-    try:
-        data = await request.json()
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=400, detail=f"Invalid JSON body: {e}")
+    data = await request.json()
+    conn = get_conn()
     if not isinstance(data, list):
         raise HTTPException(status_code=400, detail="Conversations payload must be a list")
-    try:
-        CONVERSATIONS_FILE.write_text(json.dumps(data, indent=2))
-        return {"ok": True}
-    except (OSError, IOError) as e:
-        raise HTTPException(status_code=500, detail=f"Failed to save conversations: {e}")
+    for session in data:
+        sid = session.get("id")
+        if sid:
+            _db_create_session(conn, sid, session.get("title", ""), session.get("model", ""))
+    return {"ok": True}
+
+@app.post("/api/conversations/{session_id}/messages")
+async def save_messages(session_id: str, request: Request):
+    data = await request.json()
+    conn = get_conn()
+    if isinstance(data, dict):
+        data = [data]
+    for msg in data:
+        _db_save_message(conn, msg.get("id"), session_id, msg.get("role", "user"),
+                         msg.get("content", ""), msg.get("tool_calls", []),
+                         msg.get("finish_reason", ""), msg.get("created_at"))
+    return {"ok": True}
+
+@app.get("/api/conversations/{session_id}/messages")
+async def get_messages(session_id: str):
+    conn = get_conn()
+    return _db_get_messages(conn, session_id)
+
+@app.post("/api/conversations/{session_id}/summary")
+async def set_summary(session_id: str, request: Request):
+    data = await request.json()
+    conn = get_conn()
+    _db_update_session_summary(conn, session_id, data.get("summary_message_id", ""))
+    return {"ok": True}
 
 
-# ── Config ─────────────────────────────────────────────────────────────────────
+# ── Config ───────────────────────────────────────────────────────────────────
 
 def load_config() -> dict:
     if CONFIG_FILE.exists():
