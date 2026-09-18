@@ -37,3 +37,6 @@ huihui-ai/
 *.safetensors
 backend/trainer.db
 backend/trainer.db-*
+
+# Downloaded weights live under here (never committed to git / GitHub)
+models/weights/

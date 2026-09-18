@@ -1,0 +1,16 @@
+{
+  "note": "Weights are NEVER stored in this repo or on GitHub. This manifest records which models may be fetched locally on request (models/fetch.sh) and removed on request (models/remove.sh). Downloaded weights land under models/weights/, which is gitignored and only ever lives on the local machine / Nextcloud.",
+  "models": [
+    {
+      "id": "huihui-ai/Huihui-Qwen3.8-27B-abliterated",
+      "name": "Huihui Qwen3.8 27B Abliterated",
+      "type": "safetensors",
+      "size_gb": 52,
+      "provider": "huggingface",
+      "repo": "huihui-ai/Huihui-Qwen3.8-27B-abliterated",
+      "revision": "main",
+      "weights_dir": "models/weights/huihui-ai/Huihui-Qwen3.8-27B-abliterated",
+      "note": "Uncensored 27B general model; not referenced by backend code, keep for manual use only."
+    }
+  ]
+}
