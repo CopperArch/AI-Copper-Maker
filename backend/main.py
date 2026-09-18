@@ -6401,10 +6401,17 @@ async def scan_for_apks():
     def _scan():
         found = []
         visited = 0
+        # A pure visited-count cap assumes roughly constant walk speed, which
+        # doesn't hold once a home directory has a large model-weights
+        # directory or similar in it — confirmed live: this hung past 60s on
+        # a real desktop with the visited-count cap alone. Same fix already
+        # proven on scan_disk_for_models below; a wall-clock deadline is the
+        # only bound that's actually reliable.
+        deadline = time.monotonic() + 20
         for root in _wide_scan_roots():
             for f in _safe_rglob(root):
                 visited += 1
-                if visited > 200_000 or len(found) >= 200:
+                if visited > 200_000 or len(found) >= 200 or time.monotonic() > deadline:
                     return found
                 if f.suffix.lower() == ".apk":
                     st = _safe_stat(f)
