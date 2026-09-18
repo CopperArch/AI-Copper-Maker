@@ -71,6 +71,15 @@
   }
   .status-dot.ok { background: var(--accent); }
   .status-text { font-size: 12px; color: var(--muted); }
+  .update-models-group { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+  #update-models-btn {
+    background: var(--accent); color: #fff; border: none; border-radius: 6px;
+    padding: 5px 10px; font-size: 12px; font-weight: 600; cursor: pointer;
+    transition: background .2s;
+  }
+  #update-models-btn.updating { background: var(--danger); cursor: default; }
+  #update-models-btn:disabled { opacity: .85; }
+  .update-models-desc { font-size: 10px; color: var(--muted); max-width: 200px; line-height: 1.3; }
 
   /* ── Layout ── */
   .app { display: flex; flex: 1; overflow: hidden; }
@@ -894,8 +903,12 @@
 
 <header>
   <img src="assets/logo.png" alt="" class="header-logo" onclick="showAboutModal()" title="About AI Copper Maker">
-  <h1>AI <span>Copper</span> Maker<span class="byline">A local AI coding studio — by CopperArch</span></h1>
+  <h1>AI <span>Copper</span> Maker<span class="byline">A local AI coding studio — by CopperArch<span id="header-version"></span></span></h1>
   <div class="header-right">
+    <div class="update-models-group">
+      <button id="update-models-btn" onclick="updateModelsAndTiers()">Update Models</button>
+      <span class="update-models-desc">Refreshes the model catalog, coding-ability tiers, and language server versions</span>
+    </div>
     <div class="status-group">
       <div id="status-dot" class="status-dot"></div>
       <span id="status-text" class="status-text">Connecting...</span>
@@ -1395,7 +1408,13 @@
         <p>Browse, download, and manage local models. <span id="models-ram-note"></span></p>
 
         <div class="catalog-toolbar">
-          <input type="text" id="catalog-search" placeholder="Search models..." oninput="renderModelsTab()">
+          <input type="text" id="catalog-search" placeholder="Search models..." oninput="onCatalogSearchInput()">
+          <select id="model-source-filter" onchange="setModelSourceFilter(this.value)" title="Which source Local/Uncensored search live for models to install">
+            <option value="all">All sources</option>
+            <option value="ollama">Ollama</option>
+            <option value="huggingface">Hugging Face</option>
+            <option value="modelscope">ModelScope</option>
+          </select>
           <div class="catalog-filters">
             <button class="filter-btn active" onclick="setCatalogFilter('local', this)">Local</button>
             <button class="filter-btn" onclick="setCatalogFilter('uncensored', this)">Uncensored</button>
@@ -1428,17 +1447,21 @@
         </div>
 
         <div style="margin-top:20px;padding-top:20px;border-top:1px solid var(--border)">
-          <h3 style="font-size:14px;margin-bottom:12px">Search Online (Ollama + LM Studio)</h3>
+          <h3 style="font-size:14px;margin-bottom:12px">Search Online (Ollama + Hugging Face + ModelScope)</h3>
           <p style="font-size:12px;color:var(--muted);margin-bottom:8px">
-            Live search across both providers — not just the curated list above. Useful for
-            anything newer than this list, including uncensored/abliterated variants.
+            Live search across all three sources — not just the curated list above. Useful for
+            anything newer than this list, including uncensored/abliterated variants (try
+            "huihui-ai" or "abliterated"). The same source picker also filters the Local and
+            Uncensored tabs above. Results download straight to Install — nothing here needs an
+            API key.
           </p>
           <div style="display:flex;gap:8px">
             <input type="text" id="online-search-input" placeholder="e.g. abliterated coding" onkeydown="if(event.key==='Enter') searchOnlineModels()">
             <select id="online-search-provider">
-              <option value="all">All providers</option>
+              <option value="all">All sources</option>
               <option value="ollama">Ollama only</option>
-              <option value="lmstudio">LM Studio only</option>
+              <option value="huggingface">Hugging Face only</option>
+              <option value="modelscope">ModelScope only</option>
             </select>
             <button class="btn btn-secondary" onclick="searchOnlineModels()">Search</button>
           </div>
@@ -1448,7 +1471,12 @@
         <div style="margin-top:20px;padding-top:20px;border-top:1px solid var(--border)">
           <h3 style="font-size:14px;margin-bottom:12px">Pull Custom Model</h3>
           <div style="display:flex;gap:8px">
-            <input type="text" id="custom-model-input" placeholder="e.g. mistral:7b">
+            <input type="text" id="custom-model-input" placeholder="Ollama: mistral:7b  ·  HF/ModelScope: org/repo">
+            <select id="custom-model-provider">
+              <option value="ollama">Ollama</option>
+              <option value="huggingface">Hugging Face</option>
+              <option value="modelscope">ModelScope</option>
+            </select>
             <button class="btn btn-secondary" onclick="pullCustomModel()">Pull</button>
           </div>
           <div id="custom-pull-status" style="font-size:12px;color:var(--muted);margin-top:8px"></div>
@@ -1792,6 +1820,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   await loadConversations();
   loadSaveDirConfig();
   loadCatalog();
+  loadHeaderVersion();
   checkAndroidSdkStatus();
   renderWeeklyTokenUsage();
   document.getElementById('token-usage-menu-btn').addEventListener('click', e => {
@@ -2004,6 +2033,37 @@ function showAboutModal() {
   });
 }
 
+// Shows the build version right after "by CopperArch" in the header, same
+// text/size as the rest of the byline (it's a plain child span, no
+// dedicated styling of its own) — same /api/version the About modal already
+// used, just also surfaced where it's visible without opening that modal.
+function loadHeaderVersion() {
+  fetch(`${API}/api/version`).then(r => r.json()).then(d => {
+    const el = document.getElementById('header-version');
+    if (el && d.version) el.textContent = ` · v${d.version}`;
+  }).catch(() => {});
+}
+
+// "Update Models" header button — manual trigger for /api/models/refresh
+// (re-validates the curated catalog, recomputes every model's coding-ability
+// tier, re-checks LSP server versions), then reloads everything on screen
+// that reads from those. Green while idle, red while running (CSS
+// .updating class — see #update-models-btn), green again once done.
+async function updateModelsAndTiers() {
+  const btn = document.getElementById('update-models-btn');
+  if (btn.classList.contains('updating')) return;
+  btn.classList.add('updating');
+  btn.disabled = true;
+  btn.textContent = 'Updating…';
+  try {
+    await fetch(`${API}/api/models/refresh`, { method: 'POST' });
+  } catch {}
+  await Promise.all([loadModels(), loadCatalog(), loadModelRankings(), loadLspStatus()]);
+  btn.classList.remove('updating');
+  btn.disabled = false;
+  btn.textContent = 'Update Models';
+}
+
 // Manual "Check for updates" button inside the About modal — separate from
 // the automatic banner (checkForUpdate(), polled every 30 min): this always
 // shows a result (up to date / update found / error), not just when one's
@@ -2045,12 +2105,19 @@ async function loadModels() {
     if (rLmstudio) { try { installedModelsLmstudio = (await rLmstudio.json()).models || []; } catch {} }
     let cloudModels = [];
     if (rCloud) { try { cloudModels = (await rCloud.json()).models || []; } catch {} }
-    const allModels = [...installedModels, ...cloudModels];
+    // "lmstudio/" prefixed, same "<namespace>/<rest>" shape cloud model refs
+    // already use — _is_lmstudio_model() on the backend strips it back off
+    // before talking to LM Studio's own API. Without this prefix an LM
+    // Studio model selected here was indistinguishable from an Ollama name
+    // and _agent_turns() sent it straight to Ollama, which 404'd on it.
+    const lmstudioModels = installedModelsLmstudio.map(m => `lmstudio/${m}`);
+    const allModels = [...installedModels, ...lmstudioModels, ...cloudModels];
     const sel = document.getElementById('model-select');
     const prev = sel.value;
     sel.innerHTML = allModels.length
       ? [
           installedModels.length ? `<optgroup label="Local">${installedModels.map(m => `<option value="${m}">${m}</option>`).join('')}</optgroup>` : '',
+          lmstudioModels.length ? `<optgroup label="Local (LM Studio)">${lmstudioModels.map((m, i) => `<option value="${m}">${escHtml(installedModelsLmstudio[i])}</option>`).join('')}</optgroup>` : '',
           cloudModels.length ? `<optgroup label="Cloud">${cloudModels.map(m => `<option value="${m}">${m}</option>`).join('')}</optgroup>` : '',
         ].join('')
       : '<option value="">No models installed</option>';
@@ -4019,19 +4086,203 @@ async function loadCatalog() {
   renderCloudProviders();
 }
 
+// Which upstream Local/Uncensored search live for install candidates — same
+// three values the "Search Online" provider picker uses, kept in sync with
+// it (see setModelSourceFilter). 'all' searches Ollama + Hugging Face +
+// ModelScope together.
+let modelSourceFilter = 'all';
+// Cache of the last live search fired from the Local/Uncensored tabs, so
+// renderModelsTab() (called on every 15s status poll, pull progress tick,
+// etc.) can repaint the results it already has instead of re-fetching.
+let inlineSearchResults = [];
+let inlineSearchQuery = '';
+let inlineSearchTimer = null;
+
 function setCatalogFilter(filter, btn) {
   catalogFilter = filter;
   document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
   renderModelsTab();
+  triggerInlineSearch();
 }
 
+function setModelSourceFilter(v) {
+  modelSourceFilter = v;
+  triggerInlineSearch();
+}
+
+function onCatalogSearchInput() {
+  renderModelsTab();
+  // Debounced — the search box fires this on every keystroke, but each
+  // keystroke firing a live HTTP round-trip to ollama.com/huggingface.co/
+  // modelscope.cn would hammer all three on every character typed.
+  clearTimeout(inlineSearchTimer);
+  inlineSearchTimer = setTimeout(triggerInlineSearch, 400);
+}
+
+// Populates inlineSearchResults for the Local/Uncensored tabs' "Available to
+// install" section — same /api/models/search endpoint the standalone
+// "Search Online" panel uses, just rendered inline instead of requiring a
+// scroll down the page. Local has no useful default query (there's nothing
+// sensible to search for until the user types something); Uncensored
+// defaults to "abliterated uncensored" so the tab shows live results
+// immediately instead of starting empty.
+async function triggerInlineSearch() {
+  if (catalogFilter !== 'local' && catalogFilter !== 'uncensored') return;
+  const typed = (document.getElementById('catalog-search')?.value || '').trim();
+  const q = typed || (catalogFilter === 'uncensored' ? 'abliterated uncensored' : '');
+  if (!q) { inlineSearchResults = []; inlineSearchQuery = ''; renderModelsTab(); return; }
+  inlineSearchQuery = q;
+  try {
+    const r = await fetch(`${API}/api/models/search?q=${encodeURIComponent(q)}&provider=${modelSourceFilter}`);
+    const d = await r.json();
+    let results = d.results || [];
+    if (catalogFilter === 'uncensored') results = results.filter(m => UNCENSORED_RE.test(m.name) || UNCENSORED_RE.test(m.desc || ''));
+    if (inlineSearchQuery === q) { inlineSearchResults = results; renderModelsTab(); }
+  } catch { inlineSearchResults = []; renderModelsTab(); }
+}
+
+// Results of a manual /api/models/scan-disk run (Local tab) — a full home-
+// directory walk is real work, so this only fires on a button click, never
+// on the routine 15s status poll/re-render.
+let diskScanResults = [];
+let diskScanning = false;
+
+async function scanDiskForModels() {
+  diskScanning = true;
+  renderModelsTab();
+  try {
+    const r = await fetch(`${API}/api/models/scan-disk`);
+    const d = await r.json();
+    diskScanResults = d.results || [];
+  } catch { diskScanResults = []; }
+  diskScanning = false;
+  renderModelsTab();
+}
+
+async function linkLocalModel(path, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = 'Linking…'; }
+  try {
+    const r = await fetch(`${API}/api/models/link-local`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path }),
+    });
+    const d = await r.json();
+    if (!d.success) { alert('Could not link that model in — see the backend log.'); if (btn) { btn.disabled = false; btn.textContent = 'Link into LM Studio'; } return; }
+    diskScanResults = diskScanResults.filter(m => m.path !== path);
+    await loadModels();
+    await loadModelRankings();
+  } catch (err) {
+    alert(`Could not link: ${err.message}`);
+    if (btn) { btn.disabled = false; btn.textContent = 'Link into LM Studio'; }
+  }
+}
+
+function diskScanSectionHtml() {
+  let html = `<h3 class="models-section-title">🔍 Found on disk <span>GGUF files anywhere in your home directory or a mounted drive, not just Ollama/LM Studio's own stores</span></h3>`;
+  html += `<button class="btn btn-secondary btn-sm" onclick="scanDiskForModels()" ${diskScanning ? 'disabled' : ''} style="margin-bottom:8px">${diskScanning ? 'Scanning…' : '🔍 Scan disk for models'}</button>`;
+  if (diskScanResults.length) {
+    html += diskScanResults.map(m => `
+      <div class="model-card" id="disk-${escHtml(m.path.replace(/[^a-zA-Z0-9]/g, '_'))}">
+        <div class="model-info">
+          <div class="model-name">${escHtml(m.name)} <span class="model-badge">On disk</span></div>
+          <div class="model-desc">${escHtml(m.path)}</div>
+          ${m.size_gb ? `<div class="model-size">${m.size_gb} GB</div>` : ''}
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">
+          <button class="btn btn-accent btn-sm" onclick="linkLocalModel('${escHtml(m.path)}', this)">Link into LM Studio</button>
+        </div>
+      </div>`).join('');
+  }
+  return html;
+}
+
+// Shared row renderer for any live /api/models/search result — used by the
+// standalone "Search Online" panel and by the Local/Uncensored tabs' inline
+// "Available to install" section, so both stay visually and behaviorally
+// identical instead of drifting apart as two hand-maintained templates.
+function onlineResultCardHtml(m, idPrefix) {
+  const installed = (m.provider === 'lmstudio' ? installedModelsLmstudio : installedModels)
+    .some(im => im === m.name || im.startsWith(m.name.split(':')[0] + ':'));
+  // Card-wrapper id is prefixed (idPrefix) so the same model can render in
+  // both the standalone "Search Online" panel and the inline Local/
+  // Uncensored section without a duplicate DOM id. The pull-tracking id
+  // below deliberately is NOT prefixed — it has to match pullModel()'s own
+  // internal `modelName.replace(/[:.\/]/g, '_')` exactly, character-class
+  // and all, or activePulls[pullId] here and the entry pullModel() actually
+  // writes are two different keys and this card can never see its own
+  // download's progress (confirmed live: that mismatch, combined with this
+  // function never reading activePulls at all, is why the progress bar
+  // vanished on the next 15s status-poll re-render — the poll rebuilds this
+  // card from scratch with nothing keeping the bar alive).
+  const wrapperId = idPrefix + m.name.replace(/[^a-zA-Z0-9]/g, '_');
+  const pullId = m.name.replace(/[:.\/]/g, '_');
+  const sourceLabel = m.provider === 'ollama' ? 'Ollama' : m.source === 'modelscope' ? 'ModelScope' : 'Hugging Face';
+  const providerBadge = `<span class="model-badge">${sourceLabel}</span>`;
+  // escHtml on the name covers both the visible text AND the onclick args —
+  // browsers HTML-decode an attribute's value before handing it to the JS
+  // parser, so an unescaped quote in a model id could otherwise break out of
+  // the single-quoted argument and inject script (model ids come from three
+  // external, untrusted search APIs).
+  const safeName = escHtml(m.name);
+  const pull = activePulls[pullId];
+  const pullHtml = !pull ? '' : pull.error
+    ? `<span style="color:var(--danger)">${pull.cancelled ? 'Cancelled' : `Error: ${escHtml(pull.error)}`}</span>`
+    : `<progress max="100" value="${pull.pct || 0}" id="pb-${pullId}"></progress><div id="pstatus-${pullId}">${escHtml(pull.status || 'Starting download...')}</div>
+       <button class="btn btn-secondary btn-sm" onclick="cancelPull('${pullId}')" style="margin-top:4px">✕ Cancel</button>`;
+  return `
+    <div class="model-card" id="card-${wrapperId}">
+      <div class="model-info">
+        <div class="model-name">${safeName} ${providerBadge}</div>
+        <div class="model-desc">${escHtml(m.desc)}${m.size_label ? ' · ' + escHtml(m.size_label) : ''}</div>
+        <div class="pull-progress" id="progress-${pullId}">${pullHtml}</div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">
+        ${installed
+          ? `<span class="model-status">Installed</span>`
+          : `<button class="btn btn-accent btn-sm" onclick="pullModel('${safeName}', document.getElementById('progress-${pullId}'), '${m.provider}', '${m.source || ''}')">Install</button>`
+        }
+      </div>
+    </div>`;
+}
+
+// Renders the live inlineSearchResults (see triggerInlineSearch) as an
+// "Available to install" section under the Local/Uncensored tabs — same
+// results/markup as the standalone "Search Online" panel further down the
+// page, just surfaced where the source dropdown next to it actually is.
+function onlineResultsSectionHtml() {
+  const sub = catalogFilter === 'uncensored'
+    ? 'live Ollama/Hugging Face/ModelScope results, filtered to uncensored/abliterated'
+    : 'live results from the source picker above — type in the search box to narrow';
+  let html = `<h3 class="models-section-title">🌐 Available to install <span>${sub}</span></h3>`;
+  if (!inlineSearchQuery) {
+    html += emptyNoteHtml('Type in the search box above to find more models to install.');
+  } else if (!inlineSearchResults.length) {
+    html += emptyNoteHtml(`Searching or no results for "${escHtml(inlineSearchQuery)}"…`);
+  } else {
+    html += inlineSearchResults.map(m => onlineResultCardHtml(m, 'inline_')).join('');
+  }
+  return html;
+}
+function emptyNoteHtml(msg) { return `<p style="font-size:13px;color:var(--muted)">${msg}</p>`; }
+
 // opencode-style sectioned model browser: Local / Uncensored / Free / Paid.
-const UNCENSORED_RE = /abliterat|uncensor|dolphin|unaligned|euryale|mythomax|noromaid/i;
+const UNCENSORED_RE = /abliterat|uncensor|dolphin|unaligned|euryale|mythomax|noromaid|huihui/i;
 
 function renderModelsTab() {
   const el = document.getElementById('catalog-list');
   if (!el) return;
+  // A periodic rebuild (15s status poll, pull-progress ticks, etc.)
+  // replaces this whole list's innerHTML — including any <select> a Paid-
+  // tier "choose a model" picker (gateway-model-select-*) renders inline.
+  // Tearing that DOM node out and rebuilding a new one while its dropdown
+  // is actually open force-closes it with nothing chosen (reported as a
+  // "submenu... closes without me choosing" while scrolling — scrolling
+  // was just the coincidence of when the 15s tick landed, not the cause).
+  // Skip this rebuild entirely while focus is on a <select> in here; the
+  // next tick (after the user picks something and focus moves on) repaints
+  // normally.
+  if (document.activeElement?.tagName === 'SELECT' && el.contains(document.activeElement)) return;
   const search = (document.getElementById('catalog-search')?.value || '').toLowerCase();
   const matchesSearch = (name, desc = '') =>
     !search || name.toLowerCase().includes(search) || (desc || '').toLowerCase().includes(search);
@@ -4079,7 +4330,8 @@ function renderModelsTab() {
              <button class="btn btn-secondary btn-sm" onclick="dismissModelUpdate('${escHtml(m.name)}')" title="Skip this build">✕</button>` : ''}
              <button class="btn ${updatable ? 'btn-secondary' : 'btn-accent'} btn-sm" onclick="useModel('${escHtml(m.name)}')">Use</button>
              <button class="btn btn-secondary btn-sm" onclick="deleteModel('${escHtml(m.name)}')">Remove</button>`
-          : `<span style="font-size:11px;color:var(--muted)" title="Chat/Agent only talks to Ollama models right now">Installed in LM Studio</span>`}`;
+          : `<button class="btn btn-accent btn-sm" onclick="useModel('${escHtml(m.name)}', 'lmstudio')">Use</button>
+             <button class="btn btn-secondary btn-sm" onclick="deleteModel('${escHtml(m.name)}', 'lmstudio')">Remove</button>`}`;
     } else {
       statusAndAction = `
         <span class="model-status not-installed">Not installed</span>
@@ -4124,6 +4376,8 @@ function renderModelsTab() {
     html += filtered.length
       ? filtered.map(card).join('')
       : emptyNote('No local models installed yet — pull one from Free or Uncensored.');
+    html += diskScanSectionHtml();
+    html += onlineResultsSectionHtml();
   }
 
   else if (catalogFilter === 'uncensored') {
@@ -4134,6 +4388,9 @@ function renderModelsTab() {
         rows.push({ name: n, desc: c.desc || 'Uncensored model (installed)', size_gb: c.size_gb ?? null, category: 'uncensored', provider: 'ollama' });
       }
     }
+    for (const n of installedModelsLmstudio) {
+      if (UNCENSORED_RE.test(n)) rows.push({ name: n, desc: 'LM Studio model (local, on this machine)', size_gb: null, category: 'uncensored', provider: 'lmstudio' });
+    }
     for (const c of catalog) {
       if (c.category === 'uncensored' && !rows.some(r => r.name === c.name))
         rows.push({ ...c });
@@ -4142,7 +4399,8 @@ function renderModelsTab() {
     html += sectionTitle('🔓', 'Uncensored', 'abliterated / no-refusal models — installed ones and pull-able picks');
     html += filtered.length
       ? filtered.map(card).join('')
-      : emptyNote('No uncensored models match — try "Search Online" below for abliterated variants.');
+      : emptyNote('No uncensored models match — try "huihui-ai" or "abliterated" below.');
+    html += onlineResultsSectionHtml();
   }
 
 else if (catalogFilter === 'free') {
@@ -4269,15 +4527,23 @@ async function loadLspStatus() {
   const el = document.getElementById('lsp-status-list');
   if (!el) return;
   try {
-    const r = await fetch(`${API}/api/lsp/status`);
+    const [r, rStale] = await Promise.all([
+      fetch(`${API}/api/lsp/status`),
+      fetch(`${API}/api/lsp/staleness`).catch(() => null),
+    ]);
     const d = await r.json();
     if (!d.enabled) {
       el.innerHTML = '<span class="lsp-chip lsp-off">LSP disabled — set "lsp": true in config.json</span>';
       return;
     }
-    el.innerHTML = d.servers.map(s =>
-      `<span class="lsp-chip lsp-${s.state}" title="${escHtml(s.command.join(' '))} — ${escHtml(s.extensions.join(' '))}">${escHtml(s.name)} · ${s.state}</span>`
-    ).join('') || '<span class="lsp-chip">no servers configured</span>';
+    let staleByName = {};
+    if (rStale) { try { for (const s of (await rStale.json()).servers || []) staleByName[s.name] = s; } catch {} }
+    el.innerHTML = d.servers.map(s => {
+      const v = staleByName[s.name];
+      const versionNote = v?.installed ? ` (${escHtml(v.installed)})` : '';
+      const updateBadge = v?.update_available ? ` <span title="Latest: ${escHtml(v.latest)}">⬆</span>` : '';
+      return `<span class="lsp-chip lsp-${s.state}" title="${escHtml(s.command.join(' '))} — ${escHtml(s.extensions.join(' '))}${v?.latest ? ` — latest available: ${escHtml(v.latest)}` : ''}">${escHtml(s.name)} · ${s.state}${versionNote}${updateBadge}</span>`;
+    }).join('') || '<span class="lsp-chip">no servers configured</span>';
   } catch {
     el.innerHTML = '<span class="lsp-chip">status unavailable</span>';
   }
@@ -4360,24 +4626,7 @@ async function searchOnlineModels() {
     const results = d.results || [];
     if (!results.length) { el.innerHTML = '<p style="font-size:13px;color:var(--muted)">No results.</p>'; return; }
     el.innerHTML = results.map(m => {
-      const installed = (m.provider === 'lmstudio' ? installedModelsLmstudio : installedModels)
-        .some(im => im === m.name || im.startsWith(m.name.split(':')[0] + ':'));
-      const id = 'online_' + m.name.replace(/[^a-zA-Z0-9]/g, '_');
-      const providerBadge = `<span class="model-badge">${m.provider === 'lmstudio' ? 'LM Studio' : 'Ollama'}</span>`;
-      return `
-        <div class="model-card" id="card-${id}">
-          <div class="model-info">
-            <div class="model-name">${escHtml(m.name)} ${providerBadge}</div>
-            <div class="model-desc">${escHtml(m.desc)}${m.size_label ? ' · ' + escHtml(m.size_label) : ''}</div>
-            <div class="pull-progress" id="progress-${id}"></div>
-          </div>
-          <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">
-            ${installed
-              ? `<span class="model-status">Installed</span>`
-              : `<button class="btn btn-accent btn-sm" onclick="pullModel('${m.name}', document.getElementById('progress-${id}'), '${m.provider}')">Install</button>`
-            }
-          </div>
-        </div>`;
+      return onlineResultCardHtml(m, 'online_');
     }).join('');
   } catch (err) {
     el.innerHTML = `<span style="color:var(--danger)">Error: ${err.message}</span>`;
@@ -4388,7 +4637,7 @@ async function cancelPull(id) {
   activePulls[id]?.controller?.abort();
 }
 
-async function pullModel(modelName, progressEl, provider = 'ollama') {
+async function pullModel(modelName, progressEl, provider = 'ollama', source = '') {
   const id = modelName.replace(/[:.\/]/g, '_');
   // liveEl() re-queries by id on every update instead of trusting the
   // progressEl reference: renderModelsTab() can replace the whole catalog
@@ -4405,7 +4654,7 @@ async function pullModel(modelName, progressEl, provider = 'ollama') {
     const res = await fetch(`${API}/api/models/pull`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: modelName, provider }),
+      body: JSON.stringify({ model: modelName, provider, source: source || undefined }),
       signal: controller.signal,
     });
     const reader = res.body.getReader();
@@ -4435,7 +4684,14 @@ async function pullModel(modelName, progressEl, provider = 'ollama') {
     }
     if (errorMsg) {
       activePulls[id] = { error: errorMsg };
-      liveEl().innerHTML = `<span style="color:var(--danger)">Error: ${escHtml(errorMsg)}</span>`;
+      // A bare "manifest does not exist" from Ollama on a name containing
+      // "/" is the exact symptom of an HF/ModelScope-style repo id sent to
+      // the wrong registry — point at the fix instead of leaving a cryptic
+      // registry error as the only feedback.
+      const hint = (provider === 'ollama' && /manifest/i.test(errorMsg) && modelName.includes('/'))
+        ? ' — this looks like it might be a Hugging Face / ModelScope model id rather than an Ollama one; try Pull Custom Model with that source selected instead.'
+        : '';
+      liveEl().innerHTML = `<span style="color:var(--danger)">Error: ${escHtml(errorMsg)}${hint}</span>`;
     } else {
       delete activePulls[id];
       liveEl().innerHTML = '<span style="color:var(--accent)">✓ Download complete</span>';
@@ -4443,6 +4699,7 @@ async function pullModel(modelName, progressEl, provider = 'ollama') {
       const dismissed = dismissedModelUpdates();
       delete dismissed[modelName];
       localStorage.setItem('dismissedModelUpdates', JSON.stringify(dismissed));
+      await loadModelRankings();   // newly-installed model gets assessed/ranked right away, not up to 24h later
     }
     await loadModels();
   } catch (err) {
@@ -4455,9 +4712,11 @@ async function pullModel(modelName, progressEl, provider = 'ollama') {
   }
 }
 
-function useModel(name) {
+function useModel(name, provider = 'ollama') {
   const sel = document.getElementById('model-select');
-  const match = installedModels.find(im => im === name || im.startsWith(name.split(':')[0] + ':'));
+  const match = provider === 'lmstudio'
+    ? (installedModelsLmstudio.includes(name) ? `lmstudio/${name}` : null)
+    : installedModels.find(im => im === name || im.startsWith(name.split(':')[0] + ':'));
   if (match) {
     sel.value = match;
     localStorage.setItem('selectedModel', match);
@@ -4465,24 +4724,28 @@ function useModel(name) {
   }
 }
 
-async function deleteModel(name) {
-  if (!confirm(`Remove model "${name}"?`)) return;
+async function deleteModel(name, provider = 'ollama') {
+  if (!confirm(`Remove model "${name}"?${provider === 'lmstudio' ? ' This deletes the file(s) from disk.' : ''}`)) return;
   try {
-    const r = await fetch(`${API}/api/models/${encodeURIComponent(name)}`, { method: 'DELETE' });
+    const r = await fetch(`${API}/api/models/${encodeURIComponent(name)}?provider=${provider}`, { method: 'DELETE' });
     const d = await r.json();
     if (!d.success) alert(`Could not remove "${name}" — it may be busy or already gone.`);
   } catch (err) {
     alert(`Could not remove "${name}": ${err.message}`);
   }
   await loadModels();
+  await loadModelRankings();
 }
 
 async function pullCustomModel() {
   const input = document.getElementById('custom-model-input');
   const name = input.value.trim();
   if (!name) return;
+  const choice = document.getElementById('custom-model-provider').value; // ollama | huggingface | modelscope
+  const provider = choice === 'ollama' ? 'ollama' : 'lmstudio';
+  const source = choice === 'ollama' ? '' : choice;
   const progressEl = document.getElementById('custom-pull-status');
-  await pullModel(name, progressEl);
+  await pullModel(name, progressEl, provider, source);
   input.value = '';
 }
 

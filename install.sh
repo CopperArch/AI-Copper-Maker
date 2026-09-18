@@ -327,6 +327,13 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=$SCRIPT_DIR/backend
+# systemd --user units otherwise get a bare PATH (/usr/local/bin:/usr/bin) —
+# no ~/.cargo/bin or ~/.local/bin, which is where rust-analyzer and pylsp
+# live, so the LSP status panel would show both "missing" under the service
+# even with both actually installed (confirmed live: npx-based servers
+# still worked since /usr/bin/npx is on the bare PATH, only the two direct
+# binaries were affected).
+Environment=PATH=%h/.cargo/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=$SCRIPT_DIR/backend/venv/bin/uvicorn main:app --host 127.0.0.1 --port 8081
 Restart=on-failure
 RestartSec=5

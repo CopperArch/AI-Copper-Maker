@@ -24,5 +24,14 @@ openrouter_pricing_cache.json
 nanogpt_pricing_cache.json
 haimaker_pricing_cache.json
 model_staleness_cache.json
+model_catalog_staleness_cache.json
+lsp_staleness_cache.json
 backend/venv-imagegen/
 imagegen_local_state.json
+
+# Downloaded model weights (huihui-ai/, and any other org/repo-style download
+# dir a Hugging Face / ModelScope pull lands in at repo root) — multi-GB
+# binary weights don't belong in git history.
+huihui-ai/
+*.gguf
+*.safetensors

@@ -64,6 +64,17 @@ async def lifespan(app: FastAPI):
     # caught automatically instead of sitting unnoticed for months.
     asyncio.create_task(_validate_cloud_defaults())
     scheduler.add_job(_validate_cloud_defaults, IntervalTrigger(hours=24), id="cloud-model-check", replace_existing=True)
+    # Same idea for the curated CATALOG below (Ollama registry entries +
+    # OpenRouter free-tier entries): a hand-edited list goes stale the same
+    # way — an entry gets renamed/pulled from its registry and the app never
+    # notices until a user's pull 404s. See _validate_catalog()'s own note.
+    asyncio.create_task(_validate_catalog())
+    scheduler.add_job(_validate_catalog, IntervalTrigger(hours=24), id="catalog-check", replace_existing=True)
+    # Same idea for the Language Servers panel: rust-analyzer/pylsp/
+    # typescript-language-server/bash-language-server are all externally-
+    # managed tools this app never updates on its own.
+    asyncio.create_task(_check_lsp_updates())
+    scheduler.add_job(_check_lsp_updates, IntervalTrigger(hours=24), id="lsp-update-check", replace_existing=True)
     # NOTE: this app uses a custom lifespan, which means @app.on_event
     # handlers never fire — anything that must run at boot (skill/vendor
     # import) or shutdown (LSP client cleanup) has to be wired in HERE.
@@ -535,6 +546,11 @@ class AnalyzeRequest(BaseModel):
 class PullRequest(BaseModel):
     model: str
     provider: str = "ollama"
+    # Only meaningful when provider == "lmstudio": which upstream the model
+    # came from, since Hugging Face and ModelScope need different download
+    # mechanisms (see pull_model below). None/"huggingface" keeps the
+    # original `lms get` behavior; "modelscope" downloads the GGUF directly.
+    source: str | None = None
 
 class GenerateRequest(BaseModel):
     model: str
@@ -3126,7 +3142,21 @@ CATALOG = [
 
 @app.get("/api/models/catalog")
 async def model_catalog():
-    return {"catalog": CATALOG}
+    unavailable = _catalog_unavailable_names()
+    return {"catalog": [c for c in CATALOG if c["name"] not in unavailable]}
+
+@app.post("/api/models/refresh")
+async def refresh_models():
+    """Manual trigger for the "Update Models" button — everything here
+    otherwise only runs at boot or on its own 24h scheduler (see lifespan):
+    re-validates the curated CATALOG against its live registries so a dead
+    entry drops out, invalidates the rankings cache so every model's coding-
+    ability tier gets recomputed against the current installed list instead
+    of whatever was cached, and re-checks the Language Server versions."""
+    await _validate_catalog()
+    _invalidate_rankings_cache()
+    await _check_lsp_updates()
+    return {"success": True}
 
 @app.get("/api/models")
 async def list_models():
@@ -3165,16 +3195,55 @@ async def list_lmstudio_models():
         except Exception:
             return {"models": []}
 
+def _find_gguf_paths(obj) -> list:
+    """Recursively hunt any JSON value for GGUF file paths, sidestepping the
+    exact response-envelope shape (ModelScope's own hub client wraps its file
+    listing under different keys across endpoints/API versions) — a string is
+    treated as a GGUF path if it simply ends in .gguf, wherever it sits in
+    the structure."""
+    found = []
+    if isinstance(obj, str):
+        if obj.lower().endswith(".gguf"):
+            found.append(obj)
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            found.extend(_find_gguf_paths(v))
+    elif isinstance(obj, list):
+        for v in obj:
+            found.extend(_find_gguf_paths(v))
+    return found
+
+def _find_list_of_dicts(obj, key_hint=("Path", "Name", "path", "name")) -> list:
+    """Recursively locate the first list of model-entry dicts inside an
+    arbitrarily-wrapped API response (ModelScope's OpenAPI envelope shape
+    isn't fully documented) — identified by the presence of one of the given
+    identifying keys, rather than a hardcoded envelope path. Returns []
+    (never raises) if nothing matches, so a schema surprise degrades to "no
+    results" instead of a 500."""
+    if isinstance(obj, list) and obj and all(isinstance(i, dict) for i in obj):
+        if any(any(k in i for k in key_hint) for i in obj):
+            return obj
+    if isinstance(obj, dict):
+        for v in obj.values():
+            found = _find_list_of_dicts(v, key_hint)
+            if found:
+                return found
+    return []
+
 @app.get("/api/models/search")
 async def search_models(q: str, provider: str = "all"):
-    """Live search across both providers — the static CATALOG above is a
+    """Live search across every provider — the static CATALOG above is a
     small curated list; this is how the Models tab finds anything else,
     including uncensored/abliterated variants that show up long after this
     file was last edited. Ollama has no public search API of its own, so
     that side scrapes ollama.com's own search page (same technique as the
-    existing web_search tool uses for DuckDuckGo); Hugging Face's model API
-    is used for the LM Studio side since LM Studio's catalog is HF-GGUF
-    backed and `lms get <hf-id>` can pull directly from an HF repo id."""
+    existing web_search tool uses for DuckDuckGo). Hugging Face and
+    ModelScope both host GGUF weights LM Studio can load without ever being
+    "the LM Studio catalog" itself — `provider` in the *result* is still
+    "lmstudio" for both (that's the local store they land in and get loaded
+    from), while `source` says which upstream it actually came from, since
+    that decides how pull_model() has to fetch it: `lms get <hf-id>` works
+    for Hugging Face, but not ModelScope (see pull_model's own note)."""
     results = []
 
     if provider in ("all", "ollama"):
@@ -3193,6 +3262,7 @@ async def search_models(q: str, provider: str = "all"):
                 pulls_m = re.search(r'x-test-pull-count[^>]*>([^<]+)<', body)
                 results.append({
                     "provider": "ollama",
+                    "source": "ollama",
                     "name": name,
                     "desc": f"{pulls_m.group(1)} pulls" if pulls_m else "",
                     "size_label": size_m.group(1) if size_m else "",
@@ -3200,7 +3270,10 @@ async def search_models(q: str, provider: str = "all"):
         except Exception:
             pass
 
-    if provider in ("all", "lmstudio"):
+    # "lmstudio" is kept as an accepted alias for "huggingface" — that's what
+    # this branch always actually searched, before ModelScope existed as a
+    # second GGUF source to distinguish it from.
+    if provider in ("all", "huggingface", "lmstudio"):
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 r = await client.get("https://huggingface.co/api/models", params={
@@ -3210,8 +3283,31 @@ async def search_models(q: str, provider: str = "all"):
                 for m in r.json():
                     results.append({
                         "provider": "lmstudio",
+                        "source": "huggingface",
                         "name": m.get("id", ""),
                         "desc": f"{m.get('downloads', 0)} downloads, {m.get('likes', 0)} likes",
+                        "size_label": "",
+                    })
+        except Exception:
+            pass
+
+    if provider in ("all", "modelscope"):
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                r = await client.get("https://www.modelscope.cn/openapi/v1/models", params={
+                    "search": q, "page_number": 1, "page_size": 15,
+                })
+                entries = _find_list_of_dicts(r.json())
+                for m in entries[:15]:
+                    repo_id = m.get("Path") or m.get("path") or m.get("Name") or m.get("name")
+                    if not repo_id:
+                        continue
+                    downloads = m.get("Downloads") or m.get("downloads")
+                    results.append({
+                        "provider": "lmstudio",
+                        "source": "modelscope",
+                        "name": repo_id,
+                        "desc": f"{downloads} downloads" if downloads else "ModelScope model",
                         "size_label": "",
                     })
         except Exception:
@@ -3267,8 +3363,71 @@ async def check_model_update(model: str):
     return {"model": model, "update_available": remote != local,
             "current_digest": local, "latest_digest": remote}
 
+async def _modelscope_gguf_download(repo_id: str):
+    """Download the first GGUF file found in a ModelScope model repo straight
+    into LM Studio's local model store (~/.lmstudio/models/<repo_id>/<file>),
+    the same folder layout LM Studio scans on its own — so once this
+    finishes, the file shows up as "installed" exactly like a Hugging Face
+    pull, with no LM Studio-side import step. Needed because `lms get` only
+    resolves Hugging Face URLs (see pull_model's note above); ModelScope has
+    no equivalent CLI hook, so this hits its REST API directly. Endpoints are
+    the ones modelscope_hub itself calls (verified against its source, since
+    ModelScope's REST API isn't fully documented publicly): file listing at
+    GET /api/v1/models/{repo_id}/repo/files and raw download at
+    GET /api/v1/models/{repo_id}/repo?Revision=...&FilePath=...— both public,
+    no auth token required for a public repo."""
+    async with httpx.AsyncClient(timeout=20) as client:
+        try:
+            r = await client.get(
+                f"https://www.modelscope.cn/api/v1/models/{repo_id}/repo/files",
+                params={"Revision": "master", "Recursive": "True"})
+            r.raise_for_status()
+            paths = _find_gguf_paths(r.json())
+        except Exception as e:
+            yield json.dumps({"status": "error", "error": f"Could not list files for {repo_id} on ModelScope: {e}"}) + "\n"
+            return
+    if not paths:
+        yield json.dumps({"status": "error", "error": f"No .gguf file found in {repo_id} on ModelScope."}) + "\n"
+        return
+    # Several quant sizes are often offered in one repo — prefer the common
+    # "q4_k_m" middle ground over grabbing every file; otherwise take the
+    # only/first one found.
+    file_path = next((p for p in paths if "q4_k_m" in p.lower()), paths[0])
+
+    dest_dir = Path.home() / ".lmstudio" / "models" / repo_id
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_file = dest_dir / Path(file_path).name
+    tmp_file = dest_file.with_suffix(dest_file.suffix + ".part")
+
+    try:
+        async with httpx.AsyncClient(timeout=None) as client:
+            async with client.stream(
+                "GET", f"https://www.modelscope.cn/api/v1/models/{repo_id}/repo",
+                params={"Revision": "master", "FilePath": file_path},
+                follow_redirects=True,
+            ) as resp:
+                resp.raise_for_status()
+                total = int(resp.headers.get("content-length") or 0)
+                done = 0
+                with open(tmp_file, "wb") as f:
+                    async for chunk in resp.aiter_bytes(1024 * 256):
+                        f.write(chunk)
+                        done += len(chunk)
+                        yield json.dumps({"status": f"Downloading {dest_file.name}...",
+                                           "completed": done, "total": total or done}) + "\n"
+        tmp_file.rename(dest_file)
+    except Exception as e:
+        tmp_file.unlink(missing_ok=True)
+        yield json.dumps({"status": "error", "error": f"Download failed: {e}"}) + "\n"
+        return
+    _invalidate_rankings_cache()
+    yield json.dumps({"status": "success"}) + "\n"
+
 @app.post("/api/models/pull")
 async def pull_model(req: PullRequest):
+    if req.provider == "lmstudio" and req.source == "modelscope":
+        return StreamingResponse(_modelscope_gguf_download(req.model), media_type="application/x-ndjson")
+
     if req.provider == "lmstudio":
         # `lms get <org>/<repo>` resolves against LM Studio's own curated
         # catalog and 404s on plenty of real HF repos that aren't in it (even
@@ -3280,10 +3439,19 @@ async def pull_model(req: PullRequest):
         # than pass the bare id through.
         model_ref = req.model if req.model.startswith("http") else f"https://huggingface.co/{req.model}"
         async def stream_lmstudio():
-            proc = await asyncio.create_subprocess_exec(
-                LMS_BIN, "get", model_ref, "-y",
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-            )
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    LMS_BIN, "get", model_ref, "-y",
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+                )
+            except (FileNotFoundError, PermissionError):
+                # LM Studio's `lms` CLI isn't installed/on PATH — surface this
+                # the same way any other failed pull is surfaced instead of
+                # letting the subprocess-spawn exception crash the stream.
+                yield json.dumps({"status": "error",
+                                   "error": "LM Studio's `lms` CLI isn't installed. Run setup/lmstudio-linux.sh "
+                                            "(or the macOS/Windows equivalent) to install and start it first."}) + "\n"
+                return
             buf = b""
             while True:
                 chunk = await proc.stdout.read(256)
@@ -3303,6 +3471,8 @@ async def pull_model(req: PullRequest):
                         yield json.dumps({"status": text, "completed": pct, "total": 100}) + "\n"
                 buf = buf.split(b"\r")[-1]
             await proc.wait()
+            if proc.returncode == 0:
+                _invalidate_rankings_cache()
             yield json.dumps({"status": "success" if proc.returncode == 0 else "error"}) + "\n"
         return StreamingResponse(stream_lmstudio(), media_type="application/x-ndjson")
 
@@ -3312,14 +3482,49 @@ async def pull_model(req: PullRequest):
                                      json={"name": req.model}) as r:
                 async for line in r.aiter_lines():
                     if line:
+                        try:
+                            if json.loads(line).get("status") == "success":
+                                _invalidate_rankings_cache()
+                        except json.JSONDecodeError:
+                            pass
                         yield line + "\n"
     return StreamingResponse(stream(), media_type="application/x-ndjson")
 
 @app.delete("/api/models/{model_name:path}")
-async def delete_model(model_name: str):
+async def delete_model(model_name: str, provider: str = "ollama"):
+    if provider == "lmstudio":
+        # LM Studio has no delete API of its own to proxy — this removes the
+        # actual file(s) from its local model store directly. Resolved and
+        # bounds-checked against the store root before anything touches disk
+        # (model_name is attacker-influenced: it's whatever LM Studio's own
+        # /v1/models reported, which in turn came from a HF/ModelScope repo
+        # id) so "../../something-important" can't escape ~/.lmstudio/models.
+        base = (Path.home() / ".lmstudio" / "models").resolve()
+        target = (base / model_name).resolve()
+        if not target.is_relative_to(base) or not target.exists():
+            return {"success": False}
+        try:
+            if target.is_dir():
+                shutil.rmtree(target)
+            else:
+                target.unlink()
+            # LM Studio's own layout is <publisher>/<repo>/<file>.gguf —
+            # clean up now-empty parent dirs so a removed model doesn't leave
+            # an empty publisher/repo folder behind.
+            parent = target.parent
+            while parent != base and parent.exists() and not any(parent.iterdir()):
+                parent.rmdir()
+                parent = parent.parent
+        except Exception:
+            return {"success": False}
+        _invalidate_rankings_cache()
+        return {"success": True}
+
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.request("DELETE", f"{OLLAMA}/api/delete",
                                  json={"name": model_name})
+        if r.status_code == 200:
+            _invalidate_rankings_cache()
         return {"success": r.status_code == 200}
 
 
@@ -3961,6 +4166,77 @@ async def _validate_cloud_defaults() -> list:
     return stale
 
 
+CATALOG_STALENESS_FILE = REPO_DIR / "model_catalog_staleness_cache.json"
+
+async def _ollama_manifest_exists(model: str, client: httpx.AsyncClient) -> bool | None:
+    """GET the manifest for `model` from the public Ollama registry — same
+    path/tag parsing check_model_update() uses, but only caring whether it
+    resolves, not its digest. Returns False only on a confirmed 404 (the
+    manifest is genuinely gone); None on any other failure (network error,
+    rate limit, non-404 error) so a transient blip never gets mistaken for
+    "model removed"."""
+    if ":" in model.split("/")[-1]:
+        path, tag = model.rsplit(":", 1)
+    else:
+        path, tag = model, "latest"
+    if "/" not in path:
+        path = "library/" + path
+    try:
+        r = await client.get(
+            f"https://registry.ollama.ai/v2/{path}/manifests/{tag}",
+            headers={"Accept": "application/vnd.docker.distribution.manifest.v2+json, "
+                               "application/vnd.oci.image.manifest.v1+json"})
+        if r.status_code == 404:
+            return False
+        r.raise_for_status()
+        return True
+    except Exception:
+        return None
+
+async def _validate_catalog() -> list:
+    """Checked at startup and every 24h (see lifespan()) — the curated
+    CATALOG above is hand-edited and goes stale the same way CLOUD_PROVIDERS'
+    defaults do (see _validate_cloud_defaults' own note): an Ollama entry can
+    be renamed or pulled from the registry, or an OpenRouter free entry can
+    lose its free tier, and nothing re-checks either until a user hits a
+    "pull model manifest: file does not exist" error mid-download. This
+    confirms every CATALOG entry still resolves against its own provider and
+    writes the ones that don't to CATALOG_STALENESS_FILE; /api/models/catalog
+    filters them out of what it returns, so a dead entry stops showing up in
+    the Models tab instead of sitting there until someone tries it."""
+    ollama_entries = [c for c in CATALOG if c["provider"] == "ollama"]
+    openrouter_entries = [c for c in CATALOG if c["provider"] == "openrouter"]
+
+    unavailable = []
+    async with httpx.AsyncClient(timeout=10) as client:
+        results = await asyncio.gather(
+            *(_ollama_manifest_exists(c["name"], client) for c in ollama_entries)
+        )
+    for entry, ok in zip(ollama_entries, results):
+        if ok is False:
+            unavailable.append(entry["name"])
+
+    live_openrouter = await _fetch_openrouter_models_with_pricing()
+    if live_openrouter:  # empty dict means the fetch itself failed — never flag from that
+        for entry in openrouter_entries:
+            if entry["name"] not in live_openrouter:
+                unavailable.append(entry["name"])
+
+    try:
+        CATALOG_STALENESS_FILE.write_text(json.dumps({"checked_at": time.time(), "unavailable": unavailable}))
+    except Exception:
+        pass
+    return unavailable
+
+def _catalog_unavailable_names() -> set:
+    try:
+        if CATALOG_STALENESS_FILE.exists():
+            return set(json.loads(CATALOG_STALENESS_FILE.read_text()).get("unavailable", []))
+    except Exception:
+        pass
+    return set()
+
+
 # Public, stable domain knowledge about which model FAMILIES are strongest at
 # code generation — used as a fallback signal for models the curated CATALOG
 # entry doesn't label "coding" (paid frontier models have no CATALOG entry at
@@ -4017,6 +4293,16 @@ def _catalog_entry_for(name: str) -> dict | None:
     return None
 
 RANKINGS_CACHE_VERSION = 3  # bump whenever the scoring formula (or _CODING_FAMILY_TIERS) changes, so a stale on-disk cache from before that change doesn't keep serving old ranks for up to 24h
+MODEL_RANKINGS_CACHE_FILE = Path(__file__).parent.parent / "model_rankings_cache.json"
+
+def _invalidate_rankings_cache():
+    """Called after any successful pull (see pull_model) — a newly-installed
+    model otherwise wouldn't get assessed/placed in its Local coding-ability
+    tier until the 24h rankings cache below happened to expire on its own."""
+    try:
+        MODEL_RANKINGS_CACHE_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
 
 @app.get("/api/models/rankings")
 async def list_model_rankings():
@@ -4027,9 +4313,8 @@ async def list_model_rankings():
     of it. Includes rank #, score, and source list per model so the UI can
     sort and display badges."""
     import json, time, re
-    from pathlib import Path
 
-    cache_file = Path(__file__).parent.parent / "model_rankings_cache.json"
+    cache_file = MODEL_RANKINGS_CACHE_FILE
     cached = None
     if cache_file.exists():
         try:
@@ -4071,6 +4356,30 @@ async def list_model_rankings():
             "pulls": pulls,
             "sources": ["ollama"],
             "context_length": ctx,
+        })
+
+    # ── 1b. Local models installed in LM Studio (Hugging Face / ModelScope
+    # pulls) — these are real, usable models now that _agent_turns() can talk
+    # to LM Studio's own /v1/chat/completions, so they get scored/ranked the
+    # same as an Ollama install. No pull-count signal exists for an arbitrary
+    # loaded GGUF filename the way it does for Ollama's registry, so this is
+    # coding_score alone (no popularity term) — still enough to place it
+    # correctly relative to everything else in the Local section.
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            r = await client.get(f"{LMSTUDIO}/v1/models")
+            lmstudio_ids = [m["id"] for m in r.json().get("data", [])]
+    except Exception:
+        lmstudio_ids = []
+    for name in lmstudio_ids:
+        coding = _coding_score(name, _catalog_entry_for(name))
+        local_models.append({
+            "name": f"lmstudio/{name}",
+            "score": round(coding, 3),
+            "coding_score": round(coding, 3),
+            "pulls": 0,
+            "sources": ["lmstudio"],
+            "context_length": 0,
         })
 
     # ── 2. Free/open-weight models: Ollama catalog + HuggingFace metadata ──
@@ -4416,25 +4725,41 @@ async def _call_cloud_model(model_ref: str, messages: list, system: str, slim_hi
 def _is_cloud_model(model: str) -> bool:
     return "/" in model and model.split("/", 1)[0] in CLOUD_PROVIDERS
 
+def _is_lmstudio_model(model: str) -> bool:
+    """The model-select dropdown prefixes every LM Studio-store entry with
+    "lmstudio/" (see loadModels() in the frontend) — the same "<namespace>/
+    <rest>" shape _is_cloud_model checks, just against a namespace that isn't
+    in CLOUD_PROVIDERS, so this can't collide with it."""
+    return model.startswith("lmstudio/")
+
 
 async def _llm_complete(model: str, messages: list, timeout: int = 120) -> str:
     """One-shot (non-streaming) chat completion, routed to whichever provider
     `model` actually names — a cloud provider (via _call_cloud_model) when
-    it's a "<provider>/<model>" ref, local Ollama otherwise. Several endpoints
-    below (draft replies, calendar event scanning, skill learning, routine
-    interpretation) used to always POST straight to Ollama regardless of
-    what the caller had selected in the model dropdown — which also lists
-    configured cloud models — so picking one of those there silently failed
-    (Ollama 404s on the unknown name, but still returns valid-looking JSON
-    with no "message" key, so content quietly became ""). Also raises on a
-    real Ollama-side error instead of swallowing it into an empty string, so
-    callers' existing try/except surfaces the actual problem.
+    it's a "<provider>/<model>" ref, LM Studio when it's "lmstudio/<id>",
+    local Ollama otherwise. Several endpoints below (draft replies, calendar
+    event scanning, skill learning, routine interpretation) used to always
+    POST straight to Ollama regardless of what the caller had selected in
+    the model dropdown — which also lists configured cloud models and (once
+    LM Studio models became selectable there too) LM Studio ones — so
+    picking one of those there silently failed (Ollama 404s on the unknown
+    name, but still returns valid-looking JSON with no "message" key, so
+    content quietly became ""). Also raises on a real backend-side error
+    instead of swallowing it into an empty string, so callers' existing
+    try/except surfaces the actual problem.
     """
     if _is_cloud_model(model):
         system = next((m["content"] for m in messages if m["role"] == "system"), "")
         convo = [m for m in messages if m["role"] != "system"]
         text, _usage = await _call_cloud_model(model, convo, system)
         return text
+    if _is_lmstudio_model(model):
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            r = await client.post(f"{LMSTUDIO}/v1/chat/completions",
+                                   json={"model": model.split("/", 1)[1], "messages": messages, "stream": False})
+            r.raise_for_status()
+            choices = r.json().get("choices") or [{}]
+            return (choices[0].get("message") or {}).get("content", "")
     async with httpx.AsyncClient(timeout=timeout) as client:
         r = await client.post(f"{OLLAMA}/api/chat", json={"model": model, "messages": messages, "stream": False})
         r.raise_for_status()
@@ -4442,17 +4767,26 @@ async def _llm_complete(model: str, messages: list, timeout: int = 120) -> str:
 
 
 async def _stream_chat_ndjson(model: str, messages: list, timeout: int = 600):
-    """Shared streaming body for the two token-by-token drafting endpoints
-    below (App Analyzer, Project Generator). For local Ollama this proxies
-    its own /api/chat stream through unchanged. Cloud providers here are
-    only ever called non-streaming (see _call_cloud_model), so instead this
-    makes one call and yields the whole result as a single chunk in the same
+    """Shared streaming body for the token-by-token drafting endpoints below
+    (App Analyzer, Project Generator, etc). For local Ollama this proxies
+    its own /api/chat stream through unchanged. Cloud providers and LM
+    Studio here are only ever called non-streaming (see _call_cloud_model /
+    _llm_complete's LM Studio branch), so instead this makes one call and
+    yields the whole result as a single chunk in the same
     {"message": {"content": ...}} shape Ollama's stream uses line-by-line —
     the frontend's parser already just accumulates that field either way."""
     if _is_cloud_model(model):
         system = next((m["content"] for m in messages if m["role"] == "system"), "")
         convo = [m for m in messages if m["role"] != "system"]
         text, _usage = await _call_cloud_model(model, convo, system)
+        yield (json.dumps({"message": {"content": text}, "done": True}) + "\n").encode()
+        return
+    if _is_lmstudio_model(model):
+        try:
+            text = await _llm_complete(model, messages, timeout=timeout)
+        except Exception as e:
+            yield json.dumps({"error": f"LM Studio error: {str(e)}"}).encode()
+            return
         yield (json.dumps({"message": {"content": text}, "done": True}) + "\n").encode()
         return
     try:
@@ -4831,12 +5165,19 @@ LSP_BUILTINS = {
                     "extensions": [".py", ".pyi"]},
     "bash":       {"command": ["npx", "-y", "bash-language-server", "start"],
                     "extensions": [".sh", ".bash", ".zsh"]},
+    # clangd serves both C and C++ from the one binary — same as
+    # typescript-language-server covering .js alongside .ts above, one
+    # registry entry just lists every extension it should handle.
+    "cpp":        {"command": ["clangd"],
+                    "extensions": [".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx"]},
 }
 
 LSP_LANGUAGE_IDS = {".rs": "rust", ".ts": "typescript", ".tsx": "typescript", ".js": "javascript",
                     ".jsx": "javascript", ".mjs": "javascript", ".cjs": "javascript",
                     ".py": "python", ".pyi": "python",
-                    ".sh": "shellscript", ".bash": "shellscript", ".zsh": "shellscript"}
+                    ".sh": "shellscript", ".bash": "shellscript", ".zsh": "shellscript",
+                    ".c": "c", ".h": "c",
+                    ".cpp": "cpp", ".cc": "cpp", ".cxx": "cpp", ".hpp": "cpp", ".hh": "cpp", ".hxx": "cpp"}
 
 def _lsp_registry():
     """Resolved registry (builtins + config overrides), or None when LSP is
@@ -5053,6 +5394,93 @@ async def lsp_status():
     return {"enabled": True, "servers": servers}
 
 
+# Each LSP server in LSP_BUILTINS is an externally-managed tool (rustup/cargo,
+# pip, npm) this app doesn't install or update itself — the version-source
+# each one's real upstream publishes to, used by _check_lsp_updates below.
+# typescript/bash have no version_cmd: they're always invoked through
+# `npx -y <pkg>`, which resolves npm's "latest" dist-tag itself on every
+# start, so there's no local "installed version" to compare — running one
+# just to check its version would also mean an unwanted network fetch during
+# a routine background check. Their npm registry version is still recorded,
+# just informationally rather than as an "update available" flag.
+LSP_UPDATE_SOURCES = {
+    # rust-analyzer's own releases are date-tagged on GitHub (e.g. "2026-09-14"),
+    # not semver — `rust-analyzer --version` prints
+    # "rust-analyzer 1.98.1 (48a229c 2026-09-01)", where "1.98.1" is the
+    # bundled rustc-compatible edition, not rust-analyzer's own version.
+    # Comparing that against a GitHub release date always mismatches; the
+    # build date in the parens is the actual comparable value.
+    "rust": {"kind": "github", "repo": "rust-lang/rust-analyzer", "version_cmd": ["rust-analyzer", "--version"],
+             "version_re": r'\((?:\S+\s+)?(\d{4}-\d{2}-\d{2})\)'},
+    "python": {"kind": "pypi", "package": "python-lsp-server", "version_cmd": ["pylsp", "--version"],
+               "version_re": r'(\d+\.\d+\.\d+[\w.\-]*)'},
+    "typescript": {"kind": "npm", "package": "typescript-language-server", "version_cmd": None, "version_re": None},
+    "bash": {"kind": "npm", "package": "bash-language-server", "version_cmd": None, "version_re": None},
+}
+LSP_STALENESS_FILE = REPO_DIR / "lsp_staleness_cache.json"
+
+async def _installed_lsp_version(cmd: list | None, version_re: str) -> str | None:
+    if not cmd or not shutil.which(cmd[0]):
+        return None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+        text = out.decode(errors="replace").strip()
+        m = re.search(version_re, text)
+        return m.group(1) if m else (text.splitlines()[0] if text else None)
+    except Exception:
+        return None
+
+async def _check_lsp_updates() -> list:
+    """Checked at startup and every 24h (mirrors _validate_cloud_defaults and
+    _validate_catalog above) — surfaces it via /api/lsp/staleness for the
+    Models tab's Language Servers panel. Version comparison is a plain
+    string inequality, not real semver parsing — good enough to flag
+    "something changed upstream" without needing a version-scheme parser per
+    ecosystem (cargo crate versions, PyPI versions, and npm versions don't
+    all follow the same rules anyway)."""
+    results = []
+    async with httpx.AsyncClient(timeout=10) as client:
+        for name, src in LSP_UPDATE_SOURCES.items():
+            installed = await _installed_lsp_version(src["version_cmd"], src["version_re"])
+            latest = None
+            try:
+                if src["kind"] == "github":
+                    r = await client.get(f"https://api.github.com/repos/{src['repo']}/releases/latest",
+                                          headers={"Accept": "application/vnd.github+json"})
+                    if r.status_code == 200:
+                        latest = r.json().get("tag_name", "").lstrip("v")
+                elif src["kind"] == "pypi":
+                    r = await client.get(f"https://pypi.org/pypi/{src['package']}/json")
+                    if r.status_code == 200:
+                        latest = r.json().get("info", {}).get("version")
+                elif src["kind"] == "npm":
+                    r = await client.get(f"https://registry.npmjs.org/{src['package']}/latest")
+                    if r.status_code == 200:
+                        latest = r.json().get("version")
+            except Exception:
+                latest = None
+            results.append({
+                "name": name, "installed": installed, "latest": latest,
+                "update_available": bool(installed and latest and installed != latest),
+            })
+    try:
+        LSP_STALENESS_FILE.write_text(json.dumps({"checked_at": time.time(), "servers": results}))
+    except Exception:
+        pass
+    return results
+
+@app.get("/api/lsp/staleness")
+async def lsp_staleness():
+    if LSP_STALENESS_FILE.exists():
+        try:
+            return json.loads(LSP_STALENESS_FILE.read_text())
+        except Exception:
+            pass
+    return {"checked_at": None, "servers": []}
+
+
 async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str = "",
                        allow_sudo: bool = True, allow_subagents: bool = True, tier: str = "free"):
     """Runs the tool-use agent loop, yielding structured event dicts. Shared by
@@ -5140,6 +5568,42 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
                     usage = {"prompt_eval_count": cloud_usage.get("input_tokens", 0),
                              "eval_count": cloud_usage.get("output_tokens", 0), **cloud_usage}
                 yield {"type": "token", "content": response_text}
+            elif _is_lmstudio_model(model):
+                # The homegrown tool protocol above (```tool fence parsed out
+                # of the plain-text reply by _extract_tool_call) doesn't care
+                # which backend produced the text, so LM Studio needs nothing
+                # tool-format-specific here — just its OpenAI-compatible
+                # streaming endpoint instead of Ollama's, and the "lmstudio/"
+                # prefix stripped back off before it's sent (LM Studio's own
+                # /v1/models ids never have that prefix).
+                lmstudio_model_id = model.split("/", 1)[1]
+                async with httpx.AsyncClient(timeout=120) as client:
+                    async with client.stream(
+                        "POST", f"{LMSTUDIO}/v1/chat/completions",
+                        json={"model": lmstudio_model_id, "messages": messages, "stream": True,
+                              "temperature": 0.2, "stream_options": {"include_usage": True}}
+                    ) as r:
+                        async for chunk in r.aiter_bytes():
+                            for line in chunk.decode(errors="replace").split("\n"):
+                                line = line.strip()
+                                if not line.startswith("data:"):
+                                    continue
+                                payload = line[len("data:"):].strip()
+                                if payload == "[DONE]" or not payload:
+                                    continue
+                                try:
+                                    data = json.loads(payload)
+                                except json.JSONDecodeError:
+                                    continue
+                                choices = data.get("choices") or [{}]
+                                content = (choices[0].get("delta") or {}).get("content")
+                                if content:
+                                    response_text += content
+                                    yield {"type": "token", "content": content}
+                                usage_field = data.get("usage")
+                                if usage_field:
+                                    usage = {"prompt_eval_count": usage_field.get("prompt_tokens", 0),
+                                              "eval_count": usage_field.get("completion_tokens", 0)}
             else:
                 # Tool-format reliability needs determinism: at Ollama's
                 # default temperature (~0.8) the same prompt flip-flops
@@ -5352,6 +5816,76 @@ async def scan_for_apks():
         return found
     results = await asyncio.to_thread(_scan)
     return {"results": results}
+
+@app.get("/api/models/scan-disk")
+async def scan_disk_for_models():
+    """Finds GGUF weight files anywhere under the home directory or a
+    mounted drive — reuses the APK scanner's same wide root list and
+    noise-pruned walk (_apk_scan_roots/_safe_rglob), just for a different
+    extension — so a model downloaded by hand outside Ollama's store or LM
+    Studio's models folder (e.g. `hf download ... --local-dir ./somewhere`)
+    still shows up instead of silently existing on disk but nowhere in the
+    app. Anything already inside LM Studio's own models folder is excluded —
+    that's already visible through the normal installed-models list."""
+    lmstudio_root = (Path.home() / ".lmstudio" / "models").resolve()
+    def _scan():
+        found = []
+        visited = 0
+        # A pure visited-count cap assumes a roughly constant walk speed,
+        # which doesn't hold once a home directory has a Steam library,
+        # browser profile, or VM image directory in it (confirmed live: the
+        # 200k-file cap alone still ran past a minute on a real desktop) —
+        # a wall-clock deadline is the only bound that's actually reliable
+        # regardless of what's really out there.
+        deadline = time.monotonic() + 20
+        for root in _apk_scan_roots():
+            for f in _safe_rglob(root):
+                visited += 1
+                if visited > 200_000 or len(found) >= 200 or time.monotonic() > deadline:
+                    return found
+                if f.suffix.lower() != ".gguf":
+                    continue
+                try:
+                    resolved = f.resolve()
+                except OSError:
+                    continue
+                if resolved.is_relative_to(lmstudio_root):
+                    continue
+                st = _safe_stat(f)
+                found.append({
+                    "path": str(f),
+                    "name": f.stem,
+                    "size_gb": round((st.st_size if st else 0) / (1024 ** 3), 2),
+                })
+        return found
+    results = await asyncio.to_thread(_scan)
+    return {"results": results}
+
+class LinkLocalModelRequest(BaseModel):
+    path: str
+
+@app.post("/api/models/link-local")
+async def link_local_model(req: LinkLocalModelRequest):
+    """A GGUF file found by /api/models/scan-disk isn't actually usable yet —
+    LM Studio's server only loads from its own models folder, it doesn't
+    know an arbitrary path on disk exists. This symlinks the file in rather
+    than copying it (a found weight file is routinely tens of GB; copying it
+    would double the disk cost for zero benefit), after which it shows up
+    through the normal LM Studio list and works through the same chat path
+    as any other LM Studio install."""
+    src = Path(req.path).expanduser().resolve()
+    if not _is_path_under_apk_roots(src) or not src.exists() or src.suffix.lower() != ".gguf":
+        raise HTTPException(400, "Invalid or inaccessible model path")
+    dest_dir = Path.home() / ".lmstudio" / "models" / "local-disk" / src.parent.name
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / src.name
+    if not dest.exists():
+        try:
+            dest.symlink_to(src)
+        except OSError as e:
+            raise HTTPException(500, f"Could not link: {e}")
+    _invalidate_rankings_cache()
+    return {"success": True, "linked_as": f"local-disk/{src.parent.name}/{src.name}"}
 
 @app.post("/api/apk/upload")
 async def upload_apk(request: Request):
