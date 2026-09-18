@@ -147,6 +147,8 @@ CLOUD_PROVIDERS = {
     "nanogpt": {"label": "NanoGPT (any model)", "default_model": "anthropic/claude-sonnet-5"},
     "haimaker": {"label": "haimaker.ai (any model)", "default_model": "anthropic/claude-sonnet-5"},
     "perplexity": {"label": "Perplexity (Sonar)", "default_model": "sonar-pro"},
+    "opencodezen": {"label": "OpenCode Zen (any model)", "default_model": "big-pickle"},
+    "groq": {"label": "Groq (fast open models)", "default_model": "llama-3.3-70b-versatile"},
 }
 
 # These model ids (and the CLOUD_PROVIDERS defaults above) go stale — this
@@ -3696,6 +3698,17 @@ async def _test_cloud_key(provider: str, key: str) -> None:
             r = await client.post("https://api.perplexity.ai/chat/completions",
                                    headers={"Authorization": f"Bearer {key}", "content-type": "application/json"},
                                    json={"model": "sonar", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1})
+        elif provider == "opencodezen":
+            # Zen's /v1/models is public/unauthenticated (confirmed live, same
+            # trap as NanoGPT's) so it can't validate a key — a 1-token
+            # completion against the free big-pickle model costs nothing and
+            # still 401s on a bad key.
+            r = await client.post("https://opencode.ai/zen/v1/chat/completions",
+                                   headers={"Authorization": f"Bearer {key}", "content-type": "application/json"},
+                                   json={"model": "big-pickle", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1})
+        elif provider == "groq":
+            r = await client.get("https://api.groq.com/openai/v1/models",
+                                  headers={"Authorization": f"Bearer {key}"})
         else:
             return
     if r.status_code != 200:
@@ -3961,6 +3974,15 @@ async def cloud_model_details():
         except Exception:
             provider_models["google"] = {}
 
+    # OpenCode Zen / Groq: their live-pricing fetchers above already return
+    # the exact {model_id: {input_per_mtok, output_per_mtok, is_free, label}}
+    # shape this endpoint needs, so no separate re-fetch/re-parse block like
+    # the other gateways above — just reuse what GATEWAY_LIVE_PRICING_FETCHERS
+    # already computed.
+    for gw_provider in ("opencodezen", "groq"):
+        if gw_provider in live_prices_by_provider:
+            provider_models[gw_provider] = live_prices_by_provider[gw_provider]
+
     # ── Build output entries ─────────────────────────────────────────────
     out = []
     for p, meta in CLOUD_PROVIDERS.items():
@@ -4219,10 +4241,77 @@ async def _haimaker_live_pricing() -> dict:
     return await _cached_gateway_pricing(HAIMAKER_PRICING_CACHE_FILE, _fetch_haimaker_models_with_pricing)
 
 
+OPENCODEZEN_PRICING_CACHE_FILE = Path(__file__).parent.parent / "opencodezen_pricing_cache.json"
+
+async def _fetch_opencodezen_models_with_pricing() -> dict:
+    """OpenCode Zen's /v1/models is public (no auth) but returns bare ids
+    with no pricing field. Zen's own free models follow a "-free" id suffix
+    convention (deepseek-v4-flash-free, mimo-v2.5-free, etc.) — confirmed
+    live against https://opencode.ai/zen/v1/models — except "big-pickle",
+    a stealth/beta model Zen has published as free without that suffix
+    (see https://opencode.ai/docs/zen/). Re-check this rule if Big Pickle's
+    free period ends or Zen changes its naming."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get("https://opencode.ai/zen/v1/models")
+            if r.status_code != 200:
+                return {}
+            data = r.json()
+    except Exception:
+        return {}
+    prices = {}
+    for m in data.get("data", []):
+        mid = m.get("id")
+        if not mid:
+            continue
+        is_free = mid == "big-pickle" or mid.endswith("-free")
+        prices[mid] = {
+            "input_per_mtok": 0.0 if is_free else None,
+            "output_per_mtok": 0.0 if is_free else None,
+            "is_free": is_free,
+            "label": mid,
+        }
+    return prices
+
+async def _opencodezen_live_pricing() -> dict:
+    return await _cached_gateway_pricing(OPENCODEZEN_PRICING_CACHE_FILE, _fetch_opencodezen_models_with_pricing)
+
+
+GROQ_PRICING_CACHE_FILE = Path(__file__).parent.parent / "groq_pricing_cache.json"
+
+async def _fetch_groq_models_with_pricing() -> dict:
+    """Groq's free tier is account-wide — every model, rate-limited, no card
+    required — rather than per-model like OpenRouter/Zen, so every model
+    Groq currently lists is free. Its /v1/models 401s unauthenticated
+    (confirmed live), so this needs the user's own configured key just to
+    enumerate models; returns {} until one is saved."""
+    api_key = _load_api_keys().get("groq")
+    if not api_key:
+        return {}
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get("https://api.groq.com/openai/v1/models",
+                                  headers={"Authorization": f"Bearer {api_key}"})
+            if r.status_code != 200:
+                return {}
+            data = r.json()
+    except Exception:
+        return {}
+    return {
+        m["id"]: {"input_per_mtok": 0.0, "output_per_mtok": 0.0, "is_free": True, "label": m["id"]}
+        for m in data.get("data", []) if m.get("id")
+    }
+
+async def _groq_live_pricing() -> dict:
+    return await _cached_gateway_pricing(GROQ_PRICING_CACHE_FILE, _fetch_groq_models_with_pricing)
+
+
 GATEWAY_LIVE_PRICING_FETCHERS = {
     "openrouter": _openrouter_live_pricing,
     "nanogpt": _nanogpt_live_pricing,
     "haimaker": _haimaker_live_pricing,
+    "opencodezen": _opencodezen_live_pricing,
+    "groq": _groq_live_pricing,
 }
 
 
@@ -4794,6 +4883,8 @@ OPENAI_COMPATIBLE_BASE_URLS = {
     "nanogpt": "https://nano-gpt.com/api/v1",
     "haimaker": "https://api.haimaker.ai/v1",
     "perplexity": "https://api.perplexity.ai",
+    "opencodezen": "https://opencode.ai/zen/v1",
+    "groq": "https://api.groq.com/openai/v1",
 }
 
 async def _free_models_for_provider(provider: str) -> list[str]:
