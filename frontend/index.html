@@ -155,6 +155,8 @@
     border-radius: 4px;
   }
   .conv-menu-btn:hover { color: var(--fg, #fff); background: rgba(255,255,255,.08); }
+  .conv-menu-btn.active { color: var(--fg, #fff); background: rgba(255,255,255,.08); }
+  .conv-check { flex-shrink: 0; width: 15px; height: 15px; margin: 0; accent-color: var(--accent2); cursor: pointer; }
   /* Only conv-item's own button is hover-reveal — standalone uses (e.g. the
      token-usage menu button) stay visible via the base rule above. */
   .conv-item .conv-menu-btn { display: none; }
@@ -939,10 +941,19 @@
     </div>
 
     <div class="sidebar-section">
-      <label>Conversations</label>
+      <div style="display:flex;align-items:center;gap:4px;margin-bottom:8px">
+        <label style="flex:1;margin:0">Conversations</label>
+        <button class="conv-menu-btn" id="batch-delete-btn" title="Delete conversations" onclick="toggleBatchDelete()" style="display:block">🗑</button>
+      </div>
       <button class="btn btn-secondary btn-full btn-sm" onclick="newConversation()" style="margin-bottom:8px">
         + New Chat
       </button>
+      <div id="batch-delete-bar" style="display:none;align-items:center;gap:6px;font-size:11px;margin-bottom:8px;flex-wrap:wrap">
+        <span style="flex:1;color:var(--muted)"><span id="batch-delete-count">0</span> selected</span>
+        <button class="btn btn-sm btn-secondary" onclick="deleteAllConversations()">Delete all</button>
+        <button class="btn btn-sm btn-secondary" id="batch-delete-confirm" onclick="deleteSelectedConvs()" disabled>Delete selected</button>
+        <button class="btn btn-sm btn-secondary" onclick="toggleBatchDelete(true)">Cancel</button>
+      </div>
     </div>
 
     <div class="conv-list" id="conv-list"></div>
@@ -983,6 +994,7 @@
     <div class="tabs-row">
       <button class="tabs-arrow" onclick="scrollTabs(-1)" title="Scroll left">‹</button>
       <div class="tabs" id="tabs-scroller">
+        <div class="tab" onclick="switchTab('models')">📦 Models</div>
         <div class="tab active" onclick="switchTab('chat')">💬 Chat</div>
         <div class="tab" onclick="switchTab('codeprojects')">🗂️ Projects</div>
         <div class="tab" onclick="switchTab('analyze')">🔍 App Analyzer</div>
@@ -992,7 +1004,6 @@
         <div class="tab" onclick="switchTab('files')">📁 Files</div>
         <div class="tab" onclick="switchTab('search')">🌐 Search</div>
         <div class="tab" onclick="switchTab('imagegen')">🎨 Image Gen</div>
-        <div class="tab" onclick="switchTab('models')">📦 Models</div>
         <div class="tab" onclick="switchTab('email')">📧 Email</div>
         <div class="tab" onclick="switchTab('calendar')">📅 Calendar</div>
         <div class="tab" onclick="switchTab('skills')">🧠 Skills</div>
@@ -1896,6 +1907,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (e.target.classList.contains('conv-menu-btn')) {
       e.stopPropagation();
       toggleConvMenu(e.target.dataset.cid, e.target);
+    } else if (e.target.classList.contains('conv-check')) {
+      return; // checkbox change is handled by its own onchange
     } else if (item.dataset.mode === 'agent') {
       loadAgentConversation(item.dataset.cid);
     } else {
@@ -2495,10 +2508,87 @@ function deleteConversation(id) {
   if (stream && stream.abortController) stream.abortController.abort();
   turnQueues.delete(id);
   conversations = conversations.filter(c => c.id !== id);
+  fetch(`${API}/api/conversations/${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => {});
   if (currentConvId === id) { currentConvId = null; renderMessages(); }
   if (currentAgentConvId === id) { currentAgentConvId = null; renderAgentMessages(); }
   saveConvs();
   renderConvList();
+}
+
+let batchDeleteMode = false;
+let selectedConvs = new Set();
+
+function toggleBatchDelete(forceOff) {
+  batchDeleteMode = forceOff ? false : !batchDeleteMode;
+  selectedConvs.clear();
+  const bar = document.getElementById('batch-delete-bar');
+  const btn = document.getElementById('batch-delete-btn');
+  if (bar) bar.style.display = batchDeleteMode ? 'flex' : 'none';
+  if (btn) {
+    btn.textContent = batchDeleteMode ? '✕' : '🗑';
+    btn.classList.toggle('active', batchDeleteMode);
+  }
+  updateBatchDeleteCount();
+  renderConvList();
+  if (batchDeleteMode) {
+    const list = document.getElementById('conv-list');
+    if (list) list.scrollIntoView({ block: 'start' });
+  }
+}
+
+function toggleConvSelected(id, checked) {
+  if (checked) selectedConvs.add(id); else selectedConvs.delete(id);
+  updateBatchDeleteCount();
+}
+
+function updateBatchDeleteCount() {
+  const countEl = document.getElementById('batch-delete-count');
+  const btn = document.getElementById('batch-delete-confirm');
+  if (countEl) countEl.textContent = selectedConvs.size;
+  if (btn) btn.disabled = selectedConvs.size === 0;
+}
+
+function deleteSelectedConvs() {
+  const ids = [...selectedConvs];
+  if (!ids.length) return;
+  if (!confirm(`Delete ${ids.length} conversation${ids.length > 1 ? 's' : ''}? This can't be undone.`)) return;
+  let deleted = 0;
+  for (const id of ids) {
+    if (deleteConversationQuiet(id)) deleted++;
+  }
+  selectedConvs.clear();
+  toggleBatchDelete(true);
+  if (deleted) saveConvs();
+}
+
+function deleteAllConversations() {
+  if (!conversations.length) return;
+  const label = conversations.length === 1 ? 'conversation' : `all ${conversations.length} conversations`;
+  if (!confirm(`Delete ${label}? This can't be undone.`)) return;
+  const ids = conversations.map(c => c.id);
+  let deleted = 0;
+  for (const id of ids) {
+    if (deleteConversationQuiet(id)) deleted++;
+  }
+  selectedConvs.clear();
+  toggleBatchDelete(true);
+  if (deleted) saveConvs();
+}
+
+// Like deleteConversation but skips the confirm dialog and keeps going even if
+// one item can't be deleted (e.g. a still-running agent task).
+function deleteConversationQuiet(id) {
+  const conv = conversations.find(c => c.id === id);
+  if (conv?.mode === 'agent' && id === currentAgentConvId && agentAbortController) return false;
+  const stream = activeStreams.get(id);
+  if (stream && stream.abortController) stream.abortController.abort();
+  turnQueues.delete(id);
+  conversations = conversations.filter(c => c.id !== id);
+  fetch(`${API}/api/conversations/${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => {});
+  if (currentConvId === id) { currentConvId = null; renderMessages(); }
+  if (currentAgentConvId === id) { currentAgentConvId = null; renderAgentMessages(); }
+  renderConvList();
+  return true;
 }
 
 // Plain-text transcript used by both Copy and Save — tool calls/results are
@@ -2590,9 +2680,13 @@ function renderConvList() {
     const isActive = isAgent ? c.id === currentAgentConvId : c.id === currentConvId;
     const icon = activeStreams.has(c.id) ? '<span class="conv-streaming-dot" title="Still working…"></span>'
       : isAgent ? '🤖' : '💬';
+    const check = batchDeleteMode
+      ? `<input type="checkbox" class="conv-check" ${selectedConvs.has(c.id) ? 'checked' : ''} onchange="toggleConvSelected('${c.id}', this.checked)" title="Select to delete">`
+      : '';
     return `
     <div class="conv-item ${isActive ? 'active' : ''}" data-cid="${c.id}" data-mode="${isAgent ? 'agent' : 'chat'}">
-      <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${icon} ${escHtml(c.title)}</span>
+      <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${icon} ${escHtml(c.title)}</span>
+      ${check}
       <button class="conv-menu-btn" data-cid="${c.id}" title="More">⋮</button>
     </div>
   `;
@@ -2907,7 +3001,7 @@ const idxAttr = ` data-msg-idx="${idx}"`;
      </div>`;
    return `
      <div class="message ${isUser ? 'user' : ''}">
-       <div class="avatar ${isUser ? 'user-av' : 'ai-av'}">${isUser ? '👤' : '🤖'}</div>
+       <div class="avatar ${isUser ? 'user-av' : 'ai-av'}">${isUser ? '👻' : '🤖'}</div>
        <div class="bubble"${idxAttr}>${bubbleActions}${attachmentsHtml}${content}</div>
      </div>
    `;
@@ -3446,7 +3540,7 @@ async function runNextTurn(convId) {
     const res = await fetch(`${API}/api/agent`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, message: messageContent, conversation: cleanMessages, system }),
+      body: JSON.stringify({ model, message: messageContent, conversation: cleanMessages, system, session_id: conv.id }),
       signal: streamState.abortController.signal
     });
 
@@ -6545,7 +6639,7 @@ async function runAgent() {
 
   container.innerHTML += `
     <div class="message user" style="max-width:900px;width:100%;margin-left:auto;flex-direction:row-reverse;display:flex;gap:12px;animation:fadeIn .2s ease">
-      <div class="avatar user-av" style="width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0;border:1px solid var(--border);background:var(--accent2)">👤</div>
+      <div class="avatar user-av" style="width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0;border:1px solid var(--border);background:var(--accent2)">👻</div>
       <div class="bubble" style="max-width:calc(100% - 50px);background:rgba(31,111,235,.15);border-color:rgba(31,111,235,.3)">
         <div class="bubble-actions">
           <button data-action="copy-bubble" title="Copy message">📋 Copy</button>
@@ -6628,7 +6722,7 @@ async function runAgent() {
     const res = await fetch(`${API}/api/agent`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: effectiveModel, message: text, conversation: conv.agentHistory, tier: agentTier }),
+      body: JSON.stringify({ model: effectiveModel, message: text, conversation: conv.agentHistory, tier: agentTier, session_id: conv.id }),
       signal: agentAbortController.signal
     });
 

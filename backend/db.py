@@ -57,8 +57,10 @@ CREATE TABLE IF NOT EXISTS permissions (
 
 def init_db() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.executescript(_schema)
     conn.commit()
     return conn
@@ -134,6 +136,8 @@ def save_message(conn: sqlite3.Connection, mid: str, sid: str, role: str, conten
         created_at = int(datetime.now().timestamp())
     if tool_calls is None:
         tool_calls = []
+    if role in ("tool_call", "tool_result") and not isinstance(content, str):
+        content = json.dumps(content)
     conn.execute(
         "INSERT OR REPLACE INTO messages (id, session_id, role, content, tool_calls, finish_reason, created_at) VALUES (?,?,?,?,?,?,?)",
         (mid, sid, role, content, json.dumps(tool_calls), finish_reason, created_at)
@@ -147,6 +151,13 @@ def update_session_summary(conn: sqlite3.Connection, sid: str, summary_message_i
 def update_session_usage(conn: sqlite3.Connection, sid: str, input_tokens: int, output_tokens: int, cost: float):
     now = int(datetime.now().timestamp())
     conn.execute("UPDATE sessions SET prompt_tokens = prompt_tokens + ?, completion_tokens = completion_tokens + ?, cost = cost + ?, updated_at = ? WHERE id = ?", (input_tokens, output_tokens, cost, now, sid))
+    conn.commit()
+
+def delete_session(conn: sqlite3.Connection, sid: str):
+    conn.execute("DELETE FROM messages WHERE session_id = ?", (sid,))
+    conn.execute("DELETE FROM usage WHERE session_id = ?", (sid,))
+    conn.execute("DELETE FROM permissions WHERE session_id = ?", (sid,))
+    conn.execute("DELETE FROM sessions WHERE id = ?", (sid,))
     conn.commit()
 
 def create_permission(conn: sqlite3.Connection, pid: str, sid: str, tool_name: str, tool_args: dict) -> str:
@@ -170,6 +181,32 @@ def get_pending_permissions(conn: sqlite3.Connection, sid: str) -> list[dict]:
     rows = conn.execute("SELECT * FROM permissions WHERE session_id = ? AND status = 'pending'", (sid,)).fetchall()
     return [dict(r) for r in rows]
 
+def _msg_to_frontend(m: dict) -> dict:
+    role = m.get("role", "user")
+    content = m.get("content", "")
+    if role in ("tool_call", "tool_result"):
+        try:
+            payload = json.loads(content) if isinstance(content, str) else content
+        except (json.JSONDecodeError, TypeError):
+            payload = {}
+        if role == "tool_call":
+            return {"role": "tool_call",
+                    "name": payload.get("name", ""),
+                    "arguments": payload.get("arguments", {})}
+        return {"role": "tool_result",
+                "name": payload.get("name", ""),
+                "result": payload.get("result", "")}
+    return {"role": role, "content": content}
+
 def sessions_list(conn: sqlite3.Connection) -> list[dict]:
     rows = conn.execute("SELECT * FROM sessions ORDER BY updated_at DESC").fetchall()
-    return [dict(r) for r in rows]
+    sessions = []
+    for r in rows:
+        s = dict(r)
+        msgs = conn.execute(
+            "SELECT * FROM messages WHERE session_id = ? ORDER BY created_at ASC, rowid ASC",
+            (s["id"],),
+        ).fetchall()
+        s["messages"] = [_msg_to_frontend(dict(m)) for m in msgs]
+        sessions.append(s)
+    return sessions

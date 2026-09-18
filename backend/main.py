@@ -41,7 +41,7 @@ from fastapi.responses import StreamingResponse, JSONResponse, Response, Redirec
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from db import init_db, _migrate_from_json, get_conn, create_session as _db_create_session, get_session as _db_get_session, get_messages as _db_get_messages, save_message as _db_save_message, update_session_summary as _db_update_session_summary, update_session_usage as _db_update_session_usage, create_permission as _db_create_permission, get_permission as _db_get_permission, respond_permission as _db_respond_permission, get_pending_permissions as _db_get_pending_permissions, sessions_list as _db_sessions_list
+from db import init_db, _migrate_from_json, get_conn, create_session as _db_create_session, get_session as _db_get_session, get_messages as _db_get_messages, save_message as _db_save_message, update_session_summary as _db_update_session_summary, update_session_usage as _db_update_session_usage, create_permission as _db_create_permission, get_permission as _db_get_permission, respond_permission as _db_respond_permission, get_pending_permissions as _db_get_pending_permissions, sessions_list as _db_sessions_list, delete_session as _db_delete_session
 
 # Routines (see the "Routines" section far below) need a scheduler running
 # for the lifetime of the app. `_load_and_schedule_routines` is defined later
@@ -619,6 +619,7 @@ class AgentRequest(BaseModel):
     conversation: list[dict] = []
     system: str = ""
     tier: str = "free"  # "free" | "paid" — picks teacher model from config
+    session_id: str = ""  # frontend conversation id — keeps a chat pinned to one DB session
 
 class SudoPasswordRequest(BaseModel):
     password: str = ""
@@ -6158,24 +6159,39 @@ async def agent_loop(req: AgentRequest):
     ):
         conv.append({"role": "user", "content": req.message})
 
-    # Create/update SQLite session
-    session_id = req.conversation[0].get("session_id") if req.conversation else str(uuid.uuid4())
-    if DB_CONN:
-        _db_create_session(DB_CONN, session_id, req.message[:50] if req.message else "Agent Session", req.model)
-        for msg in conv:
-            _db_save_message(DB_CONN, str(uuid.uuid4()), session_id, msg.get("role", "user"),
-                             msg.get("content", ""), msg.get("tool_calls", []),
-                             msg.get("finish_reason", ""))
+    # Create/update SQLite session. Frontend conversation messages don't carry
+    # `session_id`, so fall back to a fresh uuid whenever it's missing/empty —
+    # otherwise the NOT NULL constraint on messages.session_id blows up the run.
+    first_msg = req.conversation[0] if req.conversation else {}
+    session_id = req.session_id
+    if not session_id:
+        session_id = first_msg.get("session_id") if isinstance(first_msg, dict) else None
+    if not session_id or not str(session_id).strip():
+        session_id = str(uuid.uuid4())
+    conn = get_conn()
+    try:
+        _db_create_session(conn, session_id, (req.message if req.message else "Agent Session")[:50], req.model)
+    finally:
+        conn.close()
 
     async def stream():
-        async for event in _agent_turns(req.model, conv, system=req.system, tier=req.tier):
-            yield json.dumps(event) + "\n"
-        # Persist final conversation state
-        if DB_CONN:
-            for msg in conv:
-                _db_save_message(DB_CONN, str(uuid.uuid4()), session_id, msg.get("role", "user"),
-                                 msg.get("content", ""), msg.get("tool_calls", []),
-                                 msg.get("finish_reason", ""))
+        # Persist only the turns this run actually produced (conv[start_len:]).
+        # Messages already in conv were loaded from /api/conversations or saved
+        # by earlier runs, so re-saving them would just duplicate rows.
+        start_len = len(conv)
+        try:
+            async for event in _agent_turns(req.model, conv, system=req.system, tier=req.tier):
+                yield json.dumps(event) + "\n"
+        finally:
+            try:
+                conn = get_conn()
+                for msg in conv[start_len:]:
+                    _db_save_message(conn, str(uuid.uuid4()), session_id, msg.get("role", "user"),
+                                     msg.get("content", ""), msg.get("tool_calls", []),
+                                     msg.get("finish_reason", ""))
+                conn.close()
+            except Exception:
+                pass
 
     return StreamingResponse(stream(), media_type="application/x-ndjson")
 
@@ -6645,9 +6661,24 @@ async def save_messages(session_id: str, request: Request):
     if isinstance(data, dict):
         data = [data]
     for msg in data:
-        _db_save_message(conn, msg.get("id"), session_id, msg.get("role", "user"),
-                         msg.get("content", ""), msg.get("tool_calls", []),
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+        if role == "tool_call":
+            content = json.dumps({"name": msg.get("name", ""), "arguments": msg.get("arguments", {})})
+        elif role == "tool_result":
+            content = json.dumps({"name": msg.get("name", ""), "result": msg.get("result", "")})
+        _db_save_message(conn, msg.get("id"), session_id, role, content,
+                         msg.get("tool_calls", []),
                          msg.get("finish_reason", ""), msg.get("created_at"))
+    return {"ok": True}
+
+@app.delete("/api/conversations/{session_id}")
+async def delete_conversation(session_id: str):
+    conn = get_conn()
+    try:
+        _db_delete_session(conn, session_id)
+    finally:
+        conn.close()
     return {"ok": True}
 
 @app.get("/api/conversations/{session_id}/messages")
