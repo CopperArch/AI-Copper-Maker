@@ -917,6 +917,10 @@
       <div id="lmstudio-status-dot" class="status-dot"></div>
       <span id="lmstudio-status-text" class="status-text">LM Studio</span>
     </div>
+    <div class="status-group">
+      <div id="llama-cpp-status-dot" class="status-dot"></div>
+      <span id="llama-cpp-status-text" class="status-text">llama.cpp</span>
+    </div>
   </div>
 </header>
 
@@ -1763,6 +1767,7 @@ let conversations = [];
 let currentConvId = null;
 let installedModels = [];
 let installedModelsLmstudio = [];
+let installedModelsLlamaCpp = [];
 // Keyed by conversation id, not a single global bool/controller — this is
 // what lets the user switch to (or start) a different chat while another is
 // still streaming. Each entry: { abortController, fullText, tokenCount }.
@@ -1956,6 +1961,8 @@ async function applyUpdate() {
 async function checkStatus() {
   const lmDot = document.getElementById('lmstudio-status-dot');
   const lmTxt = document.getElementById('lmstudio-status-text');
+  const llDot = document.getElementById('llama-cpp-status-dot');
+  const llTxt = document.getElementById('llama-cpp-status-text');
   try {
     const r = await fetch(`${API}/api/health`);
     const d = await r.json();
@@ -1969,11 +1976,14 @@ async function checkStatus() {
     }
     lmDot.className = d.lmstudio ? 'status-dot ok' : 'status-dot';
     lmTxt.textContent = d.lmstudio ? 'LM Studio connected' : 'LM Studio disconnected';
+    if (llDot) { llDot.className = d.llama_cpp ? 'status-dot ok' : 'status-dot'; }
+    if (llTxt) { llTxt.textContent = d.llama_cpp ? 'llama.cpp connected' : 'llama.cpp disconnected'; }
   } catch {
     document.getElementById('status-dot').className = 'status-dot';
     document.getElementById('status-text').textContent = 'Backend offline';
-    lmDot.className = 'status-dot';
-    lmTxt.textContent = 'LM Studio disconnected';
+    lmDot.className = 'status-dot'; lmTxt.textContent = 'LM Studio disconnected';
+    if (llDot) llDot.className = 'status-dot';
+    if (llTxt) llTxt.textContent = 'llama.cpp disconnected';
   }
 }
 
@@ -2095,14 +2105,16 @@ async function checkForUpdateFromAbout() {
 
 async function loadModels() {
   try {
-    const [r, rLmstudio, rCloud] = await Promise.all([
+    const [r, rLmstudio, rLlamaCpp, rCloud] = await Promise.all([
       fetch(`${API}/api/models`),
       fetch(`${API}/api/models/lmstudio`).catch(() => null),
+      fetch(`${API}/api/models/llama-cpp`).catch(() => null),
       fetch(`${API}/api/models/cloud`).catch(() => null),
     ]);
     const d = await r.json();
     installedModels = d.models || [];
     if (rLmstudio) { try { installedModelsLmstudio = (await rLmstudio.json()).models || []; } catch {} }
+    if (rLlamaCpp) { try { installedModelsLlamaCpp = (await rLlamaCpp.json()).models || []; } catch {} }
     let cloudModels = [];
     if (rCloud) { try { cloudModels = (await rCloud.json()).models || []; } catch {} }
     // "lmstudio/" prefixed, same "<namespace>/<rest>" shape cloud model refs
@@ -2110,14 +2122,15 @@ async function loadModels() {
     // before talking to LM Studio's own API. Without this prefix an LM
     // Studio model selected here was indistinguishable from an Ollama name
     // and _agent_turns() sent it straight to Ollama, which 404'd on it.
-    const lmstudioModels = installedModelsLmstudio.map(m => `lmstudio/${m}`);
-    const allModels = [...installedModels, ...lmstudioModels, ...cloudModels];
+    const llamaCppModels = installedModelsLlamaCpp.map(m => `llama-cpp/${m}`);
+    const allModels = [...installedModels, ...lmstudioModels, ...llamaCppModels, ...cloudModels];
     const sel = document.getElementById('model-select');
     const prev = sel.value;
     sel.innerHTML = allModels.length
       ? [
           installedModels.length ? `<optgroup label="Local">${installedModels.map(m => `<option value="${m}">${m}</option>`).join('')}</optgroup>` : '',
           lmstudioModels.length ? `<optgroup label="Local (LM Studio)">${lmstudioModels.map((m, i) => `<option value="${m}">${escHtml(installedModelsLmstudio[i])}</option>`).join('')}</optgroup>` : '',
+          llamaCppModels.length ? `<optgroup label="Local (llama.cpp)">${llamaCppModels.map((m, i) => `<option value="${m}">${escHtml(installedModelsLlamaCpp[i])}</option>`).join('')}</optgroup>` : '',
           cloudModels.length ? `<optgroup label="Cloud">${cloudModels.map(m => `<option value="${m}">${m}</option>`).join('')}</optgroup>` : '',
         ].join('')
       : '<option value="">No models installed</option>';
@@ -4287,7 +4300,9 @@ function renderModelsTab() {
   const matchesSearch = (name, desc = '') =>
     !search || name.toLowerCase().includes(search) || (desc || '').toLowerCase().includes(search);
   const isInstalled = (name, provider = 'ollama') => {
-    const list = provider === 'lmstudio' ? installedModelsLmstudio : installedModels;
+    const list = provider === 'lmstudio' ? installedModelsLmstudio
+                 : provider === 'llama-cpp' ? installedModelsLlamaCpp
+                 : installedModels;
     return list.some(im => im === name || im.startsWith(name.split(':')[0] + ':'));
   };
 
@@ -4304,7 +4319,7 @@ function renderModelsTab() {
     const installed = !isCloudOnly && isInstalled(m.name, provider);
     const id = m.name.replace(/[:.\/]/g, '_');
     const sizeLabel = m.size_gb == null ? '' : m.size_gb >= 20 ? `${m.size_gb} GB — needs CPU offload` : `${m.size_gb} GB`;
-    const providerBadge = `<span class="model-badge">${provider === 'lmstudio' ? 'LM Studio' : provider === 'openrouter' ? 'OpenRouter' : 'Ollama'}</span>`;
+    const providerBadge = `<span class="model-badge">${provider === 'lmstudio' ? 'LM Studio' : provider === 'llama-cpp' ? 'llama.cpp' : provider === 'openrouter' ? 'OpenRouter' : 'Ollama'}</span>`;
     const rankBadge = rank !== 0 ? `<span class="model-badge" style="background:var(--accent);color:#fff;padding:2px 6px;border-radius:4px;font-size:10px;margin-left:4px">#${rank}</span>` : '';
     const updatable = provider === 'ollama' && modelUpdates[m.name];
     const ctx = provider === 'ollama' && modelContextLengths[m.name]
@@ -4371,6 +4386,9 @@ function renderModelsTab() {
     for (const n of installedModelsLmstudio) {
       rows.push({ name: n, desc: 'LM Studio model (local, on this machine)', size_gb: null, category: 'general', provider: 'lmstudio' });
     }
+    for (const n of installedModelsLlamaCpp) {
+      rows.push({ name: n, desc: 'llama.cpp model (local, on this machine)', size_gb: null, category: 'general', provider: 'llama-cpp' });
+    }
     const filtered = rows.filter(r => matchesSearch(r.name, r.desc)).sort(byRank);
     html += sectionTitle('💾', 'Local', 'installed on this machine — private, no per-token cost');
     html += filtered.length
@@ -4390,6 +4408,9 @@ function renderModelsTab() {
     }
     for (const n of installedModelsLmstudio) {
       if (UNCENSORED_RE.test(n)) rows.push({ name: n, desc: 'LM Studio model (local, on this machine)', size_gb: null, category: 'uncensored', provider: 'lmstudio' });
+    }
+    for (const n of installedModelsLlamaCpp) {
+      if (UNCENSORED_RE.test(n)) rows.push({ name: n, desc: 'llama.cpp model (local, on this machine)', size_gb: null, category: 'uncensored', provider: 'llama-cpp' });
     }
     for (const c of catalog) {
       if (c.category === 'uncensored' && !rows.some(r => r.name === c.name))
@@ -4725,7 +4746,7 @@ function useModel(name, provider = 'ollama') {
 }
 
 async function deleteModel(name, provider = 'ollama') {
-  if (!confirm(`Remove model "${name}"?${provider === 'lmstudio' ? ' This deletes the file(s) from disk.' : ''}`)) return;
+  if (!confirm(`Remove model "${name}"?${provider === 'lmstudio' ? ' This deletes the file(s) from disk.' : provider === 'llama-cpp' ? ' This deletes the file(s) from disk.' : ''}`)) return;
   try {
     const r = await fetch(`${API}/api/models/${encodeURIComponent(name)}?provider=${provider}`, { method: 'DELETE' });
     const d = await r.json();

@@ -107,6 +107,7 @@ app = FastAPI(title="AI Copper Maker", lifespan=lifespan)
 
 OLLAMA = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 LMSTUDIO = os.environ.get("LMSTUDIO_HOST", "http://localhost:1234")
+LLAMA_CPP = os.environ.get("LLAMA_CPP_HOST", "http://localhost:8080")
 LMS_BIN = shutil.which("lms") or str(
     Path.home() / ".lmstudio" / "bin" / ("lms.exe" if platform.system() == "Windows" else "lms")
 )
@@ -1566,6 +1567,7 @@ async def system_lan_ip():
 async def health():
     ollama_ok = False
     lmstudio_ok = False
+    llama_cpp_ok = False
     async with httpx.AsyncClient(timeout=3) as client:
         try:
             r = await client.get(f"{OLLAMA}/api/tags")
@@ -1577,7 +1579,12 @@ async def health():
             lmstudio_ok = r.status_code == 200
         except Exception:
             pass
-    return {"status": "ok", "ollama": ollama_ok, "lmstudio": lmstudio_ok}
+        try:
+            r = await client.get(f"{LLAMA_CPP}/v1/models")
+            llama_cpp_ok = r.status_code == 200
+        except Exception:
+            pass
+    return {"status": "ok", "ollama": ollama_ok, "lmstudio": lmstudio_ok, "llama_cpp": llama_cpp_ok}
 
 
 REPO_DIR = Path(__file__).parent.parent
@@ -3269,6 +3276,16 @@ async def list_lmstudio_models():
         except Exception:
             return {"models": []}
 
+@app.get("/api/models/llama-cpp")
+async def list_llama_cpp_models():
+    async with httpx.AsyncClient(timeout=5) as client:
+        try:
+            r = await client.get(f"{LLAMA_CPP}/v1/models")
+            data = r.json()
+            return {"models": [m["id"] for m in data.get("data", [])]}
+        except Exception:
+            return {"models": []}
+
 def _find_gguf_paths(obj) -> list:
     """Recursively hunt any JSON value for GGUF file paths, sidestepping the
     exact response-envelope shape (ModelScope's own hub client wraps its file
@@ -4806,6 +4823,9 @@ def _is_lmstudio_model(model: str) -> bool:
     in CLOUD_PROVIDERS, so this can't collide with it."""
     return model.startswith("lmstudio/")
 
+def _is_llama_cpp_model(model: str) -> bool:
+    return model.startswith("llama-cpp/")
+
 
 async def _llm_complete(model: str, messages: list, timeout: int = 120) -> str:
     """One-shot (non-streaming) chat completion, routed to whichever provider
@@ -4830,6 +4850,13 @@ async def _llm_complete(model: str, messages: list, timeout: int = 120) -> str:
     if _is_lmstudio_model(model):
         async with httpx.AsyncClient(timeout=timeout) as client:
             r = await client.post(f"{LMSTUDIO}/v1/chat/completions",
+                                   json={"model": model.split("/", 1)[1], "messages": messages, "stream": False})
+            r.raise_for_status()
+            choices = r.json().get("choices") or [{}]
+            return (choices[0].get("message") or {}).get("content", "")
+    if _is_llama_cpp_model(model):
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            r = await client.post(f"{LLAMA_CPP}/v1/chat/completions",
                                    json={"model": model.split("/", 1)[1], "messages": messages, "stream": False})
             r.raise_for_status()
             choices = r.json().get("choices") or [{}]
@@ -4860,6 +4887,14 @@ async def _stream_chat_ndjson(model: str, messages: list, timeout: int = 600):
             text = await _llm_complete(model, messages, timeout=timeout)
         except Exception as e:
             yield json.dumps({"error": f"LM Studio error: {str(e)}"}).encode()
+            return
+        yield (json.dumps({"message": {"content": text}, "done": True}) + "\n").encode()
+        return
+    if _is_llama_cpp_model(model):
+        try:
+            text = await _llm_complete(model, messages, timeout=timeout)
+        except Exception as e:
+            yield json.dumps({"error": f"llama.cpp error: {str(e)}"}).encode()
             return
         yield (json.dumps({"message": {"content": text}, "done": True}) + "\n").encode()
         return
@@ -5666,6 +5701,35 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
                     async with client.stream(
                         "POST", f"{LMSTUDIO}/v1/chat/completions",
                         json={"model": lmstudio_model_id, "messages": messages, "stream": True,
+                              "temperature": 0.2, "stream_options": {"include_usage": True}}
+                    ) as r:
+                        async for chunk in r.aiter_bytes():
+                            for line in chunk.decode(errors="replace").split("\n"):
+                                line = line.strip()
+                                if not line.startswith("data:"):
+                                    continue
+                                payload = line[len("data:"):].strip()
+                                if payload == "[DONE]" or not payload:
+                                    continue
+                                try:
+                                    data = json.loads(payload)
+                                except json.JSONDecodeError:
+                                    continue
+                                choices = data.get("choices") or [{}]
+                                content = (choices[0].get("delta") or {}).get("content")
+                                if content:
+                                    response_text += content
+                                    yield {"type": "token", "content": content}
+                                usage_field = data.get("usage")
+if usage_field:
+                                    usage = {"prompt_eval_count": usage_field.get("prompt_tokens", 0),
+                                              "eval_count": usage_field.get("completion_tokens", 0)}
+            elif _is_llama_cpp_model(model):
+                llama_model_id = model.split("/", 1)[1]
+                async with httpx.AsyncClient(timeout=120) as client:
+                    async with client.stream(
+                        "POST", f"{LLAMA_CPP}/v1/chat/completions",
+                        json={"model": llama_model_id, "messages": messages, "stream": True,
                               "temperature": 0.2, "stream_options": {"include_usage": True}}
                     ) as r:
                         async for chunk in r.aiter_bytes():
