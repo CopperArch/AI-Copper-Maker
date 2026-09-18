@@ -1,4 +1,4 @@
-# AI Copper Maker (formerly LLM Coder) REV 1.1 (v1.1)
+# AI Copper Maker (formerly LLM Coder) REV 1.3 (v1.3)
 
 <p align="center"><img src="brand/logo.png" alt="AI Copper Maker" width="640"></p>
 
@@ -12,12 +12,40 @@ Licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE) — free to u
 
 ---
 
+## REV 1.3 (v1.3) — What's New
+
+### 🗄️ Conversations moved to a real database
+Chat history now lives in SQLite instead of a flat JSON file — each conversation pins to one persistent session instead of drifting into duplicates, and a page reload correctly returns you to the conversation you were actually using instead of an arbitrary one. Batch conversation delete (right-side checkboxes, delete-selected or delete-all) removes conversations from the database, not just the page.
+
+### 🆓 More free models, plus automatic fallback
+Added **OpenCode Zen** (several genuinely free models, including a strong stealth-labeled coding model) and **Groq** (fast open models, generous no-card-required free tier) as selectable cloud providers alongside **OpenRouter**, NanoGPT, and haimaker.ai. If a free model hits a shared-pool rate limit, the app now retries and, if needed, automatically falls back to a different free model on the same provider instead of surfacing a raw error. Also added `/api/models/rankings` — a coding-focused ranking across local, free, and paid models refreshed against live signals rather than a hand-maintained guess.
+
+### 🖼️ Real image generation
+The Image Generation tab now does actual image generation instead of describing an imagined image in text: OpenRouter-backed generation/editing, or a fully local GPU pipeline with automatic hardware detection (NVIDIA/AMD/Apple Silicon) and an isolated environment so its dependencies never collide with the main app.
+
+### 🎨 Theming, navigation & polish
+A light/dark theme toggle, a collapsible off-canvas sidebar for narrow screens, full-text conversation search, a `Ctrl+K` command switcher, and edit-and-resend / regenerate controls on any message.
+
+### 🧠 Context-aware auto-compaction
+Long conversations no longer silently truncate — as a chat approaches a model's real context window, older turns are automatically folded into a compact summary instead of being dropped, with no setting to remember to enable.
+
+### 🧰 Restructured internal tool execution
+The agent's tool-calling path was rebuilt around a typed tool-registry interface for cleaner dispatch and easier extension going forward, with the same tool set (file edit/read/write, search, code execution, shell commands, subagent delegation) behaving identically from the user's side.
+
+### 🐛 Fixes worth knowing about
+- A backend shutdown/restart race could leave a child process unaccounted for, occasionally causing a hard crash on restart; shutdown now waits for every child process to actually exit.
+- The model picker could silently revert your selection back to a local model mid-session during a routine background refresh.
+- A model-picker bug (affecting every cloud gateway provider) could send an invalid, undefined model reference instead of the one you actually picked; fixed at the source.
+- Cloud provider errors (e.g. a rate-limited free model) were shown as a raw provider error dump instead of a clean message.
+
+---
+
 ## REV 1.2 (v1.2) — What's New
 
-### 💬 Chat, rebuilt around the opencode command model
-The chat bar now has a **command button row** (New Chat, Compact, Skills, Agent, Model, Clear, Help) plus full **slash-command autocomplete** — type `/` and pick from the list with the arrow keys, Tab, or Enter. `/compact` summarizes everything except the last few turns into one dense summary message (freeing context on long sessions, exactly like opencode/Claude Code compaction); `/agent <task>` jumps to Agent mode with the task pre-filled. Conversations get **automatic titles** generated after their first exchange, and a toast announces it whenever a session teaches the agent a new **auto-learned skill**.
+### 💬 Chat, rebuilt around a command-driven workflow
+The chat bar now has a **command button row** (New Chat, Compact, Skills, Agent, Model, Clear, Help) plus full **slash-command autocomplete** — type `/` and pick from the list with the arrow keys, Tab, or Enter. `/compact` summarizes everything except the last few turns into one dense summary message, freeing context on long sessions; `/agent <task>` jumps to Agent mode with the task pre-filled. Conversations get **automatic titles** generated after their first exchange, and a toast announces it whenever a session teaches the agent a new **auto-learned skill**.
 
-### 🤖 A professional agent loop (copied from the current top-tier coding agents)
+### 🤖 A professional agent loop
 - **Plan tracking** — `todo_write` gives the agent a live task list it must seed before multi-step work and update as it goes; the chat renders it as a progress checklist (`◐` in-progress, `✓` done) inside the reply.
 - **Surgical edits with diffs** — new `edit_file` tool (exact old-string → new-string, uniqueness enforced, near-miss recovery hints). The agent is instructed to prefer it over whole-file rewrites; every edit/write returns a **unified diff** rendered red/green in the chat.
 - **Content search** — new `grep_files` tool (regex over file contents with `file:line` results, skipping junk/binary dirs), alongside the existing filename search.
