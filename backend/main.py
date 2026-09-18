@@ -147,6 +147,8 @@ CLOUD_PROVIDERS = {
     "nanogpt": {"label": "NanoGPT (any model)", "default_model": "anthropic/claude-sonnet-5"},
     "haimaker": {"label": "haimaker.ai (any model)", "default_model": "anthropic/claude-sonnet-5"},
     "perplexity": {"label": "Perplexity (Sonar)", "default_model": "sonar-pro"},
+    "opencodezen": {"label": "OpenCode Zen (any model)", "default_model": "big-pickle"},
+    "groq": {"label": "Groq (fast open models)", "default_model": "llama-3.3-70b-versatile"},
 }
 
 # These model ids (and the CLOUD_PROVIDERS defaults above) go stale — this
@@ -3696,6 +3698,17 @@ async def _test_cloud_key(provider: str, key: str) -> None:
             r = await client.post("https://api.perplexity.ai/chat/completions",
                                    headers={"Authorization": f"Bearer {key}", "content-type": "application/json"},
                                    json={"model": "sonar", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1})
+        elif provider == "opencodezen":
+            # Zen's /v1/models is public/unauthenticated (confirmed live, same
+            # trap as NanoGPT's) so it can't validate a key — a 1-token
+            # completion against the free big-pickle model costs nothing and
+            # still 401s on a bad key.
+            r = await client.post("https://opencode.ai/zen/v1/chat/completions",
+                                   headers={"Authorization": f"Bearer {key}", "content-type": "application/json"},
+                                   json={"model": "big-pickle", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1})
+        elif provider == "groq":
+            r = await client.get("https://api.groq.com/openai/v1/models",
+                                  headers={"Authorization": f"Bearer {key}"})
         else:
             return
     if r.status_code != 200:
@@ -3961,6 +3974,15 @@ async def cloud_model_details():
         except Exception:
             provider_models["google"] = {}
 
+    # OpenCode Zen / Groq: their live-pricing fetchers above already return
+    # the exact {model_id: {input_per_mtok, output_per_mtok, is_free, label}}
+    # shape this endpoint needs, so no separate re-fetch/re-parse block like
+    # the other gateways above — just reuse what GATEWAY_LIVE_PRICING_FETCHERS
+    # already computed.
+    for gw_provider in ("opencodezen", "groq"):
+        if gw_provider in live_prices_by_provider:
+            provider_models[gw_provider] = live_prices_by_provider[gw_provider]
+
     # ── Build output entries ─────────────────────────────────────────────
     out = []
     for p, meta in CLOUD_PROVIDERS.items():
@@ -4219,10 +4241,77 @@ async def _haimaker_live_pricing() -> dict:
     return await _cached_gateway_pricing(HAIMAKER_PRICING_CACHE_FILE, _fetch_haimaker_models_with_pricing)
 
 
+OPENCODEZEN_PRICING_CACHE_FILE = Path(__file__).parent.parent / "opencodezen_pricing_cache.json"
+
+async def _fetch_opencodezen_models_with_pricing() -> dict:
+    """OpenCode Zen's /v1/models is public (no auth) but returns bare ids
+    with no pricing field. Zen's own free models follow a "-free" id suffix
+    convention (deepseek-v4-flash-free, mimo-v2.5-free, etc.) — confirmed
+    live against https://opencode.ai/zen/v1/models — except "big-pickle",
+    a stealth/beta model Zen has published as free without that suffix
+    (see https://opencode.ai/docs/zen/). Re-check this rule if Big Pickle's
+    free period ends or Zen changes its naming."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get("https://opencode.ai/zen/v1/models")
+            if r.status_code != 200:
+                return {}
+            data = r.json()
+    except Exception:
+        return {}
+    prices = {}
+    for m in data.get("data", []):
+        mid = m.get("id")
+        if not mid:
+            continue
+        is_free = mid == "big-pickle" or mid.endswith("-free")
+        prices[mid] = {
+            "input_per_mtok": 0.0 if is_free else None,
+            "output_per_mtok": 0.0 if is_free else None,
+            "is_free": is_free,
+            "label": mid,
+        }
+    return prices
+
+async def _opencodezen_live_pricing() -> dict:
+    return await _cached_gateway_pricing(OPENCODEZEN_PRICING_CACHE_FILE, _fetch_opencodezen_models_with_pricing)
+
+
+GROQ_PRICING_CACHE_FILE = Path(__file__).parent.parent / "groq_pricing_cache.json"
+
+async def _fetch_groq_models_with_pricing() -> dict:
+    """Groq's free tier is account-wide — every model, rate-limited, no card
+    required — rather than per-model like OpenRouter/Zen, so every model
+    Groq currently lists is free. Its /v1/models 401s unauthenticated
+    (confirmed live), so this needs the user's own configured key just to
+    enumerate models; returns {} until one is saved."""
+    api_key = _load_api_keys().get("groq")
+    if not api_key:
+        return {}
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get("https://api.groq.com/openai/v1/models",
+                                  headers={"Authorization": f"Bearer {api_key}"})
+            if r.status_code != 200:
+                return {}
+            data = r.json()
+    except Exception:
+        return {}
+    return {
+        m["id"]: {"input_per_mtok": 0.0, "output_per_mtok": 0.0, "is_free": True, "label": m["id"]}
+        for m in data.get("data", []) if m.get("id")
+    }
+
+async def _groq_live_pricing() -> dict:
+    return await _cached_gateway_pricing(GROQ_PRICING_CACHE_FILE, _fetch_groq_models_with_pricing)
+
+
 GATEWAY_LIVE_PRICING_FETCHERS = {
     "openrouter": _openrouter_live_pricing,
     "nanogpt": _nanogpt_live_pricing,
     "haimaker": _haimaker_live_pricing,
+    "opencodezen": _opencodezen_live_pricing,
+    "groq": _groq_live_pricing,
 }
 
 
@@ -4794,7 +4883,24 @@ OPENAI_COMPATIBLE_BASE_URLS = {
     "nanogpt": "https://nano-gpt.com/api/v1",
     "haimaker": "https://api.haimaker.ai/v1",
     "perplexity": "https://api.perplexity.ai",
+    "opencodezen": "https://opencode.ai/zen/v1",
+    "groq": "https://api.groq.com/openai/v1",
 }
+
+async def _free_models_for_provider(provider: str) -> list[str]:
+    """Model ids currently priced at $0 on this gateway, via the same cached
+    live-pricing fetchers the Models tab's Free/Paid split already uses —
+    used to pick a same-cost fallback when a free model hits a shared-pool
+    capacity 429."""
+    fetcher = GATEWAY_LIVE_PRICING_FETCHERS.get(provider)
+    if not fetcher:
+        return []
+    try:
+        pricing = await fetcher()
+    except Exception:
+        return []
+    return [mid for mid, info in pricing.items() if info.get("is_free")]
+
 
 async def _call_openai_compatible_cloud(provider: str, model: str, messages: list, system: str, api_key: str) -> tuple[str, dict]:
     """Shared call path for every OPENAI_COMPATIBLE_BASE_URLS entry — same
@@ -4802,39 +4908,59 @@ async def _call_openai_compatible_cloud(provider: str, model: str, messages: lis
     cost ledger) differ."""
     base_url = OPENAI_COMPATIBLE_BASE_URLS[provider]
     label = CLOUD_PROVIDERS.get(provider, {}).get("label", provider)
-    payload = {
-        "model": model,
-        "messages": [{"role": "system", "content": system}] + _messages_for_cloud(messages, slim=len(messages) > 8),
-    }
-    # Free-tier models (OpenRouter's ":free" suffix and similar) share an
-    # oversubscribed upstream pool and 429 under load fairly routinely —
-    # that's almost always transient congestion, not this account's own
-    # rate limit, so retry with backoff before giving up.
-    last_status, last_body = None, ""
-    async with httpx.AsyncClient(timeout=120) as client:
-        for attempt in range(3):
-            r = await client.post(
-                f"{base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}", "content-type": "application/json"},
-                json=payload,
-            )
-            if r.status_code == 200:
-                data = r.json()
-                u = data.get("usage", {}) or {}
-                usage = _usage_with_cost(
-                    provider, model,
-                    input_tokens=u.get("prompt_tokens", 0),
-                    output_tokens=u.get("completion_tokens", 0),
-                    cached_tokens=(u.get("prompt_tokens_details") or {}).get("cached_tokens", 0),
+
+    async def _post(target_model: str, max_attempts: int = 2):
+        payload = {
+            "model": target_model,
+            "messages": [{"role": "system", "content": system}] + _messages_for_cloud(messages, slim=len(messages) > 8),
+        }
+        # Free-tier models (OpenRouter's ":free" suffix and similar) share an
+        # oversubscribed upstream pool and 429 under load fairly routinely —
+        # that's almost always transient congestion, not this account's own
+        # rate limit, so retry with backoff before giving up on this model.
+        async with httpx.AsyncClient(timeout=120) as client:
+            for attempt in range(max_attempts):
+                r = await client.post(
+                    f"{base_url}/chat/completions",
+                    headers={"Authorization": f"Bearer {api_key}", "content-type": "application/json"},
+                    json=payload,
                 )
-                return data["choices"][0]["message"]["content"] or "", usage
-            last_status, last_body = r.status_code, r.text
-            if r.status_code == 429 and attempt < 2:
+                if r.status_code == 200 or r.status_code != 429 or attempt == max_attempts - 1:
+                    return r
                 await asyncio.sleep(2 * (attempt + 1))
-                continue
-            break
+        return r  # unreachable, satisfies static analysis
+
+    r = await _post(model)
+    fallback_note = ""
+    served_model = model
+    if r.status_code == 429:
+        # Still rate-limited after retrying. If the model that failed is
+        # itself free, a different free model on the same gateway costs
+        # nothing extra to try — swap to one instead of surfacing the
+        # failure, so a capacity blip on one shared free pool doesn't just
+        # dead-end the request.
+        free_models = await _free_models_for_provider(provider)
+        candidates = [m for m in free_models if m != model]
+        if model in free_models and candidates:
+            fallback_model = candidates[0]
+            r2 = await _post(fallback_model)
+            if r2.status_code == 200:
+                r = r2
+                served_model = fallback_model
+                fallback_note = f"_(**{model}** was rate-limited upstream — answered by **{fallback_model}** instead.)_\n\n"
+    if r.status_code == 200:
+        data = r.json()
+        u = data.get("usage", {}) or {}
+        usage = _usage_with_cost(
+            provider, served_model,
+            input_tokens=u.get("prompt_tokens", 0),
+            output_tokens=u.get("completion_tokens", 0),
+            cached_tokens=(u.get("prompt_tokens_details") or {}).get("cached_tokens", 0),
+        )
+        return fallback_note + (data["choices"][0]["message"]["content"] or ""), usage
     # Surface the provider's actual error message instead of dumping its raw
     # JSON body into the chat as if it were a reply.
+    last_status, last_body = r.status_code, r.text
     reason = last_body[:500]
     try:
         err = json.loads(last_body).get("error", {})
