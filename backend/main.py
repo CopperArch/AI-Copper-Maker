@@ -4936,12 +4936,10 @@ def _deterministic_date_answer(text: str) -> str | None:
 
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
-    # ── Autonomous agent loop, not a one-shot prompt wrapper ──
-    # The chat endpoint now runs the same real tool-executing
-    # agent loop as /api/agent. The model receives the full
-    # conversation history, can call tools, and iterates until
-    # the task is complete — it does not just produce a single
-    # text response and stop.
+    # One-shot proxy for simple chat (no tool execution).
+    # The autonomous agent loop is at /api/agent which the
+    # frontend uses for chat. /api/chat stays as a lightweight
+    # fallback for scripts and backward compatibility.
     conv = [{"role": "system", "content": build_system_prompt(req.system)}] + \
            [{"role": m.role, "content": m.content} for m in req.messages]
     model = req.model
@@ -4955,7 +4953,7 @@ async def chat(req: ChatRequest):
                 yield json.dumps({"type": "done", "content": canned}) + "\n"
                 return
 
-        async for event in _agent_turns(model, conv, system=req.system):
+        async for event in _stream_chat_ndjson(model, conv):
             yield json.dumps(event) + "\n"
 
     return StreamingResponse(stream(), media_type="application/x-ndjson")
@@ -5672,6 +5670,9 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
     used_learnable_tool = False
     consecutive_errors = 0
     for turn in range(max_turns):
+        if consecutive_errors >= 3:
+            yield {"type": "error", "content": f"Too many consecutive errors ({consecutive_errors}). Stopping agent loop.", "conversation": conv}
+            return
         # ── Always-on context management (opencode-style auto-compaction) ──
         # `usage` still holds the previous turn's exact prompt+eval token
         # counts here (it's reset just below before the next model call). When
@@ -5823,9 +5824,13 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
                                 except json.JSONDecodeError:
                                     pass
         except Exception as e:
+            consecutive_errors += 1
             yield {"type": "error", "content": str(e), "conversation": conv}
-            return
+            if consecutive_errors >= 3:
+                return
+            continue
 
+        consecutive_errors = 0
         tool_spec, cut_at = _extract_tool_call(response_text)
         if not tool_spec:
             conv.append({"role": "assistant", "content": response_text})
