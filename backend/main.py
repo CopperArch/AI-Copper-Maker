@@ -4796,45 +4796,80 @@ OPENAI_COMPATIBLE_BASE_URLS = {
     "perplexity": "https://api.perplexity.ai",
 }
 
+async def _free_models_for_provider(provider: str) -> list[str]:
+    """Model ids currently priced at $0 on this gateway, via the same cached
+    live-pricing fetchers the Models tab's Free/Paid split already uses —
+    used to pick a same-cost fallback when a free model hits a shared-pool
+    capacity 429."""
+    fetcher = GATEWAY_LIVE_PRICING_FETCHERS.get(provider)
+    if not fetcher:
+        return []
+    try:
+        pricing = await fetcher()
+    except Exception:
+        return []
+    return [mid for mid, info in pricing.items() if info.get("is_free")]
+
+
 async def _call_openai_compatible_cloud(provider: str, model: str, messages: list, system: str, api_key: str) -> tuple[str, dict]:
     """Shared call path for every OPENAI_COMPATIBLE_BASE_URLS entry — same
     request/response shape, only the base URL (and provider name, for the
     cost ledger) differ."""
     base_url = OPENAI_COMPATIBLE_BASE_URLS[provider]
     label = CLOUD_PROVIDERS.get(provider, {}).get("label", provider)
-    payload = {
-        "model": model,
-        "messages": [{"role": "system", "content": system}] + _messages_for_cloud(messages, slim=len(messages) > 8),
-    }
-    # Free-tier models (OpenRouter's ":free" suffix and similar) share an
-    # oversubscribed upstream pool and 429 under load fairly routinely —
-    # that's almost always transient congestion, not this account's own
-    # rate limit, so retry with backoff before giving up.
-    last_status, last_body = None, ""
-    async with httpx.AsyncClient(timeout=120) as client:
-        for attempt in range(3):
-            r = await client.post(
-                f"{base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}", "content-type": "application/json"},
-                json=payload,
-            )
-            if r.status_code == 200:
-                data = r.json()
-                u = data.get("usage", {}) or {}
-                usage = _usage_with_cost(
-                    provider, model,
-                    input_tokens=u.get("prompt_tokens", 0),
-                    output_tokens=u.get("completion_tokens", 0),
-                    cached_tokens=(u.get("prompt_tokens_details") or {}).get("cached_tokens", 0),
+
+    async def _post(target_model: str, max_attempts: int = 2):
+        payload = {
+            "model": target_model,
+            "messages": [{"role": "system", "content": system}] + _messages_for_cloud(messages, slim=len(messages) > 8),
+        }
+        # Free-tier models (OpenRouter's ":free" suffix and similar) share an
+        # oversubscribed upstream pool and 429 under load fairly routinely —
+        # that's almost always transient congestion, not this account's own
+        # rate limit, so retry with backoff before giving up on this model.
+        async with httpx.AsyncClient(timeout=120) as client:
+            for attempt in range(max_attempts):
+                r = await client.post(
+                    f"{base_url}/chat/completions",
+                    headers={"Authorization": f"Bearer {api_key}", "content-type": "application/json"},
+                    json=payload,
                 )
-                return data["choices"][0]["message"]["content"] or "", usage
-            last_status, last_body = r.status_code, r.text
-            if r.status_code == 429 and attempt < 2:
+                if r.status_code == 200 or r.status_code != 429 or attempt == max_attempts - 1:
+                    return r
                 await asyncio.sleep(2 * (attempt + 1))
-                continue
-            break
+        return r  # unreachable, satisfies static analysis
+
+    r = await _post(model)
+    fallback_note = ""
+    served_model = model
+    if r.status_code == 429:
+        # Still rate-limited after retrying. If the model that failed is
+        # itself free, a different free model on the same gateway costs
+        # nothing extra to try — swap to one instead of surfacing the
+        # failure, so a capacity blip on one shared free pool doesn't just
+        # dead-end the request.
+        free_models = await _free_models_for_provider(provider)
+        candidates = [m for m in free_models if m != model]
+        if model in free_models and candidates:
+            fallback_model = candidates[0]
+            r2 = await _post(fallback_model)
+            if r2.status_code == 200:
+                r = r2
+                served_model = fallback_model
+                fallback_note = f"_(**{model}** was rate-limited upstream — answered by **{fallback_model}** instead.)_\n\n"
+    if r.status_code == 200:
+        data = r.json()
+        u = data.get("usage", {}) or {}
+        usage = _usage_with_cost(
+            provider, served_model,
+            input_tokens=u.get("prompt_tokens", 0),
+            output_tokens=u.get("completion_tokens", 0),
+            cached_tokens=(u.get("prompt_tokens_details") or {}).get("cached_tokens", 0),
+        )
+        return fallback_note + (data["choices"][0]["message"]["content"] or ""), usage
     # Surface the provider's actual error message instead of dumping its raw
     # JSON body into the chat as if it were a reply.
+    last_status, last_body = r.status_code, r.text
     reason = last_body[:500]
     try:
         err = json.loads(last_body).get("error", {})
