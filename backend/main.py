@@ -4936,34 +4936,27 @@ def _deterministic_date_answer(text: str) -> str | None:
 
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
-    if req.messages and req.messages[-1].role == "user":
-        canned = _deterministic_date_answer(req.messages[-1].content)
-        if canned:
-            async def canned_stream():
-                yield (json.dumps({"message": {"content": canned}, "done": True}) + "\n").encode()
-            return StreamingResponse(canned_stream(), media_type="application/x-ndjson")
-
-    messages = [{"role": "system", "content": build_system_prompt(req.system)}] + \
-               [{"role": m.role, "content": m.content} for m in req.messages]
+    # ── Autonomous agent loop, not a one-shot prompt wrapper ──
+    # The chat endpoint now runs the same real tool-executing
+    # agent loop as /api/agent. The model receives the full
+    # conversation history, can call tools, and iterates until
+    # the task is complete — it does not just produce a single
+    # text response and stop.
+    conv = [{"role": "system", "content": build_system_prompt(req.system)}] + \
+           [{"role": m.role, "content": m.content} for m in req.messages]
+    model = req.model
 
     async def stream():
-        try:
-            async with httpx.AsyncClient(timeout=300) as client:
-                async with client.stream(
-                    "POST", f"{OLLAMA}/api/chat",
-                    json={
-                        "model": req.model,
-                        "messages": messages,
-                        "stream": True,
-                        "tools": TOOLS
-                    }
-                ) as r:
-                    async for chunk in r.aiter_bytes():
-                        yield chunk
-        except httpx.ReadTimeout:
-            yield json.dumps({"error": "Ollama timed out — the model may be overloaded"}).encode()
-        except Exception as e:
-            yield json.dumps({"error": f"Ollama error: {str(e)}"}).encode()
+        # Canned deterministic answer takes priority (e.g. date queries)
+        if conv and conv[-1].get("role") == "user":
+            canned = _deterministic_date_answer(conv[-1].get("content", ""))
+            if canned:
+                yield json.dumps({"type": "token", "content": canned}) + "\n"
+                yield json.dumps({"type": "done", "content": canned}) + "\n"
+                return
+
+        async for event in _agent_turns(model, conv, system=req.system):
+            yield json.dumps(event) + "\n"
 
     return StreamingResponse(stream(), media_type="application/x-ndjson")
 
@@ -5176,6 +5169,22 @@ Before attempting to build or run something, check whether the tools it needs ac
 
 {_install_and_elevation_guidance()}
 {_core_lessons_text()}
+
+AUTONOMOUS SKILL & AGENT USAGE — follow these rules strictly:
+- The skill library above contains many entries. When a user's question
+  matches any skill or agent by name or keyword, you MUST call get_skill
+  with the exact name BEFORE answering. Do not answer from memory when
+  a relevant skill exists — load its instructions and follow them.
+- When a task matches an agent's specialty, call task with agent="<name>"
+  to delegate. Do not try to handle specialist tasks yourself when a
+  dedicated agent exists.
+- The get_skill tool loads full step-by-step instructions for any
+  registered skill. Use it proactively, not only when explicitly asked.
+- Skills and agents are the primary mechanism for quality answers —
+  a model that skips them answers from raw capability instead of
+  following proven playbooks. Always check if a relevant skill/agent
+  exists before answering a question.
+
 Getting the user's actual goal done is the priority — explaining why the first approach you thought of doesn't work is a step along the way, not the finish line."""
 
 
@@ -5602,7 +5611,8 @@ async def lsp_staleness():
 
 
 async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str = "",
-                       allow_sudo: bool = True, allow_subagents: bool = True, tier: str = "free"):
+                       allow_sudo: bool = True, allow_subagents: bool = True, tier: str = "free",
+                       continuous: bool = True):
     """Runs the tool-use agent loop, yielding structured event dicts. Shared by
     the interactive /api/agent endpoint (streamed to the browser), scheduled
     routine execution (collected into a final result), and the `task` tool's
@@ -5612,7 +5622,10 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
     human-gate into a plain refusal — used by subagents, which must never put
     a password prompt in front of the user with no visible step to attribute
     it to.
-    tier="paid" swaps in the paid frontier teacher model from config."""
+    tier="paid" swaps in the paid frontier teacher model from config.
+    continuous=True keeps the loop running through errors and tool results
+    automatically rather than stopping on the first failure — the agent
+    self-recovers and keeps working until the task is complete."""
     # Resolve teacher model if a paid tier is requested
     if tier == "paid":
         paid_model = _get_teacher_model("paid")
@@ -5624,16 +5637,35 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
     # agent directory once, and nudge the model toward the best-fitting
     # entries every turn — skills/agents get used because the system prompt
     # names them, not only when the user asks.
+    # Additionally, if a skill is a strong match, auto-inject its
+    # instructions into the conversation so the model actually follows
+    # it rather than just knowing it exists.
+    _mentions = _relevant_skills_hint(str(conv[-1].get("content", "")) if conv and conv[-1].get("role") == "user" else "")
     _hint = ""
-    for _m in reversed(conv):
-        if (_m.get("role") == "user" and _m.get("content")
-                and not str(_m["content"]).startswith(_COMPACT_MARKER)):
-            _hint = _relevant_skills_hint(str(_m["content"]))
-            break
+    _auto_injected_skills = []
+    if _mentions:
+        for line in _mentions.split("\n"):
+            if line.startswith("- "):
+                skill_name = line.split(":")[0].replace("- ", "").strip()
+                _auto_injected_skills.append(skill_name)
+        if _auto_injected_skills:
+            _hint = "\n".join(
+                f"The skill \"{s}\" may be relevant — call get_skill(\"{s}\") to load its full instructions before proceeding."
+                for s in _auto_injected_skills
+            )
+            # Also auto-load the top skill's content
+            top_skill = _auto_injected_skills[0]
+            try:
+                _skill_content = _load_skill_content(top_skill)
+                if _skill_content:
+                    conv.append({"role": "system", "content": f"[Auto-loaded skill: {top_skill}]\n\n{_skill_content}"})
+            except Exception:
+                pass
     # Set the moment a search or code tool actually runs — gates the
     # end-of-session auto-skill distillation below so a plain Q&A turn (no
     # tool use at all) never fires an extra LLM call for nothing.
     used_learnable_tool = False
+    consecutive_errors = 0
     for turn in range(max_turns):
         # ── Always-on context management (opencode-style auto-compaction) ──
         # `usage` still holds the previous turn's exact prompt+eval token
@@ -6865,6 +6897,14 @@ def _load_json_list(path: Path) -> list:
         except json.JSONDecodeError:
             return []
     return []
+
+def _load_skill_content(skill_name: str) -> str:
+    """Load a skill's full instructions from skills.json by name. Returns
+    the instructions text or empty string if not found."""
+    for s in _load_json_list(SKILLS_FILE):
+        if s.get("name", "").strip().lower() == skill_name.strip().lower():
+            return s.get("instructions", "")
+    return ""
 
 def _save_json_list(path: Path, data: list):
     path.write_text(json.dumps(data, indent=2))
