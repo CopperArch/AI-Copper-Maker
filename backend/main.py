@@ -4801,26 +4801,47 @@ async def _call_openai_compatible_cloud(provider: str, model: str, messages: lis
     request/response shape, only the base URL (and provider name, for the
     cost ledger) differ."""
     base_url = OPENAI_COMPATIBLE_BASE_URLS[provider]
+    label = CLOUD_PROVIDERS.get(provider, {}).get("label", provider)
+    payload = {
+        "model": model,
+        "messages": [{"role": "system", "content": system}] + _messages_for_cloud(messages, slim=len(messages) > 8),
+    }
+    # Free-tier models (OpenRouter's ":free" suffix and similar) share an
+    # oversubscribed upstream pool and 429 under load fairly routinely —
+    # that's almost always transient congestion, not this account's own
+    # rate limit, so retry with backoff before giving up.
+    last_status, last_body = None, ""
     async with httpx.AsyncClient(timeout=120) as client:
-        r = await client.post(
-            f"{base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "content-type": "application/json"},
-            json={
-                "model": model,
-                "messages": [{"role": "system", "content": system}] + _messages_for_cloud(messages, slim=len(messages) > 8),
-            },
-        )
-        if r.status_code != 200:
-            return f"{CLOUD_PROVIDERS.get(provider, {}).get('label', provider)} API error ({r.status_code}): {r.text[:500]}", {}
-        data = r.json()
-        u = data.get("usage", {}) or {}
-        usage = _usage_with_cost(
-            provider, model,
-            input_tokens=u.get("prompt_tokens", 0),
-            output_tokens=u.get("completion_tokens", 0),
-            cached_tokens=(u.get("prompt_tokens_details") or {}).get("cached_tokens", 0),
-        )
-        return data["choices"][0]["message"]["content"] or "", usage
+        for attempt in range(3):
+            r = await client.post(
+                f"{base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}", "content-type": "application/json"},
+                json=payload,
+            )
+            if r.status_code == 200:
+                data = r.json()
+                u = data.get("usage", {}) or {}
+                usage = _usage_with_cost(
+                    provider, model,
+                    input_tokens=u.get("prompt_tokens", 0),
+                    output_tokens=u.get("completion_tokens", 0),
+                    cached_tokens=(u.get("prompt_tokens_details") or {}).get("cached_tokens", 0),
+                )
+                return data["choices"][0]["message"]["content"] or "", usage
+            last_status, last_body = r.status_code, r.text
+            if r.status_code == 429 and attempt < 2:
+                await asyncio.sleep(2 * (attempt + 1))
+                continue
+            break
+    # Surface the provider's actual error message instead of dumping its raw
+    # JSON body into the chat as if it were a reply.
+    reason = last_body[:500]
+    try:
+        err = json.loads(last_body).get("error", {})
+        reason = (err.get("metadata") or {}).get("raw") or err.get("message") or reason
+    except Exception:
+        pass
+    return f"{label} couldn't complete this request (HTTP {last_status}): {reason}", {}
 
 
 async def _call_cloud_model(model_ref: str, messages: list, system: str, slim_history: bool = False) -> tuple[str, dict]:
