@@ -5118,6 +5118,11 @@ def _install_and_elevation_guidance() -> str:
     elif env["system"] == "Windows":
         body += """\n\nLM Studio: install via the official installer — `irm https://lmstudio.ai/install.ps1 | iex` (not `winget install lm-studio`). Run the `setup/lmstudio-windows.ps1` script from this repo for a full install+persistence setup."""
 
+    if env["system"] == "Windows":
+        elevation = """If a task genuinely needs elevation and there's no real per-user alternative, prefix the run_command with `sudo` anyway (e.g. `sudo winget install --scope machine foo`) — this is a universal "run this elevated" signal regardless of OS. On Windows it's translated into a native UAC consent prompt in the user's own session; Windows deliberately renders that on a secure desktop that no process (including this one) can read a password from, so the user clicks Yes (or, on a standard account, types an admin password directly into Windows' own dialog — never into you). You will never see or handle that password; you'll just get the real result back once they respond, or a clear "declined/timed out" result if they don't."""
+    else:
+        elevation = """If a task genuinely needs root and there's no real per-user alternative (writing to /etc, a system package install, etc.), prefix the run_command with `sudo` — e.g. `sudo dnf install foo`. This pauses your turn and puts a real password prompt in front of the user in their browser; once they answer (or decline, or 180s passes with no answer) you get the actual result back and continue — it is not a dead end and does not fail silently, so don't avoid a task just because it needs root."""
+
     return f"{header}\n\n{body}\n\n{elevation} That said, still prefer a non-root path first when one genuinely exists — asking for elevation is a bigger interruption to the user than not needing it, so don't reach for `sudo` out of habit when there's an equally good non-elevated option."
 
 
