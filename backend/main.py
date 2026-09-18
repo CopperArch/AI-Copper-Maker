@@ -5721,7 +5721,7 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
                                     response_text += content
                                     yield {"type": "token", "content": content}
                                 usage_field = data.get("usage")
-if usage_field:
+                                if usage_field:
                                     usage = {"prompt_eval_count": usage_field.get("prompt_tokens", 0),
                                               "eval_count": usage_field.get("completion_tokens", 0)}
             elif _is_llama_cpp_model(model):
