@@ -253,14 +253,15 @@ pip install --quiet --upgrade pip
 pip install --quiet -r requirements.txt
 success "Python dependencies installed"
 
-# ── 4b. Language Servers (LSP) ──────────────────────────────────────────────────
+# ── 4b. Optional: Language Servers (LSP) ────────────────────────────────────────
 # Best-effort, every one of these independently skippable: the backend's LSP
 # panel (Models tab) just shows whichever of these it can't find as "missing"
-# and everything else about the app still works fine — so nothing here is
-# allowed to fail the overall install (each step is its own if/&&/|| chain,
-# which is safe under this script's `set -e`; a bare failing command
-# wouldn't be).
+# and everything else about the app still works fine. Asked as one prompt
+# (not five) since clangd needs sudo — a silent unprompted sudo call isn't OK
+# even for a low-risk, easily-reversible package.
 echo ""
+read -rp "Install Language Servers (rust-analyzer, pylsp, clangd — for inline code diagnostics; needs sudo for clangd)? [Y/n]: " install_lsp
+if [[ ! "$install_lsp" =~ ^[Nn]$ ]]; then
 info "Installing Language Servers (LSP) for inline diagnostics..."
 
 # rust-analyzer — only if a Rust toolchain (rustup) is already present; this
@@ -319,6 +320,9 @@ if command -v npx &>/dev/null; then
     success "npx found — typescript/bash language servers will fetch automatically on first use"
 else
     warn "npx not found — typescript/bash LSP support needs Node.js/npm installed"
+fi
+else
+    info "Skipping Language Servers — the Models tab's LSP panel will show them as missing until installed manually"
 fi
 
 # ── 5. Optional: auto-start service ─────────────────────────────────────────────

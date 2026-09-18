@@ -208,6 +208,95 @@ try {
     Pop-Location
 }
 
+# ── 4b. Optional: Language Servers (LSP) ─────────────────────────────────────
+# Windows equivalent of install.sh's LSP section — same three tools, same
+# "ask once, not five times" reasoning (clangd here goes through winget,
+# which itself needs an elevation prompt UAC will show separately; a script
+# silently triggering that without asking first isn't OK even for a
+# low-risk, easily-reversible package). Every step is independently
+# best-effort: this backend's LSP panel just shows whichever of these it
+# can't find as "missing", so nothing here should block the rest of setup.
+# UNVERIFIED along with the rest of this script (see the header) — winget
+# package IDs in particular are the most likely thing to have drifted by
+# the time this actually runs on a real Windows machine.
+Write-Host ""
+$installLsp = Read-Host "Install Language Servers (rust-analyzer, pylsp, clangd — for inline code diagnostics)? [Y/n]"
+if ($installLsp -notmatch "^[Nn]") {
+    Write-Info "Installing Language Servers (LSP) for inline diagnostics..."
+
+    # rust-analyzer — only if a Rust toolchain (rustup) is already present;
+    # this script installs Ollama and Python deps, not a whole Rust
+    # toolchain just for one LSP server nobody asked for otherwise.
+    $rustAnalyzerCmd = Get-Command rust-analyzer -ErrorAction SilentlyContinue
+    if ($rustAnalyzerCmd) {
+        Write-Success "rust-analyzer already installed"
+    } else {
+        $rustupCmd = Get-Command rustup -ErrorAction SilentlyContinue
+        if ($rustupCmd) {
+            try {
+                rustup component add rust-analyzer | Out-Null
+                Write-Success "rust-analyzer installed"
+            } catch {
+                Write-WarnMsg "Could not install rust-analyzer via rustup — skipping"
+            }
+        } else {
+            Write-Info "Skipping rust-analyzer — no Rust toolchain (rustup) found"
+        }
+    }
+
+    # pylsp (python-lsp-server) — installed with --user via the SYSTEM
+    # Python detected above, not backend/venv, so its console script is on
+    # PATH for the backend process regardless of which Python launched it.
+    # NOTE (unverified): pip's --user Scripts directory
+    # (%APPDATA%\Python\PythonXY\Scripts) only actually resolves via
+    # Get-Command/shutil.which if it's on PATH — the official python.org
+    # installer's "Add python.exe to PATH" option covers python.exe itself,
+    # not necessarily this directory. If pylsp still shows "missing" in the
+    # app after this step succeeds, add that folder to PATH by hand.
+    $pylspCmd = Get-Command pylsp -ErrorAction SilentlyContinue
+    if ($pylspCmd) {
+        Write-Success "pylsp already installed"
+    } else {
+        try {
+            & $pythonCmd.Source -m pip install --quiet --user python-lsp-server
+            Write-Success "pylsp installed"
+        } catch {
+            Write-WarnMsg "Could not install pylsp — Python LSP support will show as missing"
+        }
+    }
+
+    # clangd (C/C++) — via winget, same pattern already used for Ollama
+    # above. No dnf/apt/pacman equivalent on Windows; LLVM's own package
+    # bundles clangd.
+    $clangdCmd = Get-Command clangd -ErrorAction SilentlyContinue
+    if ($clangdCmd) {
+        Write-Success "clangd already installed"
+    } else {
+        $winget = Get-Command winget -ErrorAction SilentlyContinue
+        if ($winget) {
+            try {
+                winget install --id LLVM.LLVM -e --silent --accept-package-agreements --accept-source-agreements
+                Write-Success "clangd installed (via LLVM)"
+            } catch {
+                Write-WarnMsg "Could not install clangd via winget — install LLVM manually (https://llvm.org) for C/C++ LSP support"
+            }
+        } else {
+            Write-Info "Skipping clangd — winget not found. Install LLVM manually (https://llvm.org) for C/C++ LSP support"
+        }
+    }
+
+    # typescript-language-server / bash-language-server run via `npx -y ...`
+    # on first use — nothing to pre-install here.
+    $npxCmd = Get-Command npx -ErrorAction SilentlyContinue
+    if ($npxCmd) {
+        Write-Success "npx found — typescript/bash language servers will fetch automatically on first use"
+    } else {
+        Write-WarnMsg "npx not found — typescript/bash LSP support needs Node.js/npm installed"
+    }
+} else {
+    Write-Info "Skipping Language Servers — the Models tab's LSP panel will show them as missing until installed manually"
+}
+
 # ── 5. Optional: logon Scheduled Task ────────────────────────────────────────
 # Windows' closest equivalent of the systemd --user service on Linux: keeps
 # the app (and Routines) running across logins without a terminal open.
