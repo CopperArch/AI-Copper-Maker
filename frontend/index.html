@@ -2137,9 +2137,24 @@ async function loadModels() {
     // Studio model selected here was indistinguishable from an Ollama name
     // and _agent_turns() sent it straight to Ollama, which 404'd on it.
     const llamaCppModels = installedModelsLlamaCpp.map(m => `llama-cpp/${m}`);
-    const allModels = [...installedModels, ...installedModelsLmstudio, ...llamaCppModels, ...cloudModels];
     const sel = document.getElementById('model-select');
     const prev = sel.value;
+    const saved = localStorage.getItem('selectedModel');
+    // This runs on every 15s checkStatus() poll, and /api/models/cloud is
+    // wrapped in .catch(() => null) above — a single transient fetch hiccup
+    // makes cloudModels empty for that one cycle. Previously that silently
+    // dropped the user's selection from the freshly-built list, and the
+    // <select> fell back to the browser default (first option), which read
+    // as "my picked model reverted on its own" mid-conversation. Keep
+    // whichever selection was active (saved takes priority, else whatever
+    // was already selected) in its correct group even if this cycle's fetch
+    // didn't confirm it, instead of letting it silently vanish.
+    const keep = saved || prev || '';
+    if (keep && !installedModels.includes(keep) && !installedModelsLmstudio.includes(keep)
+        && !llamaCppModels.includes(keep) && !cloudModels.includes(keep)) {
+      cloudModels = [keep, ...cloudModels];
+    }
+    const allModels = [...installedModels, ...installedModelsLmstudio, ...llamaCppModels, ...cloudModels];
     sel.innerHTML = allModels.length
       ? [
           installedModels.length ? `<optgroup label="Local">${installedModels.map(m => `<option value="${m}">${m}</option>`).join('')}</optgroup>` : '',
@@ -2148,9 +2163,7 @@ async function loadModels() {
           cloudModels.length ? `<optgroup label="Cloud">${cloudModels.map(m => `<option value="${m}">${m}</option>`).join('')}</optgroup>` : '',
         ].join('')
       : '<option value="">No models installed</option>';
-    const saved = localStorage.getItem('selectedModel');
-    if (saved && allModels.includes(saved)) sel.value = saved;
-    else if (prev && allModels.includes(prev)) sel.value = prev;
+    if (keep && allModels.includes(keep)) sel.value = keep;
     renderModelsTab();
     checkModelFit(sel.value);
     checkModelUpdates(sel.value);
@@ -2448,7 +2461,16 @@ async function loadConversations() {
     conversations = Array.isArray(stored) ? stored : [];
   }
   renderConvList();
-  if (conversations.length) loadConversation(conversations[0].id);
+  // Restore whichever conversation was actually on screen before this load
+  // (e.g. a page reload picking up a frontend change) instead of always
+  // jumping to conversations[0] regardless of what the user was looking at —
+  // conversations are independent and stay independent; nothing should
+  // silently switch which one is active except an explicit user click or
+  // starting a new one.
+  const lastId = localStorage.getItem('currentConvId');
+  const restore = lastId && conversations.find(c => c.id === lastId);
+  if (restore) loadConversation(restore.id);
+  else if (conversations.length) loadConversation(conversations[0].id);
 }
 
 function saveConvs() {
@@ -2464,6 +2486,7 @@ function newConversation() {
    const id = Date.now().toString();
    conversations.unshift({ id, title: 'New Chat', messages: [], created: Date.now() });
    currentConvId = id;
+   localStorage.setItem('currentConvId', id);
    switchTab('chat');
    saveConvs();
    renderConvList();
@@ -2478,6 +2501,7 @@ function newConversation() {
 
 function loadConversation(id) {
   currentConvId = id;
+  localStorage.setItem('currentConvId', id);
   // The sidebar now lists Agent-tab conversations alongside Chat ones (both
   // share this list), so a click here may be arriving from a different tab —
   // switch back to Chat, matching loadAgentConversation()'s equivalent switch.
