@@ -1685,42 +1685,116 @@ async def apply_update():
 
 
 # ── Web Search ─────────────────────────────────────────────────────────────────
+# DuckDuckGo's html/lite scraped surfaces share ONE anomaly/bot-detection
+# block per source machine — confirmed live: both were rate-limited at the
+# same time, so falling back from one DDG scrape endpoint to another buys
+# nothing. The two fallbacks below are genuinely independent, official,
+# non-scraped APIs (DDG's own Instant Answer API, then Wikipedia's search
+# API) that stayed live while the scraped endpoints were blocked.
+
+async def _ddg_html_search(query: str, max_results: int) -> list[dict] | None:
+    """Returns None specifically on DDG's anomaly/bot-detection interstitial
+    (caller should fall back), otherwise a (possibly empty) results list."""
+    import urllib.parse
+    encoded = urllib.parse.quote(query)
+    url = f"https://html.duckduckgo.com/html/?q={encoded}"
+    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+        client.headers.update({"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"})
+        r = await client.get(url)
+    results = []
+    for match in re.finditer(
+        r'<a rel="nofollow" class="result__a" href="(.*?)".*?>(.*?)</a>.*?'
+        r'<a class="result__snippet".*?>(.*?)</a>',
+        r.text, re.DOTALL
+    ):
+        link = match.group(1)
+        title = re.sub(r'<[^>]+>', '', match.group(2)).strip()
+        snippet = re.sub(r'<[^>]+>', '', match.group(3)).strip()
+        results.append({"title": title, "url": link, "snippet": snippet})
+        if len(results) >= max_results:
+            break
+    if not results and "anomaly" in r.text.lower():
+        return None
+    return results
+
+async def _ddg_instant_answer_search(query: str, max_results: int) -> list[dict]:
+    """DDG's official Instant Answer JSON API — a real API, not scraped HTML,
+    confirmed live to keep working while html/lite were both blocked.
+    Narrower coverage (abstracts/related topics, not full web results)."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get("https://api.duckduckgo.com/",
+                                  params={"q": query, "format": "json", "no_html": 1, "skip_disambig": 1})
+            # Confirmed live: this API returns 202 Accepted (not 200) even
+            # with a fully valid JSON body — only reject on an actual error
+            # range, not on that specific quirk.
+            if r.status_code >= 400:
+                return []
+            data = r.json()
+    except Exception:
+        return []
+    results = []
+    if data.get("AbstractText"):
+        results.append({"title": data.get("Heading") or query,
+                         "url": data.get("AbstractURL", ""), "snippet": data["AbstractText"]})
+    for topic in data.get("RelatedTopics", []):
+        if len(results) >= max_results:
+            break
+        text, url = topic.get("Text"), topic.get("FirstURL")
+        if text and url:
+            results.append({"title": text.split(" - ")[0][:80], "url": url, "snippet": text})
+    return results[:max_results]
+
+async def _wikipedia_search(query: str, max_results: int) -> list[dict]:
+    """Wikipedia's own public search API — second independent fallback,
+    particularly useful for factual/encyclopedic queries."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            # Wikipedia's API rejects requests with no identifying User-Agent
+            # (confirmed live: 403 "Please set a user-agent and respect our
+            # robot policy" against httpx's default UA) — required by their
+            # API etiquette, not optional.
+            r = await client.get("https://en.wikipedia.org/w/api.php", params={
+                "action": "opensearch", "search": query, "limit": max_results, "format": "json",
+            }, headers={"User-Agent": "AI-Copper-Maker/1.3 (local personal-use coding assistant; "
+                                       "https://github.com/CopperArch/AI-Copper-Maker)"})
+            if r.status_code != 200:
+                return []
+            _, titles, descs, urls = r.json()
+    except Exception:
+        return []
+    return [{"title": t, "url": u, "snippet": d} for t, d, u in zip(titles, descs, urls)]
+
+async def _web_search_with_fallback(query: str, max_results: int) -> tuple[list[dict], str]:
+    """Tries DuckDuckGo's full web results first; on its shared rate-limit
+    block, tries two independent unblocked APIs before giving up. Returns
+    (results, note) — note is "" on a normal DDG hit, a short caveat when a
+    fallback source answered instead, or the literal string "RATE_LIMITED"
+    if every source failed."""
+    ddg_results = await _ddg_html_search(query, max_results)
+    if ddg_results is not None:
+        return ddg_results, ""
+    ia_results = await _ddg_instant_answer_search(query, max_results)
+    if ia_results:
+        return ia_results, ("DuckDuckGo's web search is temporarily rate-limited on this machine — "
+                             "these results came from its Instant Answer API instead, so coverage may "
+                             "be narrower than a full web search.")
+    wiki_results = await _wikipedia_search(query, max_results)
+    if wiki_results:
+        return wiki_results, ("DuckDuckGo is temporarily rate-limited on this machine — these results "
+                               "came from Wikipedia's search instead.")
+    return [], "RATE_LIMITED"
 
 @app.post("/api/search")
 async def web_search(req: SearchRequest):
     try:
-        import urllib.parse
-        encoded = urllib.parse.quote(req.query)
-        url = f"https://html.duckduckgo.com/html/?q={encoded}"
-
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-            client.headers.update({
-                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
-            })
-            r = await client.get(url)
-
-        results = []
-        for match in re.finditer(
-            r'<a rel="nofollow" class="result__a" href="(.*?)".*?>(.*?)</a>.*?'
-            r'<a class="result__snippet".*?>(.*?)</a>',
-            r.text, re.DOTALL
-        ):
-            link = match.group(1)
-            title = re.sub(r'<[^>]+>', '', match.group(2)).strip()
-            snippet = re.sub(r'<[^>]+>', '', match.group(3)).strip()
-            results.append({"title": title, "url": link, "snippet": snippet})
-            if len(results) >= req.max_results:
-                break
-
-        if not results and "anomaly" in r.text.lower():
-            # DuckDuckGo's own bot-detection interstitial (confirmed live: a
-            # burst of requests gets this instead of real results, same 200
-            # status, same URL, no redirect — indistinguishable from a
-            # genuine "no results" without checking for it) — say so plainly
-            # instead of silently reporting zero results either way.
-            return {"results": [], "error": "DuckDuckGo is temporarily rate-limiting automated requests from this machine — wait a minute and try again."}
-
-        return {"results": results}
+        results, note = await _web_search_with_fallback(req.query, req.max_results)
+        if note == "RATE_LIMITED":
+            return {"results": [], "error": "DuckDuckGo is temporarily rate-limiting automated requests from this machine, and the Instant Answer/Wikipedia fallbacks found nothing for this query either — wait a minute and try again."}
+        out = {"results": results}
+        if note:
+            out["note"] = note
+        return out
     except Exception as e:
         return {"results": [], "error": str(e)}
 
@@ -2804,30 +2878,15 @@ async def execute_tool(name: str, args: dict, model: str = "", allow_subagents: 
 
         elif name == "web_search":
             req = SearchRequest(**args)
-            import urllib.parse
-            encoded = urllib.parse.quote(req.query)
-            url = f"https://html.duckduckgo.com/html/?q={encoded}"
-            async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-                client.headers.update({"User-Agent": "Mozilla/5.0"})
-                r = await client.get(url)
-            results = []
-            for match in re.finditer(
-                r'<a rel="nofollow" class="result__a" href="(.*?)".*?>(.*?)</a>.*?'
-                r'<a class="result__snippet".*?>(.*?)</a>',
-                r.text, re.DOTALL
-            ):
-                link = match.group(1)
-                title = re.sub(r'<[^>]+>', '', match.group(2)).strip()
-                snippet = re.sub(r'<[^>]+>', '', match.group(3)).strip()
-                results.append(f"- [{title}]({link}): {snippet}")
-                if len(results) >= req.max_results:
-                    break
-            if not results and "anomaly" in r.text.lower():
-                # Same DuckDuckGo bot-detection interstitial as /api/search
-                # above — tell the model plainly so it doesn't report "no
-                # results exist" as if that were a real, final answer.
-                return "DuckDuckGo is temporarily rate-limiting automated requests from this machine. Tell the user to wait a minute and try again, rather than reporting this as 'no results found'."
-            return "\n".join(results) if results else "No results found."
+            results, note = await _web_search_with_fallback(req.query, req.max_results)
+            if note == "RATE_LIMITED":
+                return ("DuckDuckGo is temporarily rate-limited on this machine, and the Instant "
+                        "Answer/Wikipedia fallbacks found nothing for this query either. Tell the "
+                        "user to wait a minute and try again, rather than reporting this as 'no "
+                        "results found'.")
+            lines = [f"- [{r['title']}]({r['url']}): {r['snippet']}" for r in results]
+            body = "\n".join(lines) if lines else "No results found."
+            return f"{body}\n\n[Note: {note}]" if note else body
 
         elif name == "read_file":
             req = FileReadRequest(**args)
