@@ -4953,8 +4953,11 @@ async def chat(req: ChatRequest):
                 yield json.dumps({"type": "done", "content": canned}) + "\n"
                 return
 
-        async for event in _stream_chat_ndjson(model, conv):
-            yield json.dumps(event) + "\n"
+        # Ollama streams NDJSON lines directly; cloud/LM Studio yield
+        # one-shot {"message": {"content": ...}} chunks. Pass through
+        # unchanged — the frontend parser handles both formats.
+        async for chunk in _stream_chat_ndjson(model, conv):
+            yield chunk
 
     return StreamingResponse(stream(), media_type="application/x-ndjson")
 
