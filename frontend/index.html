@@ -1047,6 +1047,7 @@
         <div id="file-attachments" class="file-attachments" style="display:none"></div>
         <div class="input-row">
           <textarea id="chat-input" placeholder="Ask the AI to build something... (Shift+Enter for new line)" rows="1"></textarea>
+          <button class="btn btn-secondary" id="clear-input-btn" onclick="clearChatInput()" title="Clear what you've typed (and any attached files) — doesn't touch the conversation">🗑</button>
           <button class="btn btn-primary" id="send-btn" onclick="sendMessage()">Send</button>
           <button class="btn btn-secondary" id="stop-btn" onclick="stopStreaming()" style="display:none">■ Stop</button>
         </div>
@@ -3385,6 +3386,24 @@ async function maybeAutoTitle(convId) {
       renderConvList();
     }
   } catch {}
+}
+
+// Clears the draft — the typed text and any not-yet-sent file attachments —
+// without touching the conversation itself. Mirrors the same reset
+// sendMessage() does on a successful send (value/height/slash-popup), plus
+// pendingFiles/file-attachments since those are part of the same draft.
+function clearChatInput() {
+  const input = document.getElementById('chat-input');
+  input.value = '';
+  input.style.height = 'auto';
+  closeSlashPopup();
+  if (pendingFiles.length) {
+    pendingFiles = [];
+    const attachEl = document.getElementById('file-attachments');
+    attachEl.innerHTML = '';
+    attachEl.style.display = 'none';
+  }
+  input.focus();
 }
 
 function sendMessage() {
