@@ -5699,7 +5699,7 @@ class BaseTool:
     """Interface for OpenCode-compatible tool dispatch."""
     def info(self) -> ToolInfo:
         raise NotImplementedError
-    def run(self, ctx: dict, call: dict) -> ToolResponse:
+    async def run(self, ctx: dict, call: dict) -> ToolResponse:
         raise NotImplementedError
 
 _TOOL_REGISTRY: dict[str, BaseTool] = {}
@@ -5707,24 +5707,34 @@ _TOOL_REGISTRY: dict[str, BaseTool] = {}
 def register_tool(tool: BaseTool):
     _TOOL_REGISTRY[tool.info().name] = tool
 
-def execute_tool_dispatch(name: str, args: dict, model: str = "") -> str:
-    """Dispatch tool calls through the registry or fall back to legacy execute_tool."""
+async def execute_tool_dispatch(name: str, args: dict, model: str = "", allow_subagents: bool = True) -> str:
+    """Dispatch tool calls through the registry, falling back to legacy
+    execute_tool directly for anything not (yet) registered. Runs inline on
+    the caller's event loop (_agent_turns is always mid-request when this is
+    called) — never asyncio.run() here, that raises on an already-running loop."""
     if name in _TOOL_REGISTRY:
         tool = _TOOL_REGISTRY[name]
-        ctx = {"session_id": "", "message_id": ""}
-        result = tool.run(ctx, {"id": str(uuid.uuid4()), "name": name, "input": json.dumps(args)})
+        ctx = {"session_id": "", "message_id": "", "model": model, "allow_subagents": allow_subagents}
+        result = await tool.run(ctx, {"id": str(uuid.uuid4()), "name": name, "input": json.dumps(args)})
         return result.content
-    return asyncio.run(execute_tool(name, args, model))
+    return await execute_tool(name, args, model, allow_subagents)
 
 class LegacyToolAdapter(BaseTool):
     def __init__(self, name: str, description: str):
         self._info = ToolInfo(name, description)
     def info(self) -> ToolInfo:
         return self._info
-    def run(self, ctx: dict, call: dict) -> ToolResponse:
+    async def run(self, ctx: dict, call: dict) -> ToolResponse:
         args = json.loads(call.get("input", "{}"))
         try:
-            result = asyncio.run(execute_tool(self._info.name, args))
+            # model/allow_subagents must ride through ctx, not default —
+            # dropping allow_subagents here would silently lift the task
+            # tool's one-nesting-level subagent cap (see execute_tool's
+            # "task" branch), and dropping model breaks a subagent's model
+            # selection.
+            result = await execute_tool(self._info.name, args,
+                                         model=ctx.get("model", ""),
+                                         allow_subagents=ctx.get("allow_subagents", True))
             return ToolResponse(content=result)
         except Exception as e:
             return ToolResponse(content=str(e), is_error=True)
@@ -6089,7 +6099,7 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
                 result = await _run_privileged_command(tool_args["command"], target, password)
                 password = None  # drop the reference now that we're done with it
         else:
-            result = await execute_tool(tool_name, tool_args, model=model, allow_subagents=allow_subagents)
+            result = await execute_tool_dispatch(tool_name, tool_args, model=model, allow_subagents=allow_subagents)
         # opencode-style LSP feedback: after a file edit, the touched file's
         # language-server diagnostics ride along on the tool result so the
         # model sees its own type/syntax errors and self-corrects instead of
