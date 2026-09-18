@@ -7764,6 +7764,11 @@ class DraftRepliesRequest(BaseModel):
     body: str
     instructions: str = ""
 
+class ComposeEmailRequest(BaseModel):
+    model: str
+    to: str = ""
+    instructions: str
+
 class SendEmailRequest(BaseModel):
     account_id: str
     to: str
@@ -7906,10 +7911,16 @@ def _imap_fetch(account: dict, folder: str, limit: int, access_token: str = "") 
             return []
         ids = data[0].split()[-limit:]
         for uid_ in reversed(ids):
-            status, msg_data = imap.fetch(uid_, "(RFC822)")
+            # FLAGS alongside RFC822 in one round trip — msg_data[0] stays the
+            # same (meta-line, raw-bytes) tuple imaplib always returns for a
+            # single fetched item, just with the FLAGS list folded into the
+            # meta line instead of a second server round trip per message.
+            status, msg_data = imap.fetch(uid_, "(FLAGS RFC822)")
             if status != "OK" or not msg_data or not msg_data[0]:
                 continue
-            msg = message_from_bytes(msg_data[0][1])
+            meta, raw = msg_data[0]
+            unread = b"\\Seen" not in (meta or b"")
+            msg = message_from_bytes(raw)
             body = _extract_body(msg)
             messages.append({
                 "uid": uid_.decode(),
@@ -7918,6 +7929,7 @@ def _imap_fetch(account: dict, folder: str, limit: int, access_token: str = "") 
                 "date": msg.get("Date", ""),
                 "preview": body.strip()[:200],
                 "body": body.strip()[:20000],
+                "unread": unread,
             })
     return messages
 
@@ -7929,6 +7941,83 @@ async def get_email_messages(account_id: str, folder: str = "INBOX", limit: int 
         messages = await asyncio.to_thread(_imap_fetch, account, folder, limit, access_token)
         _harvest_contacts(messages)
         return {"messages": messages}
+    except Exception as e:
+        raise HTTPException(502, f"IMAP error: {e}")
+
+
+def _decode_imap_utf7(name: str) -> str:
+    """IMAP folder names are encoded in RFC 3501's modified UTF-7 ('&' where
+    standard UTF-7 uses '+', ',' where it uses '/', no padding, '&-' as a
+    literal ampersand). Real folder names (INBOX, Sent, Drafts...) are plain
+    ASCII and never hit this path — falls back to the raw name on anything
+    unexpected rather than failing the whole folder list over one oddly
+    named folder."""
+    if "&" not in name:
+        return name
+    try:
+        result, i = [], 0
+        while i < len(name):
+            if name[i] == "&":
+                j = name.index("-", i)
+                chunk = name[i + 1:j]
+                if not chunk:
+                    result.append("&")
+                else:
+                    b64 = (chunk.replace(",", "/") + "=" * (-len(chunk) % 4)).encode("ascii")
+                    result.append(base64.b64decode(b64).decode("utf-16-be"))
+                i = j + 1
+            else:
+                result.append(name[i])
+                i += 1
+        return "".join(result)
+    except Exception:
+        return name
+
+def _imap_list_folders(account: dict, access_token: str = "") -> list:
+    with imaplib.IMAP4_SSL(account["imap_host"], account.get("imap_port", 993), timeout=30) as imap:
+        _imap_login(imap, account, access_token)
+        status, data = imap.list()
+        if status != "OK" or not data:
+            return [{"name": "INBOX", "unread": 0}]
+        raw_names = []
+        for entry in data:
+            if not entry:
+                continue
+            # A LIST response line looks like: (\HasNoChildren) "/" "INBOX"
+            # — the folder name is always the last quoted (or bare) token.
+            decoded = entry.decode(errors="replace")
+            match = re.search(r'"([^"]*)"\s*$', decoded)
+            raw_names.append(match.group(1) if match else decoded.rsplit(" ", 1)[-1])
+
+        folders = []
+        for raw_name in raw_names:
+            # One STATUS round trip per folder for its unread count (Outlook's
+            # "Inbox 11" badges) — quoted since names with spaces ("Sent
+            # Mail") are otherwise invalid IMAP syntax. Wrapped per-folder so
+            # one folder a server won't report STATUS for (seen on some
+            # [Gmail]/... container folders) doesn't blank out every count.
+            unread = 0
+            try:
+                st, st_data = imap.status(f'"{raw_name}"', "(UNSEEN)")
+                if st == "OK" and st_data and st_data[0]:
+                    m = re.search(rb"UNSEEN\s+(\d+)", st_data[0])
+                    if m:
+                        unread = int(m.group(1))
+            except Exception:
+                pass
+            folders.append({"name": _decode_imap_utf7(raw_name), "unread": unread})
+
+        # INBOX first, then alphabetical — the order every real mail client uses.
+        folders.sort(key=lambda f: (f["name"].upper() != "INBOX", f["name"].lower()))
+        return folders or [{"name": "INBOX", "unread": 0}]
+
+@app.get("/api/email/{account_id}/folders")
+async def get_email_folders(account_id: str):
+    account = _get_email_account(account_id)
+    try:
+        access_token = await _google_access_token(account["google_account_id"]) if account.get("auth") == "oauth" else ""
+        folders = await asyncio.to_thread(_imap_list_folders, account, access_token)
+        return {"folders": folders}
     except Exception as e:
         raise HTTPException(502, f"IMAP error: {e}")
 
@@ -7947,6 +8036,98 @@ async def delete_email_message(account_id: str, uid: str, folder: str = "INBOX")
         access_token = await _google_access_token(account["google_account_id"]) if account.get("auth") == "oauth" else ""
         await asyncio.to_thread(_imap_delete, account, folder, uid, access_token)
         return {"ok": True}
+    except Exception as e:
+        raise HTTPException(502, f"IMAP error: {e}")
+
+
+def _imap_mark_read(account: dict, folder: str, uid: str, access_token: str = ""):
+    with imaplib.IMAP4_SSL(account["imap_host"], account.get("imap_port", 993), timeout=30) as imap:
+        _imap_login(imap, account, access_token)
+        imap.select(folder or "INBOX")
+        imap.store(uid, "+FLAGS", "\\Seen")
+
+@app.post("/api/email/{account_id}/messages/{uid}/read")
+async def mark_email_read(account_id: str, uid: str, folder: str = "INBOX"):
+    account = _get_email_account(account_id)
+    try:
+        access_token = await _google_access_token(account["google_account_id"]) if account.get("auth") == "oauth" else ""
+        await asyncio.to_thread(_imap_mark_read, account, folder, uid, access_token)
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(502, f"IMAP error: {e}")
+
+
+def _imap_archive(account: dict, folder: str, uid: str, access_token: str = "") -> str:
+    """Moves a message to this account's archive-equivalent folder — swipe-
+    to-archive in the frontend. Returns the folder it moved to. Gmail has no
+    real "Archive" folder (archiving there just means removing it from
+    INBOX; the message stays visible under [Gmail]/All Mail, which is what
+    that IMAP folder actually is), so Gmail accounts target that folder
+    specifically; everything else looks for a folder literally named
+    "Archive". Raises ValueError (→ 400, a real "can't do this" answer) when
+    neither exists, rather than silently picking an unrelated folder."""
+    existing = _imap_list_folders(account, access_token)
+    target = None
+    if account.get("provider") == "gmail":
+        target = next((f["name"] for f in existing if f["name"] == "[Gmail]/All Mail"), None)
+    if not target:
+        target = next((f["name"] for f in existing if f["name"].lower() == "archive"), None)
+    if not target:
+        raise ValueError("No Archive folder found on this account — create one (Gmail accounts use [Gmail]/All Mail automatically and don't need one).")
+
+    with imaplib.IMAP4_SSL(account["imap_host"], account.get("imap_port", 993), timeout=30) as imap:
+        _imap_login(imap, account, access_token)
+        imap.select(folder or "INBOX")
+        # IMAP MOVE (RFC 6851) first — one round trip, supported by Gmail and
+        # every mainstream provider this app lists. COPY + mark-deleted +
+        # EXPUNGE is the fallback for a server that predates it.
+        typ, _ = imap.uid("MOVE", uid, f'"{target}"')
+        if typ != "OK":
+            typ, _ = imap.uid("COPY", uid, f'"{target}"')
+            if typ != "OK":
+                raise ValueError(f"Could not move this message to {target}")
+            imap.uid("STORE", uid, "+FLAGS", "(\\Deleted)")
+            imap.expunge()
+    return target
+
+@app.post("/api/email/{account_id}/messages/{uid}/archive")
+async def archive_email_message(account_id: str, uid: str, folder: str = "INBOX"):
+    account = _get_email_account(account_id)
+    try:
+        access_token = await _google_access_token(account["google_account_id"]) if account.get("auth") == "oauth" else ""
+        target = await asyncio.to_thread(_imap_archive, account, folder, uid, access_token)
+        return {"ok": True, "archived_to": target}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(502, f"IMAP error: {e}")
+
+
+def _imap_empty_folder(account: dict, folder: str, access_token: str = "") -> int:
+    """Permanently deletes every message in `folder` — the "Empty Trash/
+    Spam/Junk" action real mail clients offer for exactly those folders.
+    Returns how many were removed. `folder` takes a query param, not a path
+    segment, since real folder names contain "/" (e.g. "[Gmail]/Bin")."""
+    with imaplib.IMAP4_SSL(account["imap_host"], account.get("imap_port", 993), timeout=30) as imap:
+        _imap_login(imap, account, access_token)
+        imap.select(folder or "INBOX")
+        status, data = imap.search(None, "ALL")
+        if status != "OK" or not data or not data[0]:
+            return 0
+        ids = data[0].split()
+        if not ids:
+            return 0
+        imap.store(b",".join(ids), "+FLAGS", "\\Deleted")
+        imap.expunge()
+        return len(ids)
+
+@app.post("/api/email/{account_id}/folders/empty")
+async def empty_email_folder(account_id: str, folder: str):
+    account = _get_email_account(account_id)
+    try:
+        access_token = await _google_access_token(account["google_account_id"]) if account.get("auth") == "oauth" else ""
+        count = await asyncio.to_thread(_imap_empty_folder, account, folder, access_token)
+        return {"ok": True, "deleted": count}
     except Exception as e:
         raise HTTPException(502, f"IMAP error: {e}")
 
@@ -8021,6 +8202,34 @@ Each reply should be a complete, ready-to-send email body (no subject line). Var
         except json.JSONDecodeError:
             pass
     return {"replies": [content.strip()] if content.strip() else ["(No draft generated — try again.)"]}
+
+
+@app.post("/api/email/compose")
+async def compose_email(req: ComposeEmailRequest):
+    """Drafts a brand-new email (subject + body) from a short instruction —
+    the "Copper AI" compose path, distinct from draft_replies above which
+    always answers an existing message. Same JSON-extraction-with-fallback
+    shape as draft_replies for consistency."""
+    prompt = f"""Draft a new email from scratch based on the instructions below. Respond with ONLY a JSON object (no other text, no markdown fences): {{"subject": string, "body": string}}.
+
+{"Recipient: " + req.to if req.to else ""}
+Instructions: {req.instructions}
+
+The body should be a complete, ready-to-send email — no placeholder brackets like [Your Name] unless the instructions specifically ask for a signature placeholder."""
+    try:
+        content = await _llm_complete(req.model, [{"role": "user", "content": prompt}])
+    except Exception as e:
+        raise HTTPException(502, f"Model error: {e}")
+
+    match = re.search(r'\{.*\}', content, re.DOTALL)
+    if match:
+        try:
+            draft = json.loads(match.group(0))
+            if isinstance(draft, dict) and draft.get("body"):
+                return {"subject": str(draft.get("subject", "")), "body": str(draft.get("body", ""))}
+        except json.JSONDecodeError:
+            pass
+    return {"subject": "", "body": content.strip()}
 
 
 @app.post("/api/email/send")

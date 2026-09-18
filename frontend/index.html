@@ -187,6 +187,12 @@
   .btn-danger { background: var(--danger); color: #fff; }
   .btn-danger:disabled { opacity: .4; cursor: not-allowed; }
   .btn-sm { padding: 4px 10px; font-size: 12px; }
+  .icon-btn {
+    background: none; border: 1px solid transparent; color: var(--muted);
+    cursor: pointer; font-size: 15px; line-height: 1; padding: 5px 7px;
+    border-radius: 6px; transition: background .15s, color .15s;
+  }
+  .icon-btn:hover { color: var(--text); background: rgba(127,127,127,.12); }
   .btn-full { width: 100%; justify-content: center; }
 
   /* ── Tabs ── */
@@ -720,19 +726,95 @@
   .runner-output .exit { color: var(--muted); font-size: 11px; margin-top: 8px; border-top: 1px solid var(--border); padding-top: 8px; }
   .runner-placeholder { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--muted); font-size: 13px; text-align: center; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
 
-  /* ── Email: Outlook/Gmail-style inbox list + reading pane ── */
-  .email-list, .email-detail {
-    background: var(--surface);
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  /* ── Email: Outlook-style ribbon + folder rail + list + reading pane ── */
+  .email-app-font { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  .email-ribbon {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--surface); flex-shrink: 0;
   }
+  .email-ribbon select { width: auto; min-width: 180px; }
+  .email-3pane { flex: 1; display: flex; overflow: hidden; min-height: 0; }
+
+  .email-folder-rail {
+    width: 170px; flex-shrink: 0; overflow-y: auto; padding: 10px 6px;
+    border-right: 1px solid var(--border); background: var(--surface);
+  }
+  .email-folder-item {
+    display: flex; align-items: center; gap: 8px;
+    padding: 7px 10px; border-radius: 6px; cursor: pointer; font-size: 13px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .email-folder-item:hover { background: rgba(255,255,255,.05); }
+  .email-folder-item.active { background: rgba(31,111,235,.15); color: var(--accent2); font-weight: 600; }
+  .email-folder-item .folder-name { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+  .email-folder-item .folder-unread-count {
+    font-size: 11px; color: var(--muted); flex-shrink: 0;
+  }
+  .email-folder-item.active .folder-unread-count { color: var(--accent2); }
+
+  /* ── Calendar peek (Outlook-style right-hand mini calendar) ── */
+  .email-calendar-peek {
+    width: 220px; flex-shrink: 0; overflow-y: auto; padding: 12px;
+    border-left: 1px solid var(--border); background: var(--surface);
+  }
+  .peek-month {
+    font-size: 13px; font-weight: 600; margin-bottom: 8px; text-align: center;
+  }
+  .peek-group-label {
+    font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px;
+    margin: 12px 0 6px;
+  }
+  .peek-group-label:first-of-type { margin-top: 0; }
+  .peek-event {
+    display: flex; gap: 8px; padding: 6px 4px; border-radius: 6px; font-size: 12px;
+    cursor: default;
+  }
+  .peek-event:hover { background: rgba(255,255,255,.05); }
+  .peek-event-time { color: var(--muted); flex-shrink: 0; width: 46px; }
+  .peek-event-title {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;
+  }
+  .peek-empty { font-size: 12px; color: var(--muted); text-align: center; padding: 16px 4px; }
+  .peek-viewall { display: block; text-align: center; font-size: 12px; margin-top: 10px; color: var(--accent2); cursor: pointer; }
+  .peek-viewall:hover { text-decoration: underline; }
+
+  .email-list, .email-detail { background: var(--surface); }
   .email-row {
     display: flex; flex-direction: column; gap: 3px;
     padding: 10px 14px; margin: 6px 8px;
     border: 1px solid var(--border); border-radius: 10px;
     cursor: pointer; transition: background .1s ease, border-color .1s ease;
+    position: relative;
   }
   .email-row:hover { background: rgba(255,255,255,.04); }
-  .email-row.active { background: rgba(31,111,235,.15); border-color: var(--accent2); }
+  .email-row.read { background: rgba(34,197,94,.08); }
+  .email-row.unread { background: rgba(239,68,68,.10); border-left: 3px solid var(--danger); }
+  .email-row.unread .email-row-sender, .email-row.unread .email-row-subject { font-weight: 700; }
+  /* Pinned wins over read/unread tinting (amber, regardless of read state) —
+     comes after them in source so equal-specificity cascade favors it. */
+  .email-row.pinned { background: rgba(217,119,6,.16); border-left: 3px solid #d97706; }
+  /* Selection must stay visually distinct no matter what read/unread/pinned
+     tint is under it — the one deliberate !important in this file. */
+  .email-row.active { background: rgba(31,111,235,.18) !important; border-color: var(--accent2); }
+  .email-row-pin {
+    position: absolute; top: 6px; right: 8px; display: none;
+    background: none; border: none; cursor: pointer; font-size: 12px; opacity: .6;
+    padding: 2px 4px; border-radius: 4px; line-height: 1;
+  }
+  .email-row:hover .email-row-pin, .email-row.pinned .email-row-pin { display: inline-block; }
+  .email-row.pinned .email-row-pin { opacity: 1; }
+  .email-row-pin:hover { background: rgba(255,255,255,.12); opacity: 1; }
+
+  /* ── Swipe to delete/archive ── */
+  .email-row { touch-action: pan-y; transition: transform .18s ease, opacity .18s ease; }
+  .email-row.dragging { transition: none; }
+  .email-row-swipe-bg {
+    position: absolute; inset: 0; border-radius: 10px;
+    display: flex; align-items: center; padding: 0 16px;
+    font-size: 13px; font-weight: 600; color: #fff;
+    opacity: 0; pointer-events: none; z-index: 0;
+  }
+  .email-row-top, .email-row-subject, .email-row-preview, .email-row-pin { position: relative; z-index: 1; }
   .email-row-top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
   .email-row-sender { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .email-row-date { font-size: 11px; color: var(--muted); flex-shrink: 0; }
@@ -751,9 +833,53 @@
   .email-detail-date { font-size: 12px; color: var(--muted); margin-left: auto; white-space: nowrap; }
   .email-detail-body {
     padding: 20px 24px; font-size: 14px; line-height: 1.7; white-space: pre-wrap;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   }
   .email-detail-actions { padding: 0 24px 20px; display: flex; gap: 8px; flex-wrap: wrap; }
+
+  /* "Copper AI" — the app's answer to Copilot in Outlook. Uses --copper (not
+     --accent2, which everything else in Email uses) so the AI-assist actions
+     read as a distinct, branded capability rather than another generic
+     button. */
+  .btn-copper {
+    background: var(--copper); color: #fff;
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 7px 14px; border-radius: 6px; border: none;
+    cursor: pointer; font-size: 13px; font-weight: 600;
+    transition: opacity .15s;
+  }
+  .btn-copper:hover { opacity: .85; }
+  .btn-copper.btn-sm { padding: 4px 10px; font-size: 12px; }
+
+  /* ── Compose modal ── */
+  .compose-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,.55);
+    display: flex; align-items: center; justify-content: center; z-index: 3000;
+  }
+  .compose-box {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    width: 92%; max-width: 640px; max-height: 85vh; display: flex; flex-direction: column;
+    box-shadow: 0 12px 40px rgba(0,0,0,.4); overflow: hidden;
+  }
+  .compose-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 18px; border-bottom: 1px solid var(--border); font-weight: 600; font-size: 14px;
+  }
+  .compose-body { padding: 14px 18px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+  .compose-body input { font-size: 13px; }
+  .compose-body textarea {
+    width: 100%; min-height: 220px; resize: vertical; font-family: inherit; font-size: 13px;
+    background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    border-radius: 6px; padding: 8px 10px;
+  }
+  .compose-ai-row {
+    display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+    padding: 10px; border: 1px dashed var(--copper); border-radius: 8px; background: rgba(184,115,51,.06);
+  }
+  .compose-ai-row input { flex: 1; min-width: 160px; }
+  .compose-footer {
+    display: flex; justify-content: flex-end; gap: 8px;
+    padding: 12px 18px; border-top: 1px solid var(--border);
+  }
 
   /* ── Models Panel ── */
   .models-panel { padding: 24px; overflow-y: auto; max-width: 860px; }
@@ -1501,18 +1627,23 @@
     </div>
 
     <!-- Email Tab -->
-    <div class="tab-panel" id="tab-email">
+    <div class="tab-panel email-app-font" id="tab-email">
       <div class="runner-layout">
-        <div class="runner-panel">
-          <div class="runner-toolbar">
-            <h2>📧 Email</h2>
-            <select id="email-account-select" style="width:auto;min-width:200px" onchange="loadInbox()"></select>
+        <div class="runner-panel" style="padding:0">
+          <div class="email-ribbon">
+            <button class="btn btn-primary btn-sm" onclick="openComposeModal()">✉ New Email</button>
+            <select id="email-account-select" onchange="onEmailAccountChange()"></select>
             <button class="btn btn-secondary btn-sm" onclick="loadInbox()">↻ Refresh</button>
             <button class="btn btn-secondary btn-sm" onclick="toggleEmailSetup()">⚙ Accounts</button>
             <button class="btn btn-secondary btn-sm" onclick="toggleContacts()">👥 Contacts</button>
+            <button class="btn btn-danger btn-sm" id="email-empty-folder-btn" onclick="emptyCurrentEmailFolder()" style="display:none">🗑 Empty Folder</button>
+            <span style="margin-left:auto;font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px">
+              <span id="email-swipe-label"></span>
+              <button class="icon-btn" onclick="toggleEmailSwipeDirection()" title="Swap swipe directions">⇄</button>
+            </span>
           </div>
 
-          <div id="email-setup" style="display:none;padding:12px;border:1px solid var(--border);border-radius:8px;flex-direction:column;gap:8px;flex-shrink:0">
+          <div id="email-setup" style="display:none;padding:12px;margin:12px;border:1px solid var(--border);border-radius:8px;flex-direction:column;gap:8px;flex-shrink:0">
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding-bottom:8px;border-bottom:1px solid var(--border)">
               <button class="btn btn-accent btn-sm" onclick="startGoogleSignIn()">🔵 Sign in with Google</button>
               <span style="font-size:11px;color:var(--muted)">Covers both Gmail and Google Calendar in one step — you'll confirm what to import before anything's added.</span>
@@ -1556,7 +1687,7 @@
             <div id="email-accounts-list" style="display:flex;flex-direction:column;gap:4px"></div>
           </div>
 
-          <div id="contacts-panel" style="display:none;padding:12px;border:1px solid var(--border);border-radius:8px;flex-direction:column;gap:8px;flex-shrink:0;max-height:280px">
+          <div id="contacts-panel" style="display:none;padding:12px;margin:12px;border:1px solid var(--border);border-radius:8px;flex-direction:column;gap:8px;flex-shrink:0;max-height:280px">
             <div style="display:flex;gap:8px;flex-wrap:wrap">
               <input type="text" id="contact-name" placeholder="Name" style="width:auto;flex:1;min-width:120px">
               <input type="text" id="contact-email" placeholder="Email" style="width:auto;flex:1;min-width:160px">
@@ -1567,12 +1698,18 @@
             </div>
           </div>
 
-          <div style="flex:1;display:flex;overflow:hidden;gap:0;min-height:0;border:1px solid var(--border);border-radius:8px">
+          <div class="email-3pane">
+            <div class="email-folder-rail" id="email-folder-rail">
+              <div style="font-size:12px;color:var(--muted);padding:8px 10px">No account selected</div>
+            </div>
             <div id="email-message-list" class="email-list" style="width:320px;flex-shrink:0;overflow-y:auto;border-right:1px solid var(--border)">
               <div class="runner-placeholder">Add an account, pick it above, then Refresh.</div>
             </div>
             <div id="email-message-detail" class="email-detail" style="flex:1;overflow-y:auto">
               <div class="runner-placeholder">Select a message to read it.</div>
+            </div>
+            <div class="email-calendar-peek" id="email-calendar-peek">
+              <div class="peek-empty">Loading calendar…</div>
             </div>
           </div>
         </div>
@@ -7084,10 +7221,413 @@ function removeFilePill(filename) {
 let emailAccounts = [];
 let emailProviders = {};
 let currentEmailMessages = [];
+let currentEmailFolder = 'INBOX';
 
 async function initEmailTab() {
   await loadEmailProviders();
   await loadEmailAccounts();
+  loadEmailCalendarPeek();
+  updateSwipeDirectionLabel();
+  initEmailSwipeHandlers();
+}
+
+// ── Folders ──────────────────────────────────────────────────────────────────
+
+async function onEmailAccountChange() {
+  currentEmailFolder = 'INBOX';
+  await loadEmailFolders();
+}
+
+let currentEmailFolders = [{ name: 'INBOX', unread: 0 }];
+
+async function loadEmailFolders() {
+  const accountId = document.getElementById('email-account-select').value;
+  const rail = document.getElementById('email-folder-rail');
+  if (!accountId) {
+    rail.innerHTML = '<div style="font-size:12px;color:var(--muted);padding:8px 10px">No account selected</div>';
+    return;
+  }
+  rail.innerHTML = '<div style="font-size:12px;color:var(--muted);padding:8px 10px">Loading folders…</div>';
+  try {
+    const r = await fetch(`${API}/api/email/${accountId}/folders`);
+    const d = await r.json();
+    currentEmailFolders = d.folders && d.folders.length ? d.folders : [{ name: 'INBOX', unread: 0 }];
+    if (!currentEmailFolders.some(f => f.name === currentEmailFolder)) currentEmailFolder = 'INBOX';
+    renderEmailFolderRail();
+    await loadInbox();
+  } catch (err) {
+    rail.innerHTML = `<div style="font-size:12px;padding:8px 10px" class="stderr">${escHtml(err.message)}</div>`;
+  }
+}
+
+// Common IMAP folder names get a matching icon, same idea as Outlook's
+// built-in folder icons — anything else (a custom label, a Gmail category)
+// just gets the generic folder glyph.
+const EMAIL_FOLDER_ICONS = {
+  INBOX: '📥', SENT: '📤', DRAFTS: '📝', TRASH: '🗑', DELETED: '🗑',
+  JUNK: '⚠️', SPAM: '⚠️', ARCHIVE: '📦', STARRED: '⭐', IMPORTANT: '❗',
+};
+function emailFolderIcon(name) {
+  const key = name.split('/').pop().toUpperCase();
+  return EMAIL_FOLDER_ICONS[key] || '📁';
+}
+function emailFolderLabel(name) {
+  // "[Gmail]/Sent Mail" -> "Sent Mail" — the provider prefix is redundant
+  // once it's already grouped under this account in the rail.
+  return name.replace(/^\[Gmail\]\//, '');
+}
+
+function renderEmailFolderRail() {
+  const rail = document.getElementById('email-folder-rail');
+  rail.innerHTML = currentEmailFolders.map(f => `
+    <div class="email-folder-item ${f.name === currentEmailFolder ? 'active' : ''}" data-folder="${escHtml(f.name)}">
+      <span>${emailFolderIcon(f.name)}</span>
+      <span class="folder-name">${escHtml(emailFolderLabel(f.name))}</span>
+      ${f.unread ? `<span class="folder-unread-count">${f.unread}</span>` : ''}
+    </div>
+  `).join('');
+  updateEmptyFolderButtonVisibility();
+}
+
+// Bin/Trash/Spam/Junk are the folders every real mail client offers an
+// "Empty Folder" action for — matched on the last path segment so it still
+// works for Gmail's "[Gmail]/Bin"/"[Gmail]/Spam" alongside a plain "Trash".
+const EMAIL_EMPTYABLE_FOLDERS = new Set(['TRASH', 'BIN', 'DELETED', 'DELETED ITEMS', 'SPAM', 'JUNK', 'JUNK EMAIL']);
+function updateEmptyFolderButtonVisibility() {
+  const btn = document.getElementById('email-empty-folder-btn');
+  if (!btn) return;
+  const key = currentEmailFolder.split('/').pop().toUpperCase();
+  btn.style.display = EMAIL_EMPTYABLE_FOLDERS.has(key) ? '' : 'none';
+}
+
+async function emptyCurrentEmailFolder() {
+  const accountId = document.getElementById('email-account-select').value;
+  if (!accountId) return;
+  const label = emailFolderLabel(currentEmailFolder);
+  if (!confirm(`Permanently delete every message in "${label}"? This can't be undone.`)) return;
+  const btn = document.getElementById('email-empty-folder-btn');
+  btn.disabled = true;
+  try {
+    const r = await fetch(`${API}/api/email/${accountId}/folders/empty?folder=${encodeURIComponent(currentEmailFolder)}`, { method: 'POST' });
+    if (!r.ok) { const e = await r.json(); throw new Error(e.detail || 'Failed'); }
+    document.getElementById('email-message-detail').innerHTML = '<div class="runner-placeholder">Select a message to read it.</div>';
+    await loadEmailFolders();
+  } catch (err) {
+    alert('Could not empty folder: ' + err.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('email-folder-rail').addEventListener('click', e => {
+    const item = e.target.closest('.email-folder-item');
+    if (item) selectEmailFolder(item.dataset.folder);
+  });
+});
+
+function selectEmailFolder(folder) {
+  if (folder === currentEmailFolder) return;
+  currentEmailFolder = folder;
+  renderEmailFolderRail();
+  document.getElementById('email-message-detail').innerHTML = '<div class="runner-placeholder">Select a message to read it.</div>';
+  loadInbox();
+}
+
+// ── Pinning ──────────────────────────────────────────────────────────────────
+// Pins are purely client-side (localStorage), not synced to the server —
+// loadInbox() re-fetches from IMAP on every refresh, so anything not
+// persisted separately would reset on every refresh. Keyed by
+// account+folder+uid since a UID is only unique within one folder of one account.
+function _emailPinKey(accountId, folder, uid) {
+  return `${accountId}::${folder}::${uid}`;
+}
+function _loadPinnedEmailKeys() {
+  try { return new Set(JSON.parse(localStorage.getItem('pinnedEmails') || '[]')); }
+  catch { return new Set(); }
+}
+function _savePinnedEmailKeys(set) {
+  localStorage.setItem('pinnedEmails', JSON.stringify([...set]));
+}
+function toggleEmailPin(i) {
+  const m = currentEmailMessages[i];
+  if (!m) return;
+  const accountId = document.getElementById('email-account-select').value;
+  const key = _emailPinKey(accountId, currentEmailFolder, m.uid);
+  const pinned = _loadPinnedEmailKeys();
+  if (pinned.has(key)) pinned.delete(key); else pinned.add(key);
+  _savePinnedEmailKeys(pinned);
+  renderEmailMessageList();
+}
+
+// ── Swipe to delete/archive ──────────────────────────────────────────────────
+
+let emailSwipeReversed = localStorage.getItem('emailSwipeReversed') === '1';
+const EMAIL_SWIPE_THRESHOLD = 90; // px of horizontal drag before it counts as a real swipe, not a wobble
+
+function toggleEmailSwipeDirection() {
+  emailSwipeReversed = !emailSwipeReversed;
+  localStorage.setItem('emailSwipeReversed', emailSwipeReversed ? '1' : '0');
+  updateSwipeDirectionLabel();
+}
+
+function updateSwipeDirectionLabel() {
+  const el = document.getElementById('email-swipe-label');
+  if (!el) return;
+  el.textContent = emailSwipeReversed ? '← Archive · Delete →' : '← Delete · Archive →';
+}
+
+// dx < 0 is a left-swipe (row drags left), dx > 0 is a right-swipe.
+// Default: left = delete, right = archive — reversible via the ⇄ toggle.
+function emailSwipeAction(dx) {
+  const leftSwipe = dx < 0;
+  if (leftSwipe) return emailSwipeReversed ? 'archive' : 'delete';
+  return emailSwipeReversed ? 'delete' : 'archive';
+}
+
+let _emailSwipe = null; // { row, idx, startX, currentX }
+
+// Pointer Events (not separate touch/mouse handlers) so the same code
+// drives this on a touchscreen and as a mouse drag on desktop — this app's
+// primary surface. Delegated on the list container since rows are
+// recreated on every render; a per-row listener would need rebinding
+// every time renderEmailMessageList() runs.
+function initEmailSwipeHandlers() {
+  const list = document.getElementById('email-message-list');
+  if (!list || list.dataset.swipeInit) return;
+  list.dataset.swipeInit = '1';
+
+  list.addEventListener('pointerdown', e => {
+    if (e.target.closest('.email-row-pin')) return; // pin button has its own click handling
+    const row = e.target.closest('.email-row');
+    if (!row) return;
+    const idx = parseInt(row.id.replace('email-row-', ''), 10);
+    _emailSwipe = { row, idx, startX: e.clientX, currentX: e.clientX };
+    row.setPointerCapture(e.pointerId);
+    row.classList.add('dragging');
+  });
+
+  list.addEventListener('pointermove', e => {
+    if (!_emailSwipe) return;
+    _emailSwipe.currentX = e.clientX;
+    const dx = Math.max(-160, Math.min(160, _emailSwipe.currentX - _emailSwipe.startX));
+    _emailSwipe.row.style.transform = `translateX(${dx}px)`;
+    renderEmailSwipeBg(_emailSwipe.row, dx);
+  });
+
+  const endSwipe = () => {
+    if (!_emailSwipe) return;
+    const { row, idx } = _emailSwipe;
+    const dx = _emailSwipe.currentX - _emailSwipe.startX;
+    row.classList.remove('dragging');
+    if (Math.abs(dx) >= EMAIL_SWIPE_THRESHOLD) {
+      const action = emailSwipeAction(dx);
+      row.style.transform = `translateX(${dx < 0 ? '-100%' : '100%'})`;
+      row.style.opacity = '0';
+      setTimeout(() => runEmailSwipeAction(idx, action), 160);
+    } else {
+      row.style.transform = 'translateX(0)';
+      const bg = row.querySelector('.email-row-swipe-bg');
+      if (bg) bg.style.opacity = '0';
+    }
+    _emailSwipe = null;
+  };
+  list.addEventListener('pointerup', endSwipe);
+  list.addEventListener('pointercancel', endSwipe);
+}
+
+function renderEmailSwipeBg(row, dx) {
+  let bg = row.querySelector('.email-row-swipe-bg');
+  if (!bg) {
+    bg = document.createElement('div');
+    bg.className = 'email-row-swipe-bg';
+    row.insertBefore(bg, row.firstChild);
+  }
+  if (dx === 0) { bg.style.opacity = '0'; return; }
+  const action = emailSwipeAction(dx);
+  bg.style.opacity = String(Math.min(1, Math.abs(dx) / EMAIL_SWIPE_THRESHOLD));
+  bg.style.background = action === 'delete' ? 'var(--danger)' : 'var(--accent2)';
+  bg.style.justifyContent = dx < 0 ? 'flex-end' : 'flex-start';
+  bg.textContent = action === 'delete' ? '🗑 Delete' : '📦 Archive';
+}
+
+async function runEmailSwipeAction(idx, action) {
+  const m = currentEmailMessages[idx];
+  if (!m) { renderEmailMessageList(); return; }
+  const accountId = document.getElementById('email-account-select').value;
+  const folderQS = `folder=${encodeURIComponent(currentEmailFolder)}`;
+  try {
+    const r = action === 'delete'
+      ? await fetch(`${API}/api/email/${accountId}/messages/${encodeURIComponent(m.uid)}?${folderQS}`, { method: 'DELETE' })
+      : await fetch(`${API}/api/email/${accountId}/messages/${encodeURIComponent(m.uid)}/archive?${folderQS}`, { method: 'POST' });
+    if (!r.ok) { const e = await r.json(); throw new Error(e.detail || 'Failed'); }
+    // Optimistic local removal so the list doesn't flash back before the
+    // folder/inbox refresh below completes.
+    currentEmailMessages = currentEmailMessages.filter(x => x !== m);
+    renderEmailMessageList();
+    loadEmailFolders(); // re-fetches this folder's messages + all folders' unread counts
+  } catch (err) {
+    alert(`Could not ${action}: ${err.message}`);
+    renderEmailMessageList();
+  }
+}
+
+// Outlook-style "Calendar & Meetings" peek — shows your own approved events
+// (the ones already pushed to CalDAV/the ICS feed via the Calendar tab), not
+// a live read of an external calendar this app doesn't have two-way sync
+// with. Account-independent (your own local event queue, not per-mailbox),
+// so it loads once when the Email tab opens rather than per account/folder.
+async function loadEmailCalendarPeek() {
+  const peek = document.getElementById('email-calendar-peek');
+  if (!peek) return;
+  const monthLabel = new Date().toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+  try {
+    const r = await fetch(`${API}/api/calendar/events?status=approved`);
+    const d = await r.json();
+    const now = new Date();
+    const todayStr = now.toISOString().slice(0, 10);
+    const tomorrow = new Date(now);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const tomorrowStr = tomorrow.toISOString().slice(0, 10);
+
+    const upcoming = (d.events || [])
+      .filter(e => e.start && e.start.slice(0, 10) >= todayStr)
+      .sort((a, b) => a.start.localeCompare(b.start))
+      .slice(0, 12);
+
+    if (!upcoming.length) {
+      peek.innerHTML = `
+        <div class="peek-month">${escHtml(monthLabel)}</div>
+        <div class="peek-empty">No upcoming events</div>
+        <span class="peek-viewall" onclick="switchTab('calendar')">Open Calendar →</span>
+      `;
+      return;
+    }
+
+    const groups = { today: [], tomorrow: [], later: [] };
+    for (const e of upcoming) {
+      const dateStr = e.start.slice(0, 10);
+      if (dateStr === todayStr) groups.today.push(e);
+      else if (dateStr === tomorrowStr) groups.tomorrow.push(e);
+      else groups.later.push(e);
+    }
+    const renderEvent = e => {
+      const time = e.all_day ? 'All day' : (e.start.slice(11, 16) || '');
+      const titleAttr = e.location ? `${e.title} — ${e.location}` : (e.title || '');
+      return `
+        <div class="peek-event" title="${escHtml(titleAttr)}">
+          <span class="peek-event-time">${escHtml(time)}</span>
+          <span class="peek-event-title">${escHtml(e.title || '(untitled)')}</span>
+        </div>`;
+    };
+    const renderGroup = (label, events) => events.length
+      ? `<div class="peek-group-label">${label}</div>${events.map(renderEvent).join('')}`
+      : '';
+
+    peek.innerHTML = `
+      <div class="peek-month">${escHtml(monthLabel)}</div>
+      ${renderGroup('Today', groups.today)}
+      ${renderGroup('Tomorrow', groups.tomorrow)}
+      ${renderGroup('Upcoming', groups.later)}
+      <span class="peek-viewall" onclick="switchTab('calendar')">Open Calendar →</span>
+    `;
+  } catch (err) {
+    peek.innerHTML = `<div class="peek-month">${escHtml(monthLabel)}</div><div class="peek-empty">Couldn't load calendar</div>`;
+  }
+}
+
+// ── Compose ──────────────────────────────────────────────────────────────────
+
+function openComposeModal() {
+  if (document.getElementById('compose-overlay')) return;
+  const accountId = document.getElementById('email-account-select').value;
+  if (!accountId) { alert('Add and select an email account first.'); return; }
+
+  const overlay = document.createElement('div');
+  overlay.id = 'compose-overlay';
+  overlay.className = 'compose-overlay';
+  overlay.innerHTML = `
+    <div class="compose-box">
+      <div class="compose-header">
+        <span>✉ New Email</span>
+        <button class="icon-btn" onclick="closeComposeModal()" aria-label="Close">✕</button>
+      </div>
+      <div class="compose-body">
+        <input type="text" id="compose-to" placeholder="To">
+        <input type="text" id="compose-subject" placeholder="Subject">
+        <div class="compose-ai-row">
+          <span style="font-size:13px;white-space:nowrap">✨ Copper AI:</span>
+          <input type="text" id="compose-ai-instructions" placeholder="What should this email say?" onkeydown="if(event.key==='Enter'){event.preventDefault();composeWithAI();}">
+          <button class="btn-copper btn-sm" id="compose-ai-btn" onclick="composeWithAI()">Draft it</button>
+        </div>
+        <textarea id="compose-body" placeholder="Write your email, or let Copper AI draft it above..."></textarea>
+        <div id="compose-status" style="font-size:12px;color:var(--muted)"></div>
+      </div>
+      <div class="compose-footer">
+        <button class="btn btn-secondary" onclick="closeComposeModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="sendComposedEmail()">Send</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', e => { if (e.target === overlay) closeComposeModal(); });
+  document.addEventListener('keydown', function onEsc(e) {
+    if (e.key === 'Escape') { closeComposeModal(); document.removeEventListener('keydown', onEsc); }
+  });
+  setTimeout(() => document.getElementById('compose-to').focus(), 0);
+}
+
+function closeComposeModal() {
+  document.getElementById('compose-overlay')?.remove();
+}
+
+async function composeWithAI() {
+  const model = document.getElementById('model-select').value;
+  if (!model) { alert('Select a model first (top-left)'); return; }
+  const instructions = document.getElementById('compose-ai-instructions').value.trim();
+  if (!instructions) { alert('Tell Copper AI what the email should say first.'); return; }
+  const to = document.getElementById('compose-to').value.trim();
+  const btn = document.getElementById('compose-ai-btn');
+  const status = document.getElementById('compose-status');
+  btn.disabled = true; btn.textContent = 'Drafting…';
+  status.textContent = '';
+  try {
+    const r = await fetch(`${API}/api/email/compose`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, to, instructions })
+    });
+    if (!r.ok) { const e = await r.json(); throw new Error(e.detail || 'Failed'); }
+    const d = await r.json();
+    if (d.subject && !document.getElementById('compose-subject').value) {
+      document.getElementById('compose-subject').value = d.subject;
+    }
+    document.getElementById('compose-body').value = d.body || '';
+  } catch (err) {
+    status.textContent = 'Error: ' + err.message;
+  } finally {
+    btn.disabled = false; btn.textContent = 'Draft it';
+  }
+}
+
+async function sendComposedEmail() {
+  const accountId = document.getElementById('email-account-select').value;
+  const to = document.getElementById('compose-to').value.trim();
+  const subject = document.getElementById('compose-subject').value.trim();
+  const body = document.getElementById('compose-body').value;
+  if (!to) { alert('Enter a recipient.'); return; }
+  if (!body.trim()) { alert('Write something first (or let Copper AI draft it).'); return; }
+  const status = document.getElementById('compose-status');
+  status.textContent = 'Sending…';
+  try {
+    const r = await fetch(`${API}/api/email/send`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ account_id: accountId, to, subject, body })
+    });
+    if (!r.ok) { const e = await r.json(); throw new Error(e.detail || 'Failed'); }
+    closeComposeModal();
+  } catch (err) {
+    status.textContent = 'Error: ' + err.message;
+  }
 }
 
 function toggleEmailSetup() {
@@ -7465,18 +8005,41 @@ async function loadInbox() {
   if (!accountId) { list.innerHTML = '<div class="runner-placeholder">Add an account first.</div>'; return; }
   list.innerHTML = '<div style="padding:12px;color:var(--muted)"><div class="thinking"><span></span><span></span><span></span></div> Loading inbox...</div>';
   try {
-    const r = await fetch(`${API}/api/email/${accountId}/messages?limit=25`);
+    const r = await fetch(`${API}/api/email/${accountId}/messages?limit=25&folder=${encodeURIComponent(currentEmailFolder)}`);
     if (!r.ok) { const e = await r.json(); throw new Error(e.detail || 'Failed'); }
     const d = await r.json();
     currentEmailMessages = d.messages || [];
-    if (!currentEmailMessages.length) {
-      list.innerHTML = '<div class="runner-placeholder">No messages found.</div>';
-      return;
-    }
-    list.innerHTML = currentEmailMessages.map((m, i) => {
-      const sender = parseEmailFrom(m.from);
-      return `
-      <div class="email-row" id="email-row-${i}" onclick="openEmailMessage(${i})">
+    renderEmailMessageList();
+  } catch (err) {
+    list.innerHTML = `<span class="stderr">Error: ${err.message}</span>`;
+  }
+}
+
+// Split from loadInbox() so pin/unpin can re-render (re-sort included)
+// without an extra IMAP fetch.
+function renderEmailMessageList() {
+  const list = document.getElementById('email-message-list');
+  if (!currentEmailMessages.length) {
+    list.innerHTML = '<div class="runner-placeholder">No messages found.</div>';
+    return;
+  }
+  const accountId = document.getElementById('email-account-select').value;
+  const pinnedKeys = _loadPinnedEmailKeys();
+  // Pinned-to-top, stable otherwise (Array.sort is stable in every current
+  // JS engine) — preserves the server's own newest-first order within each
+  // of the two groups.
+  const withPinFlag = currentEmailMessages.map(m => ({
+    m, pinned: pinnedKeys.has(_emailPinKey(accountId, currentEmailFolder, m.uid)),
+  }));
+  withPinFlag.sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0));
+
+  list.innerHTML = withPinFlag.map(({ m, pinned }) => {
+    const i = currentEmailMessages.indexOf(m);
+    const sender = parseEmailFrom(m.from);
+    const stateClass = pinned ? 'pinned' : (m.unread ? 'unread' : 'read');
+    return `
+      <div class="email-row ${stateClass}" id="email-row-${i}" onclick="openEmailMessage(${i})">
+        <button class="email-row-pin" onclick="event.stopPropagation(); toggleEmailPin(${i})" title="${pinned ? 'Unpin' : 'Pin to top'}">📌</button>
         <div class="email-row-top">
           <span class="email-row-sender">${escHtml(sender.name)}</span>
           <span class="email-row-date">${escHtml(formatEmailDate(m.date))}</span>
@@ -7484,17 +8047,31 @@ async function loadInbox() {
         <span class="email-row-subject">${escHtml(m.subject || '(no subject)')}</span>
         <span class="email-row-preview">${escHtml(m.preview)}</span>
       </div>`;
-    }).join('');
-  } catch (err) {
-    list.innerHTML = `<span class="stderr">Error: ${err.message}</span>`;
-  }
+  }).join('');
 }
 
 function openEmailMessage(i) {
   const m = currentEmailMessages[i];
   if (!m) return;
   document.querySelectorAll('.email-row.active').forEach(el => el.classList.remove('active'));
-  document.getElementById(`email-row-${i}`)?.classList.add('active');
+  const row = document.getElementById(`email-row-${i}`);
+  row?.classList.add('active');
+
+  // Mark read both locally (immediate UI feedback) and on the server (a
+  // real IMAP \Seen flag, not just local state) — matches what opening a
+  // message in any real mail client actually does. Fire-and-forget: a
+  // failed mark-read shouldn't block reading the message you already opened.
+  if (m.unread) {
+    m.unread = false;
+    // Swap the color state, but leave a pinned row's amber alone — pinned
+    // overrides read/unread tinting regardless of read state (see CSS).
+    if (row && !row.classList.contains('pinned')) {
+      row.classList.remove('unread');
+      row.classList.add('read');
+    }
+    const accountId = document.getElementById('email-account-select').value;
+    fetch(`${API}/api/email/${accountId}/messages/${encodeURIComponent(m.uid)}/read?folder=${encodeURIComponent(currentEmailFolder)}`, { method: 'POST' }).catch(() => {});
+  }
 
   const sender = parseEmailFrom(m.from);
   const initial = (sender.name || '?').trim().charAt(0).toUpperCase();
@@ -7513,7 +8090,7 @@ function openEmailMessage(i) {
     </div>
     <div class="email-detail-body">${escHtml(m.body)}</div>
     <div class="email-detail-actions">
-      <button class="btn btn-accent btn-sm" onclick="draftEmailReplies(${i})">✉ Draft 3 Replies</button>
+      <button class="btn-copper btn-sm" onclick="draftEmailReplies(${i})">✨ Copper AI Reply</button>
       <button class="btn btn-secondary btn-sm" onclick="scanEmailForEvents(${i})">📅 Scan for Events</button>
       <button class="btn btn-secondary btn-sm" onclick="saveEmailMessage(${i})">💾 Save</button>
       <button class="btn btn-secondary btn-sm" onclick="deleteEmailMessage(${i})">🗑 Delete</button>
@@ -7548,7 +8125,7 @@ async function deleteEmailMessage(i) {
   if (!confirm(`Delete "${m.subject || '(no subject)'}"? This removes it from the server and can't be undone.`)) return;
   const accountId = document.getElementById('email-account-select').value;
   try {
-    const r = await fetch(`${API}/api/email/${accountId}/messages/${encodeURIComponent(m.uid)}`, { method: 'DELETE' });
+    const r = await fetch(`${API}/api/email/${accountId}/messages/${encodeURIComponent(m.uid)}?folder=${encodeURIComponent(currentEmailFolder)}`, { method: 'DELETE' });
     if (!r.ok) { const e = await r.json(); throw new Error(e.detail || 'Failed'); }
     document.getElementById('email-message-detail').innerHTML = '<div class="runner-placeholder">Select a message to read it.</div>';
     await loadInbox();
