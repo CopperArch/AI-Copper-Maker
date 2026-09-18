@@ -4065,6 +4065,18 @@ async def _cached_gateway_pricing(cache_file: Path, fetcher) -> dict:
 
 OPENROUTER_PRICING_CACHE_FILE = Path(__file__).parent.parent / "openrouter_pricing_cache.json"
 
+async def _fetch_openrouter_models() -> list:
+    """Fetch public OpenRouter models API — returns model list with pricing/context."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get("https://openrouter.ai/api/v1/models")
+            if r.status_code == 200:
+                return r.json().get("data", [])
+    except Exception:
+        pass
+    return []
+
+
 async def _fetch_openrouter_prices() -> dict:
     prices = {}
     for m in await _fetch_openrouter_models():
@@ -5946,24 +5958,29 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
                                     continue
                                 try:
                                     data = json.loads(line)
-                                    delta = data.get("message", {}).get("delta") or {}
-                                    tool_calls_delta = delta.get("tool_calls")
-                                    if tool_calls_delta:
-                                        for tc in tool_calls_delta:
-                                            tc_name = tc.get("name", "")
-                                            tc_id = tc.get("id", "")
-                                            tc_func = tc.get("function", {})
-                                            tc_args = tc_func.get("arguments", "")
-                                            if tc_name and not _pending_tool_call:
-                                                _pending_tool_call = {"name": tc_name, "id": tc_id, "input": ""}
-                                                yield {"type": "tool_use_start", "name": tc_name, "id": tc_id}
-                                            if _pending_tool_call and tc_args:
-                                                _pending_tool_call["input"] += tc_args
-                                                yield {"type": "tool_use_delta", "id": tc_id, "input": tc_args}
-                                    content = delta.get("content")
+                                    # Ollama streams message.content / message.thinking
+                                    # directly — there is no `delta` key (confirmed
+                                    # live against qwen3.8's /api/chat stream). The
+                                    # thinking model puts its reasoning text in
+                                    # `thinking` and the actual reply in `content`.
+                                    msg = data.get("message", {}) or {}
+                                    content = msg.get("content")
                                     if content:
                                         response_text += content
                                         yield {"type": "token", "content": content}
+                                    # Ollama delivers tool calls as a complete list
+                                    # on `message.tool_calls` (no incremental
+                                    # arguments across chunks like OpenAI's format).
+                                    for tc in msg.get("tool_calls") or []:
+                                        tc_name = tc.get("name", "")
+                                        tc_args = tc.get("arguments", {})
+                                        if tc_name and not _pending_tool_call:
+                                            _pending_tool_call = {"name": tc_name, "id": tc_name,
+                                                                  "input": json.dumps(tc_args or {}) if tc_args else ""}
+                                            yield {"type": "tool_use_start", "name": tc_name, "id": tc_name}
+                                            if tc_args:
+                                                yield {"type": "tool_use_delta", "id": tc_name,
+                                                       "input": json.dumps(tc_args or {})}
                                     if data.get("done") and isinstance(data.get("prompt_eval_count"), int):
                                         usage = {"prompt_eval_count": data["prompt_eval_count"],
                                                   "eval_count": data.get("eval_count", 0)}
