@@ -35,3 +35,5 @@ imagegen_local_state.json
 huihui-ai/
 *.gguf
 *.safetensors
+backend/trainer.db
+backend/trainer.db-*
