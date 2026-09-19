@@ -106,6 +106,10 @@
     outline: none;
   }
   select:focus, input:focus, textarea:focus { border-color: var(--accent2); }
+  /* The open <select> popup is OS/browser-rendered and doesn't reliably
+     inherit the app's theme — force both colors explicitly on the model
+     list's options/optgroups instead of leaving either to the OS default. */
+  #model-select option, #model-select optgroup { color: #fff; background-color: #000; }
 
   /* ── Password show/hide toggle (used on every password field in the app) ── */
   .pw-wrap { position: relative; flex: 1; min-width: 160px; }
@@ -409,7 +413,26 @@
   .todo-progress { margin-top: 6px; font-size: 10px; text-transform: uppercase; letter-spacing: .4px; color: var(--muted); }
 
   /* ── File Explorer (Windows Explorer style) ── */
-  .explorer { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
+  .ex-body { flex: 1; display: flex; overflow: hidden; min-height: 0; }
+  .ex-sidebar {
+    width: 190px; flex-shrink: 0; overflow-y: auto; padding: 10px 0;
+    border-right: 1px solid var(--border); background: var(--surface);
+  }
+  .ex-sidebar-section { margin-bottom: 14px; }
+  .ex-sidebar-title {
+    font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .6px;
+    color: var(--muted); padding: 0 14px 4px;
+  }
+  .ex-sidebar-item {
+    display: flex; align-items: center; gap: 8px; padding: 5px 14px; font-size: 12.5px;
+    color: var(--text); cursor: pointer; white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis; border-left: 2px solid transparent;
+  }
+  .ex-sidebar-item:hover { background: rgba(127,127,127,.12); }
+  .ex-sidebar-item.active { background: rgba(35,134,54,.18); border-left-color: var(--accent); }
+  .ex-sidebar-icon { flex-shrink: 0; }
+  .ex-sidebar-empty { padding: 2px 14px 4px; font-size: 11px; color: var(--muted); font-style: italic; }
+  .explorer { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; min-width: 0; }
   .ex-toolbar { display: flex; align-items: center; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
   .ex-nav {
     width: 30px; height: 28px; border-radius: 6px; border: 1px solid transparent; cursor: pointer;
@@ -1446,6 +1469,8 @@
 
     <!-- Files Tab (Windows Explorer style) -->
     <div class="tab-panel" id="tab-files">
+      <div class="ex-body">
+      <div class="ex-sidebar" id="ex-sidebar"></div>
       <div class="explorer">
         <div class="ex-toolbar">
           <button class="ex-nav" id="ex-back-btn" onclick="exBack()" title="Back">◀</button>
@@ -1475,6 +1500,7 @@
           </div>
           <textarea id="file-editor" style="flex:1;font-family:monospace;font-size:13px;padding:12px;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);resize:none"></textarea>
         </div>
+      </div>
       </div>
       <div class="ex-context" id="ex-context"></div>
     </div>
@@ -2119,12 +2145,14 @@ async function checkStatus() {
     const d = await r.json();
     const dot = document.getElementById('status-dot');
     const txt = document.getElementById('status-text');
-    if (d.ollama) {
-      dot.className = 'status-dot ok'; txt.textContent = 'Ollama connected';
-      await loadModels();
-    } else {
-      dot.className = 'status-dot'; txt.textContent = 'Ollama disconnected';
-    }
+    dot.className = d.ollama ? 'status-dot ok' : 'status-dot';
+    txt.textContent = d.ollama ? 'Ollama connected' : 'Ollama disconnected';
+    // Always reload — this repopulates Local, LM Studio, llama.cpp, AND
+    // Cloud optgroups, not just Ollama's own models, so it must not be
+    // gated on Ollama's connection status specifically (was previously
+    // `if (d.ollama) await loadModels()`, which left the whole selector
+    // empty on Ollama-less / not-yet-started setups).
+    await loadModels();
     lmDot.className = d.lmstudio ? 'status-dot ok' : 'status-dot';
     lmTxt.textContent = d.lmstudio ? 'LM Studio connected' : 'LM Studio disconnected';
     if (llDot) { llDot.className = d.llama_cpp ? 'status-dot ok' : 'status-dot'; }
@@ -5152,7 +5180,7 @@ function switchTab(name) {
     p.classList.toggle('active', p.id === 'tab-' + name);
   });
   if (name === 'codeprojects') loadCodeProjects();
-  if (name === 'files' && !filesLoadedOnce) { filesLoadedOnce = true; exInit(); loadFileList(''); }
+  if (name === 'files' && !filesLoadedOnce) { filesLoadedOnce = true; exInit(); exLoadRoots(); loadFileList(''); }
   if (name === 'email' && !emailInitedOnce) { emailInitedOnce = true; initEmailTab(); }
   if (name === 'calendar' && !calendarInitedOnce) { calendarInitedOnce = true; initCalendarTab(); }
   if (name === 'skills' && !skillsInitedOnce) { skillsInitedOnce = true; loadSkills(); }
@@ -6325,7 +6353,9 @@ async function saveGeneratedImage() {
 
 // ── File Explorer (Windows Explorer style) ────────────────────────────────────
 
-let fileCurrentPath = '';            // relative path under home ('' = root)
+let fileCurrentPath = '';            // absolute path ('' until the first /api/files/list reply sets it)
+let exHomePath = '';                 // absolute home path, learned from /api/files/roots
+let exRoots = { places: [], devices: [], network: [] }; // sidebar entries (Thunar-style)
 let exAllEntries = [];               // current listing: [{name, path, isDir, size, modified}]
 let exHistory = [];
 let exHistoryIdx = -1;
@@ -6526,22 +6556,92 @@ function exVisibleEntries() {
   return all;
 }
 
+// ── Sidebar (Thunar-style Places / Devices / Network) ───────────────────────
+
+async function exLoadRoots() {
+  try {
+    const r = await fetch(`${API}/api/files/roots`);
+    const data = await r.json();
+    exRoots = { places: data.places || [], devices: data.devices || [], network: data.network || [] };
+    exHomePath = exRoots.places[0]?.path || '';
+  } catch (err) {
+    // Sidebar is a convenience on top of the existing toolbar navigation —
+    // leave it empty rather than blocking the file list on this call.
+    console.error('Failed to load file roots:', err);
+  }
+  exRenderSidebar();
+  exRender();
+}
+
+function exSidebarSection(title, items, icon) {
+  if (!items.length) return '';
+  const rows = items.map(it =>
+    `<div class="ex-sidebar-item${it.path === fileCurrentPath ? ' active' : ''}" data-path="${escHtml(it.path)}" title="${escHtml(it.path)}">` +
+    `<span class="ex-sidebar-icon">${icon}</span><span>${escHtml(it.label)}</span></div>`
+  ).join('');
+  return `<div class="ex-sidebar-section"><div class="ex-sidebar-title">${escHtml(title)}</div>${rows}</div>`;
+}
+
+function exRenderSidebar() {
+  const el = document.getElementById('ex-sidebar');
+  if (!el) return;
+  const placeIcons = { Home: '🏠', Desktop: '🖥️', Documents: '📄', Downloads: '⬇️', Pictures: '🖼️', Videos: '🎬', Music: '🎵' };
+  const placesHtml = exRoots.places.map(it =>
+    `<div class="ex-sidebar-item${it.path === fileCurrentPath ? ' active' : ''}" data-path="${escHtml(it.path)}" title="${escHtml(it.path)}">` +
+    `<span class="ex-sidebar-icon">${placeIcons[it.label] || '📁'}</span><span>${escHtml(it.label)}</span></div>`
+  ).join('');
+  el.innerHTML =
+    `<div class="ex-sidebar-section"><div class="ex-sidebar-title">Places</div>${placesHtml}</div>` +
+    exSidebarSection('Devices', exRoots.devices, '💾') +
+    exSidebarSection('Network', exRoots.network, '🌐');
+  el.querySelectorAll('.ex-sidebar-item').forEach(row => {
+    row.addEventListener('click', () => exNavigate(row.dataset.path));
+  });
+}
+
+// Which known root (home, or a device/network entry) a given absolute path
+// falls under, for breadcrumb labeling — matches the same set exGoUp() uses
+// to know where a root's boundary is, so the two stay consistent.
+function exBreadcrumbFor(absPath) {
+  const roots = [
+    { label: '🏠 Home', path: exHomePath },
+    ...exRoots.devices.map(r => ({ label: '💾 ' + r.label, path: r.path })),
+    ...exRoots.network.map(r => ({ label: '🌐 ' + r.label, path: r.path })),
+  ].filter(r => r.path);
+  let best = null;
+  for (const r of roots) {
+    if (absPath === r.path || absPath.startsWith(r.path.replace(/\/$/, '') + '/')) {
+      if (!best || r.path.length > best.path.length) best = r;
+    }
+  }
+  if (!best) return [{ label: absPath || '/', path: absPath }];
+  const rest = absPath.slice(best.path.length).split('/').filter(Boolean);
+  const crumbs = [{ label: best.label, path: best.path }];
+  let acc = best.path;
+  for (const seg of rest) {
+    acc = acc.replace(/\/$/, '') + '/' + seg;
+    crumbs.push({ label: seg, path: acc });
+  }
+  return crumbs;
+}
+
 function exRender() {
   const list = document.getElementById('file-list');
-  // Breadcrumb: 🏠 Home + one crumb per path segment
-  const parts = fileCurrentPath ? fileCurrentPath.split('/').filter(Boolean) : [];
-  let bc = `<span class="ex-crumb" data-path="" title="Home">🏠 Home</span>`;
-  parts.forEach((p, i) => {
-    bc += `<span class="ex-crumb-sep">▸</span><span class="ex-crumb" data-path="${escHtml(parts.slice(0, i + 1).join('/'))}" title="${escHtml(p)}">${escHtml(p)}</span>`;
-  });
-  document.getElementById('ex-breadcrumb').innerHTML = bc;
+  // Breadcrumb: root label (🏠 Home, or the matching sidebar device/network
+  // entry) + one crumb per path segment beneath it.
+  const crumbs = exBreadcrumbFor(fileCurrentPath);
+  document.getElementById('ex-breadcrumb').innerHTML = crumbs.map((c, i) =>
+    (i > 0 ? `<span class="ex-crumb-sep">▸</span>` : '') +
+    `<span class="ex-crumb" data-path="${escHtml(c.path)}" title="${escHtml(c.path)}">${escHtml(c.label)}</span>`
+  ).join('');
   // Sort indicators
   for (const k of ['name', 'modified', 'type', 'size'])
     document.getElementById('ex-sort-' + k).textContent = k === exSortKey ? (exSortDir > 0 ? '▲' : '▼') : '';
   // Nav buttons
   document.getElementById('ex-back-btn').disabled = exHistoryIdx <= 0;
   document.getElementById('ex-fwd-btn').disabled = exHistoryIdx >= exHistory.length - 1;
-  document.getElementById('ex-up-btn').disabled = !fileCurrentPath;
+  document.getElementById('ex-up-btn').disabled = exWideRootPaths().has(fileCurrentPath);
+  exRenderSidebar();
   // Rows
   const entries = exVisibleEntries();
   let html = '';
@@ -6584,7 +6684,6 @@ function exRender() {
 
 async function loadFileList(path, pushHistory = true) {
   path = path || '';
-  fileCurrentPath = path;
   exSelected = null;
   const searchEl = document.getElementById('ex-search');
   if (searchEl) searchEl.value = '';
@@ -6596,13 +6695,17 @@ async function loadFileList(path, pushHistory = true) {
     document.getElementById('file-list').innerHTML = `<div style="padding:16px;color:var(--danger);font-size:12px">Error: ${escHtml(err.message)}</div>`;
     return;
   }
+  // The backend resolves '' / relative input to an absolute path (and 403s
+  // outside the wide roots) — track what it actually resolved to, not the
+  // raw request, so history/breadcrumbs/up-navigation stay in absolute terms.
+  fileCurrentPath = data.current_path || path;
   exAllEntries = [
     ...(data.dirs || []).map(d => ({ ...d, isDir: true })),
     ...(data.files || []).map(f => ({ ...f, isDir: false })),
   ];
   if (pushHistory || exHistoryIdx === -1) {
     exHistory = exHistory.slice(0, exHistoryIdx + 1);
-    exHistory.push(path);
+    exHistory.push(fileCurrentPath);
     exHistoryIdx = exHistory.length - 1;
   }
   exRender();
@@ -6612,7 +6715,18 @@ function exNavigate(path) { loadFileList(path, true); }
 function exRefresh() { loadFileList(fileCurrentPath, false); }
 function exBack() { if (exHistoryIdx > 0) { exHistoryIdx--; loadFileList(exHistory[exHistoryIdx], false); } }
 function exForward() { if (exHistoryIdx < exHistory.length - 1) { exHistoryIdx++; loadFileList(exHistory[exHistoryIdx], false); } }
-function exGoUp() { if (!fileCurrentPath) return; const parts = fileCurrentPath.split('/').filter(Boolean); parts.pop(); loadFileList(parts.join('/'), true); }
+
+// A "wide root" (home, or a mounted device/network share) is the top of its
+// branch — the backend rejects anything above it, so Up must stop there too.
+function exWideRootPaths() {
+  return new Set([exHomePath, ...exRoots.devices.map(d => d.path), ...exRoots.network.map(d => d.path)].filter(Boolean));
+}
+function exGoUp() {
+  if (!fileCurrentPath || exWideRootPaths().has(fileCurrentPath)) return;
+  const parts = fileCurrentPath.split('/').filter(Boolean);
+  parts.pop();
+  loadFileList('/' + parts.join('/'), true);
+}
 function exFind(path) { return exAllEntries.find(e => e.path === path); }
 function exOpen(path, isDir) { if (isDir) loadFileList(path, true); else fileOpen(path); }
 
@@ -6709,10 +6823,11 @@ async function fileOpen(path) {
     });
     const data = await r.json();
     if (data.content !== undefined) {
-      document.getElementById('file-editor-path').textContent = '~/' + path;
+      const shown = exHomePath && data.path.startsWith(exHomePath + '/') ? '~' + data.path.slice(exHomePath.length) : data.path;
+      document.getElementById('file-editor-path').textContent = shown;
       document.getElementById('file-editor').value = data.content;
       document.getElementById('file-editor-area').style.display = 'flex';
-      document.getElementById('file-editor').dataset.path = path;
+      document.getElementById('file-editor').dataset.path = data.path;
     }
   } catch (err) {
     alert('Error reading file: ' + err.message);

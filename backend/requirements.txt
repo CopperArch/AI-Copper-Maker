@@ -11,3 +11,4 @@ caldav>=1.2,<2
 icalendar>=5.0,<7
 apscheduler>=3.10,<4
 androguard>=3.5
+agent-client-protocol>=0.12,<1  # backend/acp_bridge.py — exposes AI Copper Maker as a Zed agent
