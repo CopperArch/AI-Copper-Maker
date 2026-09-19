@@ -106,6 +106,13 @@
     outline: none;
   }
   select:focus, input:focus, textarea:focus { border-color: var(--accent2); }
+  /* The open <select> popup is OS/browser-rendered and often ignores the
+     app's dark background, falling back to a light one — the near-white
+     --text color from the rule above then becomes invisible once opened.
+     Force black text on the model list's options/optgroups (the open
+     popup) while leaving the closed control's own color untouched so it
+     stays readable against the dark sidebar. */
+  #model-select option, #model-select optgroup { color: #000; }
 
   /* ── Password show/hide toggle (used on every password field in the app) ── */
   .pw-wrap { position: relative; flex: 1; min-width: 160px; }
