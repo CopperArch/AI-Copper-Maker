@@ -2119,12 +2119,14 @@ async function checkStatus() {
     const d = await r.json();
     const dot = document.getElementById('status-dot');
     const txt = document.getElementById('status-text');
-    if (d.ollama) {
-      dot.className = 'status-dot ok'; txt.textContent = 'Ollama connected';
-      await loadModels();
-    } else {
-      dot.className = 'status-dot'; txt.textContent = 'Ollama disconnected';
-    }
+    dot.className = d.ollama ? 'status-dot ok' : 'status-dot';
+    txt.textContent = d.ollama ? 'Ollama connected' : 'Ollama disconnected';
+    // Always reload — this repopulates Local, LM Studio, llama.cpp, AND
+    // Cloud optgroups, not just Ollama's own models, so it must not be
+    // gated on Ollama's connection status specifically (was previously
+    // `if (d.ollama) await loadModels()`, which left the whole selector
+    // empty on Ollama-less / not-yet-started setups).
+    await loadModels();
     lmDot.className = d.lmstudio ? 'status-dot ok' : 'status-dot';
     lmTxt.textContent = d.lmstudio ? 'LM Studio connected' : 'LM Studio disconnected';
     if (llDot) { llDot.className = d.llama_cpp ? 'status-dot ok' : 'status-dot'; }
