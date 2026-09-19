@@ -138,7 +138,11 @@ LLAMA_CPP = os.environ.get("LLAMA_CPP_HOST", "http://localhost:8080")
 LMS_BIN = shutil.which("lms") or str(
     Path.home() / ".lmstudio" / "bin" / ("lms.exe" if platform.system() == "Windows" else "lms")
 )
-API_KEYS_FILE = Path(__file__).parent.parent / "api_keys.json"
+_XDG_KEYS_FILE = Path.home() / ".config" / "ai-copper-maker" / "api_keys.json"
+API_KEYS_FILE = Path(os.environ.get("COPPERMAKER_API_KEYS_FILE") or _XDG_KEYS_FILE)
+_FALLBACK_KEYS_FILE = Path(__file__).parent.parent / "api_keys.json"
+if not API_KEYS_FILE.exists() and _FALLBACK_KEYS_FILE.exists():
+    API_KEYS_FILE = _FALLBACK_KEYS_FILE
 CLOUD_PROVIDERS = {
     "anthropic": {"label": "Claude (Anthropic)", "default_model": "claude-sonnet-5"},
     "openai": {"label": "ChatGPT (OpenAI)", "default_model": "gpt-6-astra"},
@@ -342,16 +346,31 @@ def _cost_summary() -> dict:
     }
 
 
+_API_KEY_ENV = {
+    "openrouter": "OPENROUTER_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "google": "GEMINI_API_KEY",
+    "groq": "GROQ_API_KEY",
+}
+
+
 def _load_api_keys() -> dict:
+    keys = {}
     if API_KEYS_FILE.exists():
         try:
-            return json.loads(API_KEYS_FILE.read_text())
+            keys = json.loads(API_KEYS_FILE.read_text())
         except json.JSONDecodeError:
-            return {}
-    return {}
+            keys = {}
+    for name, env_name in _API_KEY_ENV.items():
+        val = os.environ.get(env_name)
+        if val:
+            keys[name] = val
+    return keys
 
 
 def _save_api_keys(keys: dict):
+    API_KEYS_FILE.parent.mkdir(parents=True, exist_ok=True)
     API_KEYS_FILE.write_text(json.dumps(keys, indent=2))
     try:
         os.chmod(API_KEYS_FILE, 0o600)
@@ -2187,17 +2206,74 @@ def _safe_rglob(path: Path):
         for fname in filenames:
             yield Path(dirpath) / fname
 
+def _resolve_files_tab_path(raw_path: str) -> Path:
+    """Files-tab paths are absolute now (so a mounted drive can be reached,
+    not just locations under home) — but still tolerant of the old
+    home-relative form (empty, or a bare non-absolute string) so any
+    cached/in-flight frontend state from before this change keeps working."""
+    if not raw_path:
+        return Path.home().resolve()
+    p = Path(raw_path)
+    if not p.is_absolute():
+        p = Path.home() / raw_path
+    return p.resolve()
+
+# fstype prefixes that mean "this mount is a network share" for the Files
+# tab sidebar's Devices/Network split. Informational only — grouping doesn't
+# affect the actual access boundary, which stays _is_path_under_wide_roots()
+# for every endpoint below, same as the agent's own file tools.
+_NETWORK_FS_TYPES = ("nfs", "cifs", "smb", "smbfs", "9p", "fuse.sshfs", "fuse.rclone")
+
+def _mount_fstype_map() -> dict[str, str]:
+    fstypes: dict[str, str] = {}
+    try:
+        with open("/proc/mounts", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 3:
+                    fstypes[parts[1]] = parts[2]
+    except OSError:
+        pass
+    return fstypes
+
+@app.get("/api/files/roots")
+async def files_roots():
+    """Sidebar entries for the Files tab (Places / Devices / Network),
+    built from the same _wide_scan_roots() the agent's own file tools use —
+    reusing that boundary keeps the Files tab UI's reach and the agent's
+    reach consistent instead of maintaining a second mount-detection path."""
+    home = Path.home().resolve()
+    places = [{"label": "Home", "path": str(home)}]
+    for name in ("Desktop", "Documents", "Downloads", "Pictures", "Videos", "Music"):
+        sub = home / name
+        if sub.is_dir():
+            places.append({"label": name, "path": str(sub)})
+
+    fstypes = _mount_fstype_map()
+    devices, network = [], []
+    for root in _wide_scan_roots():
+        resolved = root.resolve()
+        if resolved == home:
+            continue
+        fstype = fstypes.get(str(resolved), "")
+        entry = {"label": resolved.name, "path": str(resolved)}
+        if fstype.startswith(_NETWORK_FS_TYPES):
+            network.append(entry)
+        else:
+            devices.append(entry)
+
+    return {"places": places, "devices": devices, "network": network}
+
 @app.get("/api/files/list")
 async def list_files(path: str = ""):
-    base = Path(BASE_PROJECTS).resolve()
-    target = (base / path).resolve() if path else base
-    if not target.is_relative_to(base):
+    target = _resolve_files_tab_path(path)
+    if not _is_path_under_wide_roots(target):
         raise HTTPException(403, "Path outside allowed directory")
     if not target.exists():
-        return {"files": [], "dirs": [], "current_path": path}
+        return {"files": [], "dirs": [], "current_path": str(target)}
     files, dirs = [], []
     for entry in _safe_iterdir(target):
-        item = {"name": entry.name, "path": str(entry.relative_to(base))}
+        item = {"name": entry.name, "path": str(entry)}
         st = _safe_stat(entry)
         item["modified"] = st.st_mtime if st else 0
         if entry.is_dir():
@@ -2205,54 +2281,50 @@ async def list_files(path: str = ""):
         else:
             item["size"] = st.st_size if st else 0
             files.append(item)
-    return {"files": files, "dirs": dirs, "current_path": path}
+    return {"files": files, "dirs": dirs, "current_path": str(target)}
 
 @app.post("/api/files/read")
 async def read_file(req: FileReadRequest):
-    base = Path(BASE_PROJECTS).resolve()
-    target = (base / req.path).resolve()
-    if not target.is_relative_to(base):
+    target = _resolve_files_tab_path(req.path)
+    if not _is_path_under_wide_roots(target):
         raise HTTPException(403, "Path outside allowed directory")
     if not target.is_file():
         raise HTTPException(404, "File not found")
     try:
         content = target.read_text(encoding="utf-8", errors="replace")
-        return {"content": content, "path": req.path}
+        return {"content": content, "path": str(target)}
     except Exception as e:
         raise HTTPException(500, f"Cannot read file: {e}")
 
 @app.post("/api/files/write")
 async def write_file(req: FileWriteRequest):
-    base = Path(BASE_PROJECTS).resolve()
-    target = (base / req.path).resolve()
-    if not target.is_relative_to(base):
+    target = _resolve_files_tab_path(req.path)
+    if not _is_path_under_wide_roots(target):
         raise HTTPException(403, "Path outside allowed directory")
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
         target.write_text(req.content)
-        return {"saved": True, "path": req.path}
+        return {"saved": True, "path": str(target)}
     except Exception as e:
         raise HTTPException(500, f"Cannot write file: {e}")
 
 @app.post("/api/files/mkdir")
 async def mkdir_file(req: FileMkdirRequest):
-    base = Path(BASE_PROJECTS).resolve()
-    target = (base / req.path).resolve()
-    if not target.is_relative_to(base) or target == base:
+    target = _resolve_files_tab_path(req.path)
+    if not _is_path_under_wide_roots(target) or target in {r.resolve() for r in _wide_scan_roots()}:
         raise HTTPException(403, "Path outside allowed directory")
     if target.exists():
         raise HTTPException(409, "An item with that name already exists")
     try:
         target.mkdir(parents=True)
-        return {"created": True, "path": req.path}
+        return {"created": True, "path": str(target)}
     except Exception as e:
         raise HTTPException(500, f"Cannot create folder: {e}")
 
 @app.post("/api/files/delete")
 async def delete_file(req: FileDeleteRequest):
-    base = Path(BASE_PROJECTS).resolve()
-    target = (base / req.path).resolve()
-    if not target.is_relative_to(base) or target == base:
+    target = _resolve_files_tab_path(req.path)
+    if not _is_path_under_wide_roots(target) or target in {r.resolve() for r in _wide_scan_roots()}:
         raise HTTPException(403, "Path outside allowed directory")
     if not target.exists():
         raise HTTPException(404, "Not found")
@@ -2262,15 +2334,14 @@ async def delete_file(req: FileDeleteRequest):
             shutil.rmtree(target)
         else:
             target.unlink()
-        return {"deleted": True, "path": req.path}
+        return {"deleted": True, "path": str(target)}
     except Exception as e:
         raise HTTPException(500, f"Cannot delete: {e}")
 
 @app.post("/api/files/rename")
 async def rename_file(req: FileRenameRequest):
-    base = Path(BASE_PROJECTS).resolve()
-    target = (base / req.path).resolve()
-    if not target.is_relative_to(base) or target == base:
+    target = _resolve_files_tab_path(req.path)
+    if not _is_path_under_wide_roots(target) or target in {r.resolve() for r in _wide_scan_roots()}:
         raise HTTPException(403, "Path outside allowed directory")
     if not target.exists():
         raise HTTPException(404, "Not found")
@@ -2282,7 +2353,7 @@ async def rename_file(req: FileRenameRequest):
         raise HTTPException(409, "An item with that name already exists")
     try:
         target.rename(dest)
-        return {"renamed": True, "old_path": req.path, "new_path": str(dest.relative_to(base))}
+        return {"renamed": True, "old_path": str(target), "new_path": str(dest)}
     except Exception as e:
         raise HTTPException(500, f"Cannot rename: {e}")
 
@@ -7355,9 +7426,21 @@ async def load_project(req: LoadProjectRequest):
 # with no auth layer. Files are gitignored and chmod'd 600 on write, and
 # passwords are never echoed back to the frontend.
 
-EMAIL_ACCOUNTS_FILE = Path(__file__).parent.parent / "email_accounts.json"
-CALENDAR_ACCOUNTS_FILE = Path(__file__).parent.parent / "calendar_accounts.json"
+EMAIL_ACCOUNTS_FILE = Path(os.environ.get("COPPERMAKER_EMAIL_ACCOUNTS_FILE") or (_XDG_KEYS_FILE.parent / "email_accounts.json"))
+CALENDAR_ACCOUNTS_FILE = Path(os.environ.get("COPPERMAKER_CALENDAR_ACCOUNTS_FILE") or (_XDG_KEYS_FILE.parent / "calendar_accounts.json"))
 CALENDAR_EVENTS_FILE = Path(__file__).parent.parent / "calendar_events.json"
+
+_FALLBACK_EMAIL_ACCOUNTS = Path(__file__).parent.parent / "email_accounts.json"
+_FALLBACK_CALENDAR_ACCOUNTS = Path(__file__).parent.parent / "calendar_accounts.json"
+if not EMAIL_ACCOUNTS_FILE.exists() and _FALLBACK_EMAIL_ACCOUNTS.exists():
+    EMAIL_ACCOUNTS_FILE = _FALLBACK_EMAIL_ACCOUNTS
+if not CALENDAR_ACCOUNTS_FILE.exists() and _FALLBACK_CALENDAR_ACCOUNTS.exists():
+    CALENDAR_ACCOUNTS_FILE = _FALLBACK_CALENDAR_ACCOUNTS
+
+_ACCOUNT_FILES = {
+    "email_accounts.json": EMAIL_ACCOUNTS_FILE,
+    "calendar_accounts.json": CALENDAR_ACCOUNTS_FILE,
+}
 
 def _load_json_list(path: Path) -> list:
     if path.exists():
@@ -7376,6 +7459,7 @@ def _load_skill_content(skill_name: str) -> str:
     return ""
 
 def _save_json_list(path: Path, data: list):
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2))
     try:
         os.chmod(path, 0o600)
@@ -9302,7 +9386,7 @@ async def export_backup():
             if p.exists():
                 zf.writestr(name, p.read_text())
         for name in BACKUP_ACCOUNT_FILES:
-            accounts = _load_json_list(base / name)
+            accounts = _load_json_list(_ACCOUNT_FILES[name])
             redacted = [_redact_account(a) for a in accounts]
             zf.writestr(name, json.dumps(redacted, indent=2))
         zf.writestr("_backup_meta.json", json.dumps({
@@ -9349,9 +9433,11 @@ async def import_backup(request: Request):
             json.loads(data)  # validate before writing anything to disk
         except (UnicodeDecodeError, json.JSONDecodeError):
             continue
-        (base / name).write_text(data)
+        dst = _ACCOUNT_FILES.get(name, base / name)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_text(data)
         try:
-            os.chmod(base / name, 0o600)
+            os.chmod(dst, 0o600)
         except OSError:
             pass
         restored.append(name)
