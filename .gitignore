@@ -7,6 +7,7 @@ calendar_accounts.json
 calendar_events.json
 skills.json
 skills/vendor/
+vendor/
 code_projects.json
 routines.json
 search_index.json
@@ -20,11 +21,12 @@ usage_cost.json
 .backup-pre-rev1.2/
 model_rankings_cache.json
 model_rankings_full.json
-openrouter_pricing_cache.json
-nanogpt_pricing_cache.json
-haimaker_pricing_cache.json
-opencodezen_pricing_cache.json
-groq_pricing_cache.json
+# One *_pricing_cache.json per live-pricing-fetcher gateway provider
+# (openrouter, nanogpt, haimaker, opencodezen, groq, and one per provider
+# registered from vendor/awesome-free-llm-apis) — a glob instead of hand-
+# listing each filename so a newly-registered provider's cache file doesn't
+# need a matching .gitignore edit to stay out of git.
+*_pricing_cache.json
 model_staleness_cache.json
 model_catalog_staleness_cache.json
 lsp_staleness_cache.json
