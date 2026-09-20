@@ -98,6 +98,122 @@ class AgentCoreTests(unittest.TestCase):
         right = {"content": "b" * 3000}
         self.assertNotEqual(main._tool_call_signature("write_file", left), main._tool_call_signature("write_file", right))
 
+    def test_slugify_provider_name_matches_existing_key_convention(self):
+        self.assertEqual(main._slugify_provider_name("NVIDIA NIM"), "nvidianim")
+        self.assertEqual(main._slugify_provider_name("Ollama Cloud"), "ollamacloud")
+        self.assertEqual(main._slugify_provider_name("Together AI (Free)"), "togetheraifree")
+
+    def test_register_free_llm_api_providers_wires_new_gateway(self):
+        fixture = {
+            "providers": [
+                {
+                    "name": "Testonly Cloud",
+                    "category": "inference_provider",
+                    "baseUrl": "https://api.testonly.example/v1",
+                    "models": [{"id": "testonly-model-1"}, {"id": "testonly-model-2"}],
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            data_path = Path(directory) / "data.json"
+            data_path.write_text(json.dumps(fixture))
+            with (
+                patch.object(main, "_FREE_LLM_APIS_DATA", data_path),
+                patch.object(main, "CLOUD_PROVIDERS", dict(main.CLOUD_PROVIDERS)),
+                patch.object(main, "OPENAI_COMPATIBLE_BASE_URLS", dict(main.OPENAI_COMPATIBLE_BASE_URLS)),
+                patch.object(main, "GATEWAY_MODEL_CHOICES", dict(main.GATEWAY_MODEL_CHOICES)),
+                patch.object(main, "GATEWAY_LIVE_PRICING_FETCHERS", dict(main.GATEWAY_LIVE_PRICING_FETCHERS)),
+                patch.object(main, "_API_KEY_ENV", dict(main._API_KEY_ENV)),
+            ):
+                main._register_free_llm_api_providers()
+
+                self.assertEqual(
+                    main.CLOUD_PROVIDERS["testonlycloud"],
+                    {"label": "Testonly Cloud (free)", "default_model": "testonly-model-1"},
+                )
+                self.assertEqual(main.OPENAI_COMPATIBLE_BASE_URLS["testonlycloud"], "https://api.testonly.example/v1")
+                self.assertEqual(
+                    main.GATEWAY_MODEL_CHOICES["testonlycloud"],
+                    [{"model": "testonly-model-1", "label": "testonly-model-1"}, {"model": "testonly-model-2", "label": "testonly-model-2"}],
+                )
+                self.assertTrue(callable(main.GATEWAY_LIVE_PRICING_FETCHERS["testonlycloud"]))
+                self.assertEqual(main._API_KEY_ENV["testonlycloud"], "TESTONLY_CLOUD_API_KEY")
+
+    def test_register_free_llm_api_providers_skips_unsuitable_entries(self):
+        fixture = {
+            "providers": [
+                # Already hand-curated — must not clobber the curated entry.
+                {
+                    "name": "Groq",
+                    "category": "inference_provider",
+                    "baseUrl": "https://should-not-win.example/v1",
+                    "models": [{"id": "should-not-appear"}],
+                },
+                # Templated base URL — no single fixed endpoint to store.
+                {
+                    "name": "Templated Thing",
+                    "category": "inference_provider",
+                    "baseUrl": "https://api.example.com/{region}/v1",
+                    "models": [{"id": "m1"}],
+                },
+                # No models listed.
+                {
+                    "name": "No Models Provider",
+                    "category": "inference_provider",
+                    "baseUrl": "https://api.nomodels.example/v1",
+                    "models": [],
+                },
+                # Non-OpenAI-compatible category — out of scope for this loader.
+                {
+                    "name": "Cohere",
+                    "category": "provider_api",
+                    "baseUrl": "https://api.cohere.ai/v1",
+                    "models": [{"id": "command-r"}],
+                },
+            ]
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            data_path = Path(directory) / "data.json"
+            data_path.write_text(json.dumps(fixture))
+            original_groq = dict(main.CLOUD_PROVIDERS["groq"])
+            with (
+                patch.object(main, "_FREE_LLM_APIS_DATA", data_path),
+                patch.object(main, "CLOUD_PROVIDERS", dict(main.CLOUD_PROVIDERS)),
+                patch.object(main, "OPENAI_COMPATIBLE_BASE_URLS", dict(main.OPENAI_COMPATIBLE_BASE_URLS)),
+                patch.object(main, "GATEWAY_MODEL_CHOICES", dict(main.GATEWAY_MODEL_CHOICES)),
+                patch.object(main, "GATEWAY_LIVE_PRICING_FETCHERS", dict(main.GATEWAY_LIVE_PRICING_FETCHERS)),
+                patch.object(main, "_API_KEY_ENV", dict(main._API_KEY_ENV)),
+            ):
+                main._register_free_llm_api_providers()
+
+                self.assertEqual(main.CLOUD_PROVIDERS["groq"], original_groq)
+                self.assertNotIn("templatedthing", main.CLOUD_PROVIDERS)
+                self.assertNotIn("nomodelsprovider", main.CLOUD_PROVIDERS)
+                self.assertNotIn("cohere", main.CLOUD_PROVIDERS)
+
+    def test_register_free_llm_api_providers_is_noop_without_vendored_clone(self):
+        with tempfile.TemporaryDirectory() as directory:
+            missing_path = Path(directory) / "data.json"
+            with (
+                patch.object(main, "_FREE_LLM_APIS_DATA", missing_path),
+                patch.object(main, "CLOUD_PROVIDERS", dict(main.CLOUD_PROVIDERS)) as providers,
+            ):
+                before = dict(providers)
+                main._register_free_llm_api_providers()
+                self.assertEqual(providers, before)
+
+    def test_register_free_llm_api_providers_is_noop_on_malformed_json(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data_path = Path(directory) / "data.json"
+            data_path.write_text("{not valid json")
+            with (
+                patch.object(main, "_FREE_LLM_APIS_DATA", data_path),
+                patch.object(main, "CLOUD_PROVIDERS", dict(main.CLOUD_PROVIDERS)) as providers,
+            ):
+                before = dict(providers)
+                main._register_free_llm_api_providers()
+                self.assertEqual(providers, before)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -152,7 +152,11 @@ CLOUD_PROVIDERS = {
     "haimaker": {"label": "haimaker.ai (any model)", "default_model": "anthropic/claude-sonnet-5"},
     "perplexity": {"label": "Perplexity (Sonar)", "default_model": "sonar-pro"},
     "opencodezen": {"label": "OpenCode Zen (any model)", "default_model": "big-pickle"},
-    "groq": {"label": "Groq (fast open models)", "default_model": "llama-3.3-70b-versatile"},
+    # llama-3.3-70b-versatile (the previous default) was deprecated by Groq
+    # on 2026-08-16 and no longer appears in its live lineup — confirmed via
+    # vendor/awesome-free-llm-apis's data (dated 2026-08-21, see its
+    # footnote 2) while wiring in that vendored provider list.
+    "groq": {"label": "Groq (fast open models)", "default_model": "openai/gpt-oss-120b"},
 }
 
 # These model ids (and the CLOUD_PROVIDERS defaults above) go stale — this
@@ -3861,6 +3865,17 @@ async def _test_cloud_key(provider: str, key: str) -> None:
         elif provider == "groq":
             r = await client.get("https://api.groq.com/openai/v1/models",
                                   headers={"Authorization": f"Bearer {key}"})
+        elif provider in OPENAI_COMPATIBLE_BASE_URLS:
+            # Generic fallback for any OPENAI_COMPATIBLE_BASE_URLS entry not
+            # already special-cased above (namely the providers registered
+            # from vendor/awesome-free-llm-apis) — hits the same /models
+            # endpoint each provider's live-pricing fetcher already uses.
+            # Some gateways serve /models unauthenticated (confirmed for
+            # nanogpt/opencodezen above) so this can't catch every possible
+            # bad key, but it's strictly better than the previous behavior
+            # for unlisted providers, which was to skip validation entirely.
+            r = await client.get(f"{OPENAI_COMPATIBLE_BASE_URLS[provider]}/models",
+                                  headers={"Authorization": f"Bearer {key}"})
         else:
             return
     if r.status_code != 200:
@@ -4963,6 +4978,126 @@ OPENAI_COMPATIBLE_BASE_URLS = {
     "opencodezen": "https://opencode.ai/zen/v1",
     "groq": "https://api.groq.com/openai/v1",
 }
+
+# ── Providers vendored from awesome-free-llm-apis ─────────────────────────
+# Optional companion clone tracking permanently-free LLM API gateways:
+#   git clone --depth=1 https://github.com/mnfst/awesome-free-llm-apis.git \
+#       vendor/awesome-free-llm-apis
+# Refreshed with a `git pull` in that directory rather than hand-copying
+# providers into this file — same reasoning as skills/vendor/ below, and the
+# same staleness problem MODEL_LIST_LAST_CHECKED calls out above: a
+# hand-typed provider/model list goes stale the moment a gateway changes its
+# lineup. If the clone isn't present, _register_free_llm_api_providers() is
+# a silent no-op and only the hand-curated providers above are available.
+_FREE_LLM_APIS_DATA = Path(__file__).parent.parent / "vendor" / "awesome-free-llm-apis" / "data.json"
+
+# Already integrated above under their own (hand-tuned) entries — skip so
+# this loader can't clobber a curated CLOUD_PROVIDERS entry with the
+# vendored list's generic one.
+_FREE_LLM_API_SKIP = {"google gemini", "groq", "openrouter"}
+
+# category=="inference_provider" entries this app's per-key
+# OPENAI_COMPATIBLE_BASE_URLS dispatch can't take as-is: Cloudflare Workers
+# AI's baseUrl is templated with {account_id} (no single fixed endpoint to
+# store per provider), and Kilo Code needs no API key at all and its
+# vendored data only documents its /models catalog path, not a confirmed
+# /chat/completions path — both would need bespoke handling this generic
+# loader doesn't do, so they're skipped rather than wired in half-verified.
+_FREE_LLM_API_UNSUPPORTED = {"cloudflare workers ai", "kilo code"}
+
+# Ollama Cloud's own listed baseUrl (https://ollama.com/api) is its native
+# API, a different request/response shape than the OpenAI-compatible one
+# _call_openai_compatible_cloud() needs — the vendored data's own footnote
+# confirms the OpenAI-compatible endpoint instead lives at /v1.
+_FREE_LLM_API_BASE_URL_OVERRIDES = {"ollama cloud": "https://ollama.com/v1"}
+
+
+def _slugify_provider_name(name: str) -> str:
+    """'NVIDIA NIM' -> 'nvidianim' — matches the existing no-space,
+    no-punctuation provider-key convention (openrouter, nanogpt, opencodezen)."""
+    return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
+def _free_llm_api_live_pricing_fetcher(provider: str, base_url: str):
+    """Builds a GATEWAY_LIVE_PRICING_FETCHERS entry for one vendored gateway,
+    same cached-fetch shape as _groq_live_pricing above. Every model these
+    permanently-free gateways list is free by definition — the whole reason
+    they're in awesome-free-llm-apis — so this only needs to confirm the key
+    works and echo back $0 pricing for whatever /models currently returns;
+    the model list itself is never hand-copied, which is exactly the
+    staleness problem the vendor/ approach exists to avoid."""
+    cache_file = Path(__file__).parent.parent / f"{provider}_pricing_cache.json"
+
+    async def _fetch() -> dict:
+        api_key = _load_api_keys().get(provider)
+        if not api_key:
+            return {}
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                r = await client.get(f"{base_url}/models", headers={"Authorization": f"Bearer {api_key}"})
+                if r.status_code != 200:
+                    return {}
+                data = r.json()
+        except Exception:
+            return {}
+        return {
+            m["id"]: {"model": m["id"], "input_per_mtok": 0.0, "output_per_mtok": 0.0, "is_free": True, "label": m["id"]}
+            for m in data.get("data", []) if m.get("id")
+        }
+
+    async def _live_pricing() -> dict:
+        return await _cached_gateway_pricing(cache_file, _fetch)
+
+    return _live_pricing
+
+
+def _register_free_llm_api_providers() -> None:
+    """Registers each still-supported 'inference_provider' gateway from
+    vendor/awesome-free-llm-apis/data.json into the same four tables a
+    hand-added provider goes into: CLOUD_PROVIDERS (key management + label),
+    OPENAI_COMPATIBLE_BASE_URLS (dispatch — these are all OpenAI-compatible
+    /chat/completions gateways, so _call_cloud_model's existing `elif
+    provider in OPENAI_COMPATIBLE_BASE_URLS` branch picks them up with no
+    dispatch changes), GATEWAY_MODEL_CHOICES (the Paid-card model picker),
+    and GATEWAY_LIVE_PRICING_FETCHERS (drives the Models tab's Free/Paid
+    split and the 429 same-cost-fallback in _call_openai_compatible_cloud).
+    data.json's 'provider_api' entries (Cohere, Mistral AI, Z AI, Aion Labs)
+    use bespoke, non-OpenAI-compatible request/response shapes — wiring
+    those in would mean a dedicated call function per provider, the same
+    scale of work anthropic/openai/google's native functions already are,
+    and hasn't been done here; this loader only handles the generic-gateway
+    half of the vendored list."""
+    if not _FREE_LLM_APIS_DATA.exists():
+        return
+    try:
+        data = json.loads(_FREE_LLM_APIS_DATA.read_text())
+    except (json.JSONDecodeError, OSError):
+        return
+    for entry in data.get("providers", []):
+        name = entry.get("name", "")
+        key_lower = name.lower()
+        if entry.get("category") != "inference_provider":
+            continue
+        if key_lower in _FREE_LLM_API_SKIP or key_lower in _FREE_LLM_API_UNSUPPORTED:
+            continue
+        base_url = _FREE_LLM_API_BASE_URL_OVERRIDES.get(key_lower, entry.get("baseUrl", ""))
+        if not base_url or "{" in base_url:  # templated URL (e.g. {account_id}) — no single endpoint to store
+            continue
+        model_ids = [m["id"] for m in entry.get("models", []) if m.get("id")]
+        if not model_ids:
+            continue
+        slug = _slugify_provider_name(name)
+        if slug in CLOUD_PROVIDERS:
+            continue  # already hand-curated (or already registered) — first-registered wins
+        CLOUD_PROVIDERS[slug] = {"label": f"{name} (free)", "default_model": model_ids[0]}
+        OPENAI_COMPATIBLE_BASE_URLS[slug] = base_url
+        GATEWAY_MODEL_CHOICES[slug] = [{"model": mid, "label": mid} for mid in model_ids]
+        GATEWAY_LIVE_PRICING_FETCHERS[slug] = _free_llm_api_live_pricing_fetcher(slug, base_url)
+        _API_KEY_ENV[slug] = f"{re.sub(r'[^A-Z0-9]', '_', name.upper())}_API_KEY"
+
+
+_register_free_llm_api_providers()
+
 
 async def _free_models_for_provider(provider: str) -> list[str]:
     """Model ids currently priced at $0 on this gateway, via the same cached
