@@ -2122,6 +2122,16 @@ def _wide_scan_roots() -> list[Path]:
     expose /etc, /root, and other users' home directories for zero benefit
     (nothing a user's own project would ever live in)."""
     roots = [Path.home()]
+    # Inside the Docker container the repo is bind-mounted at /app (the same
+    # files as ~/AI-Copper-Maker on the host). It is not literally under the
+    # home directory, so without this every /app/... path a model naturally
+    # probes gets "Access denied" and real "look through the project" tasks
+    # can't make progress. The host runs a second instance of this app
+    # directly (no /app mount) — there the append is skipped, so tool reach
+    # stays identical on both.
+    app_mount = Path("/app")
+    if app_mount.is_dir():
+        roots.append(app_mount)
     for pattern in ("/run/media/*/*", "/media/*", "/mnt/*"):
         roots.extend(Path(p) for p in glob.glob(pattern) if Path(p).is_dir())
     return roots
@@ -5392,8 +5402,12 @@ def _agent_tool_instructions() -> str:
         arg_desc = ", ".join(f'"{p}"' + ("" if p in required else " (optional)") for p in params) or "no arguments"
         lines.append(f"- {fn['name']}({arg_desc}): {fn['description']}")
     tool_list = "\n".join(lines)
+    app_hint = (" plus /app (the container bind-mount carrying this project's code — "
+                "reach the repo with /app/... paths like /app/backend/main.py)") if Path("/app").is_dir() else ""
     return f"""You have tools available. These are the ONLY real tools — never invent a tool name, and always use the exact argument names shown here (don't guess or rename them):
 {tool_list}
+
+All file tools (list_files, read_file, write_file, edit_file, grep_files, search_files, run tools) are confined to the home directory and mounted drives{app_hint}. Paths are relative to that scope unless they start with a scope root.
 
 When you need to use a tool, your ENTIRE response must be ONLY this — no narration, no explanation before or after, nothing else on the line:
 ```tool
@@ -6007,6 +6021,16 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
     # tool use at all) never fires an extra LLM call for nothing.
     used_learnable_tool = False
     consecutive_errors = 0
+    # Exact-name+args signature of every tool call this run has completed
+    # (blocked repeats included). If the model re-issues the identical call,
+    # we skip execution and hand the earlier result back instead of looping.
+    executed_calls: dict = {}
+    # Whole-loop guard against compacting the same conversation over and over:
+    # after a fold, demand a few fresh turns of real detail before folding
+    # again, and never fold right after a tool result the model hasn't acted
+    # on yet (folding mid-round-trip is what makes local models "forget" what
+    # they were doing and re-issue the same calls).
+    turns_since_compact = 0
     for turn in range(max_turns):
         if consecutive_errors >= 3:
             yield {"type": "error", "content": f"Too many consecutive errors ({consecutive_errors}). Stopping agent loop.", "conversation": conv}
@@ -6022,9 +6046,15 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
             try:
                 window = await _model_context_window(model)
                 used = (usage.get("prompt_eval_count") or 0) + (usage.get("eval_count") or 0)
-                if window and used > window * 0.75 and len(conv) >= 10:
+                last_role = conv[-1].get("role") if conv else ""
+                mid_round = bool(conv) and last_role == "tool"
+                if (window and used > window * 0.75 and len(conv) >= 10
+                        and turns_since_compact >= 3 and not mid_round):
                     new_conv, _summary = await _compact_conv(conv, keep_last=6, model=model)
                     conv[:] = new_conv
+                    turns_since_compact = 0
+                elif conv:
+                    turns_since_compact += 1
             except Exception:
                 pass  # best-effort — never kill the turn over a failed compaction
 
@@ -6245,6 +6275,33 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
 
         tool_name = tool_spec["name"]
         tool_args = tool_spec.get("arguments", {}) or {}
+
+        # Anti-loop guard: stash a signature of every call we've actually
+        # executed this run. If the model reaches for the EXACT same tool +
+        # arguments again, that's a loop (typically triggered when compaction
+        # has blurred memory, or a weak local model fixates on one step) — so
+        # refuse to re-run it and feed the earlier result right back inline,
+        # forcing progress instead of burning turns/GPU repeating work.
+        sig = f"{tool_name}|{json.dumps(tool_args, sort_keys=True, ensure_ascii=False)[:2000]}"
+        if sig in executed_calls:
+            prior = _clip_for_model(executed_calls[sig] or "")
+            blocked = (
+                f"⚠️ Repeated tool call blocked: you already ran this EXACT call "
+                f"(`{tool_name}`) with identical arguments earlier in this task, so "
+                f"re-running it would just repeat work we've already done.\n\n"
+                f"Earlier result (repeated here so you don't need to search history):\n"
+                f"{prior[:3000]}\n"
+                f"Continue from here — use the information above, change your arguments "
+                f"or approach, ask the user a question, or give your final answer. "
+                f"Do NOT re-issue this identical call again."
+            )
+            yield {"type": "tool_call", "name": tool_name, "arguments": tool_args}
+            yield {"type": "tool_result", "name": tool_name, "result": _clip_for_model(blocked)}
+            conv.append({"role": "assistant", "content": response_text[:cut_at]})
+            conv.append({"role": "tool", "content": f"Result of {tool_name}: {_clip_for_model(blocked)}"})
+            continue
+        executed_calls[sig] = ""
+
         if tool_name in ("execute_code", "run_command", "web_search", "edit_file",
                          "write_file", "grep_files", "task"):
             used_learnable_tool = True
@@ -6309,6 +6366,7 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
         # the file is clean.
         if tool_name in ("edit_file", "write_file"):
             result += await _lsp_feedback_for_path(str(tool_args.get("path", "")))
+        executed_calls[sig] = _clip_for_model(result)
         yield {"type": "tool_result", "name": tool_name, "result": _clip_for_model(result)}
 
         # Truncate to just the matched call — a weaker model sometimes crams a
@@ -7442,13 +7500,27 @@ _ACCOUNT_FILES = {
     "calendar_accounts.json": CALENDAR_ACCOUNTS_FILE,
 }
 
+_JSON_LIST_CACHE: dict = {}
+
 def _load_json_list(path: Path) -> list:
-    if path.exists():
-        try:
-            return json.loads(path.read_text())
-        except json.JSONDecodeError:
-            return []
-    return []
+    """Read a JSON list from disk, cached by (path, mtime) so per-turn
+    callers (build_system_prompt, _relevant_skills_hint) inside the agent
+    loop stop re-parsing large files like skills.json (37MB) on every turn.
+    _save_json_list writes update the file's mtime, so the cache never
+    serves stale data across a write."""
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return []
+    cached = _JSON_LIST_CACHE.get(str(path))
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+    try:
+        data = json.loads(path.read_text())
+    except json.JSONDecodeError:
+        data = []
+    _JSON_LIST_CACHE[str(path)] = (mtime, data)
+    return data
 
 def _load_skill_content(skill_name: str) -> str:
     """Load a skill's full instructions from skills.json by name. Returns
