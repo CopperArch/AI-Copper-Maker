@@ -2406,31 +2406,42 @@ async def upload_file(request: Request):
 
 @app.post("/api/files/search")
 async def search_files(req: FileSearchRequest):
+    # Mirrors the agent-tool "search_files" dispatch branch: an explicit
+    # absolute path (e.g. a mounted drive under /run/media, /media, /mnt)
+    # must resolve there, not get silently forced under `base` — pathlib's
+    # `/` operator already returns the absolute path as-is when joined, but
+    # the old `is_relative_to(base)` check then rejected that same path
+    # with a 403 since it wasn't under home. Use the shared wide-roots
+    # helpers so this endpoint has the same reach as the tool version.
     base = Path(BASE_PROJECTS).resolve()
-    search_path = (base / req.path).resolve() if req.path else base
-    if not search_path.is_relative_to(base):
-        raise HTTPException(403, "Path outside allowed directory")
-    if not search_path.exists():
+    search_roots = _search_roots(req.path, base)
+    for root in search_roots:
+        if not _is_path_under_wide_roots(root):
+            raise HTTPException(403, "Path outside allowed directory")
+    if req.path and not search_roots[0].exists():
         return {"results": []}
 
     from fnmatch import fnmatch
     results = []
-    for entry in _safe_rglob(search_path):
+    for search_path in search_roots:
         if len(results) >= 500:
-            break  # searching the whole home directory can otherwise return an enormous list
-        if entry.is_file():
-            rel = str(entry.relative_to(base))
-            if fnmatch(entry.name, req.pattern) or fnmatch(rel, req.pattern):
-                st = _safe_stat(entry)
-                size = st.st_size if st else 0
-                if req.content_search:
-                    try:
-                        content = entry.read_text(encoding="utf-8", errors="replace")[:2000]
-                        results.append({"path": rel, "size": size, "preview": content[:200]})
-                    except Exception:
-                        results.append({"path": rel, "size": size, "preview": "[binary]"})
-                else:
-                    results.append({"path": rel, "size": size})
+            break
+        for entry in _safe_rglob(search_path):
+            if len(results) >= 500:
+                break  # searching the whole home directory can otherwise return an enormous list
+            if entry.is_file():
+                rel = _rel_display(entry, base)
+                if fnmatch(entry.name, req.pattern) or fnmatch(rel, req.pattern):
+                    st = _safe_stat(entry)
+                    size = st.st_size if st else 0
+                    if req.content_search:
+                        try:
+                            content = entry.read_text(encoding="utf-8", errors="replace")[:2000]
+                            results.append({"path": rel, "size": size, "preview": content[:200]})
+                        except Exception:
+                            results.append({"path": rel, "size": size, "preview": "[binary]"})
+                    else:
+                        results.append({"path": rel, "size": size})
     return {"results": results}
 
 
@@ -2815,7 +2826,8 @@ TOOLS = [
                 "type": "object",
                 "properties": {
                     "description": {"type": "string", "description": "Complete, self-contained description of the sub-task — the subagent sees ONLY this, with no other conversation context."},
-                    "max_turns": {"type": "integer", "description": "Optional cap on the subagent's tool-use turns (default 12, max 20)"}
+                    "max_turns": {"type": "integer", "description": "Optional cap on the subagent's tool-use turns (default 12, max 20)"},
+                    "agent": {"type": "string", "description": "Optional exact name of a specialist agent (from the system prompt's agent directory) whose persona/instructions should drive the subagent."}
                 },
                 "required": ["description"]
             }
@@ -5407,7 +5419,7 @@ def _agent_tool_instructions() -> str:
     return f"""You have tools available. These are the ONLY real tools — never invent a tool name, and always use the exact argument names shown here (don't guess or rename them):
 {tool_list}
 
-All file tools (list_files, read_file, write_file, edit_file, grep_files, search_files, run tools) are confined to the home directory and mounted drives{app_hint}. Paths are relative to that scope unless they start with a scope root.
+All file tools (list_files, read_file, write_file, edit_file, grep_files, search_files, run_command) are confined to the home directory and mounted drives{app_hint}. Paths are relative to that scope unless they start with a scope root.
 
 When you need to use a tool, your ENTIRE response must be ONLY this — no narration, no explanation before or after, nothing else on the line:
 ```tool
@@ -5965,6 +5977,68 @@ for _name, _desc in [("execute_code", "Run code in a sandboxed environment"),
     register_tool(LegacyToolAdapter(_name, _desc))
 
 
+def _should_auto_compact(conv: list, usage: dict | None, window: int,
+                          turns_since_compact: int, turn: int) -> bool:
+    """True when the always-on auto-compaction should fire this turn:
+    crossed 75% of the model's effective context window, the conversation
+    is long enough to be worth folding, and enough fresh turns have passed
+    since the last fold (so the same conversation doesn't get compacted
+    over and over). Deliberately does NOT special-case a trailing
+    tool-result message — an earlier "never fold mid-round-trip" guard
+    blocked compaction whenever the last message was a tool result, which
+    is true on nearly every turn of an active tool-using loop, so it
+    effectively disabled auto-compaction for exactly the runs that need it
+    most. `_compact_conv`'s `keep_last` tail already keeps the most recent
+    exchange intact after a fold, which is what that guard was trying to
+    protect."""
+    if turn <= 0 or not usage or not window:
+        return False
+    used = (usage.get("prompt_eval_count") or 0) + (usage.get("eval_count") or 0)
+    return used > window * 0.75 and len(conv) >= 10 and turns_since_compact >= 3
+
+
+def _normalize_provider_usage(raw: dict) -> dict:
+    """Normalize a provider's token-usage dict onto Ollama's
+    prompt_eval_count/eval_count keys, whichever shape it arrived in:
+    Ollama-native (already prompt_eval_count/eval_count), OpenAI-compatible
+    (prompt_tokens/completion_tokens, used by LM Studio/llama.cpp/OpenAI),
+    or Anthropic-style (input_tokens/output_tokens). Auto-compaction and the
+    token-usage UI both key off prompt_eval_count/eval_count, so every
+    provider path needs to land there regardless of what it's called
+    upstream — previously each streaming branch computed this inline, with
+    its own copy of the same two-key mapping."""
+    if not raw:
+        return {}
+    prompt = raw.get("prompt_eval_count", raw.get("prompt_tokens", raw.get("input_tokens", 0)))
+    completion = raw.get("eval_count", raw.get("completion_tokens", raw.get("output_tokens", 0)))
+    return {**raw, "prompt_eval_count": prompt, "eval_count": completion}
+
+
+def _native_tool_call_to_fence(call: dict) -> str:
+    """Convert an accumulated native tool call — {"name":..., "input": <JSON
+    string of arguments>}, built up from OpenAI/Ollama-style streamed
+    tool_calls — into the internal ```tool fence format `_extract_tool_call`
+    parses. Without this, a native tool call was only ever surfaced as
+    tool_use_* UI events: it never made it into `response_text`, so
+    `_extract_tool_call` found nothing and the agent loop silently treated
+    a real tool call as a plain (usually empty) final answer."""
+    try:
+        args = json.loads(call.get("input") or "{}")
+    except json.JSONDecodeError:
+        args = {}
+    return "```tool\n" + json.dumps({"name": call.get("name", ""), "arguments": args}) + "\n```"
+
+
+def _tool_call_signature(name: str, args: dict) -> str:
+    """Canonical dedup key for the anti-repeat-loop guard. Must hash the
+    FULL canonical argument payload, not a truncated prefix — truncating
+    let two large-but-different calls (e.g. two write_file calls whose
+    content differs only after the first couple KB) collide onto the same
+    signature and get incorrectly treated as an exact repeat, silently
+    discarding real work instead of executing it."""
+    return f"{name}|{json.dumps(args, sort_keys=True, ensure_ascii=False)}"
+
+
 async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str = "",
                        allow_sudo: bool = True, allow_subagents: bool = True, tier: str = "free",
                        continuous: bool = True):
@@ -6045,11 +6119,7 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
         if turn > 0 and usage:
             try:
                 window = await _model_context_window(model)
-                used = (usage.get("prompt_eval_count") or 0) + (usage.get("eval_count") or 0)
-                last_role = conv[-1].get("role") if conv else ""
-                mid_round = bool(conv) and last_role == "tool"
-                if (window and used > window * 0.75 and len(conv) >= 10
-                        and turns_since_compact >= 3 and not mid_round):
+                if _should_auto_compact(conv, usage, window, turns_since_compact, turn):
                     new_conv, _summary = await _compact_conv(conv, keep_last=6, model=model)
                     conv[:] = new_conv
                     turns_since_compact = 0
@@ -6091,8 +6161,7 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
                 # cloud usage into the same shape, keeping the extra cost /
                 # cached-token fields alongside for the cost display.
                 if cloud_usage:
-                    usage = {"prompt_eval_count": cloud_usage.get("input_tokens", 0),
-                             "eval_count": cloud_usage.get("output_tokens", 0), **cloud_usage}
+                    usage = _normalize_provider_usage(cloud_usage)
                 yield {"type": "token", "content": response_text}
             elif _is_lmstudio_model(model):
                 # The homegrown tool protocol above (```tool fence parsed out
@@ -6144,12 +6213,12 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
                                             yield {"type": "tool_use_delta", "id": tc_id, "input": tc_args}
                                 usage_field = data.get("usage")
                                 if usage_field:
-                                    usage = {"prompt_eval_count": usage_field.get("prompt_tokens", 0),
-                                              "eval_count": usage_field.get("completion_tokens", 0)}
+                                    usage = _normalize_provider_usage(usage_field)
                         if _pending_tool_call:
                             yield {"type": "tool_use_stop", "id": _pending_tool_call["id"],
                                    "name": _pending_tool_call["name"],
                                    "input": _pending_tool_call["input"]}
+                            response_text += _native_tool_call_to_fence(_pending_tool_call)
             elif _is_llama_cpp_model(model):
                 llama_model_id = model.split("/", 1)[1]
                 async with httpx.AsyncClient(timeout=120) as client:
@@ -6190,12 +6259,14 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
                                         if _pending_tool_call and tc_args:
                                             _pending_tool_call["input"] += tc_args
                                             yield {"type": "tool_use_delta", "id": tc_id, "input": tc_args}
-                                if data.get("usage"):
-                                    pass  # usage handled at end
+                                usage_field = data.get("usage")
+                                if usage_field:
+                                    usage = _normalize_provider_usage(usage_field)
                         if _pending_tool_call:
                             yield {"type": "tool_use_stop", "id": _pending_tool_call["id"],
                                    "name": _pending_tool_call["name"],
                                    "input": _pending_tool_call["input"]}
+                            response_text += _native_tool_call_to_fence(_pending_tool_call)
             else:
                 # Tool-format reliability needs determinism: at Ollama's
                 # default temperature (~0.8) the same prompt flip-flops
@@ -6244,12 +6315,14 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
                                                 yield {"type": "tool_use_delta", "id": tc_name,
                                                        "input": json.dumps(tc_args or {})}
                                     if data.get("done") and isinstance(data.get("prompt_eval_count"), int):
-                                        usage = {"prompt_eval_count": data["prompt_eval_count"],
-                                                  "eval_count": data.get("eval_count", 0)}
+                                        usage = _normalize_provider_usage(
+                                            {"prompt_eval_count": data["prompt_eval_count"],
+                                             "eval_count": data.get("eval_count", 0)})
                                     if data.get("done") and _pending_tool_call:
                                         yield {"type": "tool_use_stop", "id": _pending_tool_call["id"],
                                                "name": _pending_tool_call["name"],
                                                "input": _pending_tool_call["input"]}
+                                        response_text += _native_tool_call_to_fence(_pending_tool_call)
                                         _pending_tool_call = None
                                 except json.JSONDecodeError:
                                     pass
@@ -6257,6 +6330,7 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
                             yield {"type": "tool_use_stop", "id": _pending_tool_call["id"],
                                    "name": _pending_tool_call["name"],
                                    "input": _pending_tool_call["input"]}
+                            response_text += _native_tool_call_to_fence(_pending_tool_call)
         except Exception as e:
             consecutive_errors += 1
             yield {"type": "error", "content": str(e), "conversation": conv}
@@ -6282,7 +6356,7 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
         # has blurred memory, or a weak local model fixates on one step) — so
         # refuse to re-run it and feed the earlier result right back inline,
         # forcing progress instead of burning turns/GPU repeating work.
-        sig = f"{tool_name}|{json.dumps(tool_args, sort_keys=True, ensure_ascii=False)[:2000]}"
+        sig = _tool_call_signature(tool_name, tool_args)
         if sig in executed_calls:
             prior = _clip_for_model(executed_calls[sig] or "")
             blocked = (
@@ -7507,20 +7581,23 @@ def _load_json_list(path: Path) -> list:
     callers (build_system_prompt, _relevant_skills_hint) inside the agent
     loop stop re-parsing large files like skills.json (37MB) on every turn.
     _save_json_list writes update the file's mtime, so the cache never
-    serves stale data across a write."""
+    serves stale data across a write. Always returns a fresh copy of the
+    cached list — handing back the cached object itself let one caller's
+    in-place mutation (e.g. list.append) silently corrupt what every other
+    caller reads next, cache hit or not."""
     try:
         mtime = path.stat().st_mtime
     except OSError:
         return []
     cached = _JSON_LIST_CACHE.get(str(path))
     if cached is not None and cached[0] == mtime:
-        return cached[1]
+        return list(cached[1])
     try:
         data = json.loads(path.read_text())
     except json.JSONDecodeError:
         data = []
     _JSON_LIST_CACHE[str(path)] = (mtime, data)
-    return data
+    return list(data)
 
 def _load_skill_content(skill_name: str) -> str:
     """Load a skill's full instructions from skills.json by name. Returns
@@ -9072,8 +9149,13 @@ async def _compact_conv(conv: list, keep_last: int, model: str):
     if len(msgs) <= keep_last + 1:
         return msgs, None
     to_summarize, tail = msgs[:-keep_last], msgs[-keep_last:]
+    # Every message here is already capped at 2000 chars; the whole point of
+    # compaction is to fold this range into a summary before it's dropped,
+    # so silently slicing it down further (the old `[-40:]`) permanently
+    # threw away the earliest history — including the user's original goal
+    # on any conversation long enough to need compaction in the first place.
     transcript = "\n".join(
-        f"{m['role']}: {str(m.get('content', ''))[:2000]}" for m in to_summarize[-40:]
+        f"{m['role']}: {str(m.get('content', ''))[:2000]}" for m in to_summarize
     )
     prompt = f"""Summarize this AI-assistant conversation so work can continue seamlessly with only this summary in context. Keep: the user's actual goal(s), decisions made and by whom, files created/edited (with paths), commands run and their outcomes, bugs found/fixed, anything the model was mid-way through, and any explicitly stated preferences or constraints. Drop: pleasantries, narration, full file contents, and verbose tool output. Be dense — bullet points, no preamble.
 
