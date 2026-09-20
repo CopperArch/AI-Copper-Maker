@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AI Copper Maker</title>
+<title>AI CopperMaker</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/styles/github-dark.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/highlight.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.0/marked.min.js"></script>
@@ -110,6 +110,10 @@
      inherit the app's theme — force both colors explicitly on the model
      list's options/optgroups instead of leaving either to the OS default. */
   #model-select option, #model-select optgroup { color: #fff; background-color: #000; }
+  /* The closed model selector itself can get rendered on a light/white control
+     background by some OS/browser widgets — pin its text to a muted green
+     ("go") while the black dropdown list above keeps white text. */
+  #model-select { color: #2e7d32; }
 
   /* ── Password show/hide toggle (used on every password field in the app) ── */
   .pw-wrap { position: relative; flex: 1; min-width: 160px; }
@@ -639,6 +643,10 @@
   /* System prompt toggle */
   .system-toggle { font-size: 12px; color: var(--accent2); cursor: pointer; }
   .system-toggle:hover { text-decoration: underline; }
+  /* Agent-mode toggle (agent merged into Chat) */
+  .agent-mode-toggle { font-size: 12px; color: var(--muted); cursor: pointer; border-left: 1px solid var(--border); padding-left: 10px; margin-left: 6px; }
+  .agent-mode-toggle:hover { color: var(--accent2); }
+  .agent-mode-toggle.active { color: var(--accent2); font-weight: 600; }
   #system-prompt-box { margin-bottom: 10px; display: none; }
   #system-prompt { height: 80px; font-family: monospace; font-size: 12px; resize: vertical; }
 
@@ -1094,8 +1102,11 @@
         <label style="flex:1;margin:0">Conversations</label>
         <button class="conv-menu-btn" id="batch-delete-btn" title="Delete conversations" onclick="toggleBatchDelete()" style="display:block">🗑</button>
       </div>
-      <button class="btn btn-secondary btn-full btn-sm" onclick="newConversation()" style="margin-bottom:8px">
+      <button class="btn btn-secondary btn-full btn-sm" onclick="newConversation()" style="margin-bottom:6px">
         + New Chat
+      </button>
+      <button class="btn btn-secondary btn-full btn-sm" onclick="newAgentConversation()" style="margin-bottom:8px" title="Start a fresh autonomous agent task — it runs in the Chat tab, past ones stay in this list">
+        🤖 + New Agent Task
       </button>
       <div id="batch-delete-bar" style="display:none;align-items:center;gap:6px;font-size:11px;margin-bottom:8px;flex-wrap:wrap">
         <span style="flex:1;color:var(--muted)"><span id="batch-delete-count">0</span> selected</span>
@@ -1143,21 +1154,18 @@
     <div class="tabs-row">
       <button class="tabs-arrow" onclick="scrollTabs(-1)" title="Scroll left">‹</button>
       <div class="tabs" id="tabs-scroller">
-        <div class="tab" onclick="switchTab('models')">📦 Models</div>
-        <div class="tab active" onclick="switchTab('chat')">💬 Chat</div>
-        <div class="tab" onclick="switchTab('codeprojects')">🗂️ Projects</div>
-        <div class="tab" onclick="switchTab('analyze')">🔍 App Analyzer</div>
-        <div class="tab" onclick="switchTab('generate')">⚡ Generate Project</div>
-        <div class="tab" onclick="switchTab('runner')">▶ Run Code</div>
-        <div class="tab" onclick="switchTab('agent')">🤖 Agent</div>
-        <div class="tab" onclick="switchTab('files')">📁 Files</div>
-        <div class="tab" onclick="switchTab('search')">🌐 Search</div>
-        <div class="tab" onclick="switchTab('imagegen')">🎨 Image Gen</div>
-        <div class="tab" onclick="switchTab('email')">📧 Email</div>
-        <div class="tab" onclick="switchTab('calendar')">📅 Calendar</div>
-        <div class="tab" onclick="switchTab('skills')">🧠 Skills</div>
-        <div class="tab" onclick="switchTab('lessons')">📚 Lessons</div>
-        <div class="tab" onclick="switchTab('routines')">⏰ Routines</div>
+        <div class="tab" data-tab="models" onclick="switchTab('models')">📦 Models</div>
+        <div class="tab active" data-tab="chat" onclick="switchTab('chat')">💬 Chat</div>
+        <div class="tab" data-tab="analyze" onclick="switchTab('analyze')">🔍 App Analyzer</div>
+        <div class="tab" data-tab="generate" onclick="switchTab('generate')">⚡ Generate Project</div>
+        <div class="tab" data-tab="runner" onclick="switchTab('runner')">▶ Run Code</div>
+        <div class="tab" data-tab="files" onclick="switchTab('files')">📁 Files</div>
+        <div class="tab" data-tab="search" onclick="switchTab('search')">🌐 Search</div>
+        <div class="tab" data-tab="imagegen" onclick="switchTab('imagegen')">🎨 Image Gen</div>
+        <div class="tab" data-tab="email" onclick="switchTab('email')">📧 Email</div>
+        <div class="tab" data-tab="skills" onclick="switchTab('skills')">🧠 Skills</div>
+        <div class="tab" data-tab="lessons" onclick="switchTab('lessons')">📚 Lessons</div>
+        <div class="tab" data-tab="routines" onclick="switchTab('routines')">⏰ Routines</div>
       </div>
       <button class="tabs-arrow" onclick="scrollTabs(1)" title="Scroll right">›</button>
     </div>
@@ -1187,6 +1195,9 @@
           <span id="cost-count" style="font-size:11px;color:var(--muted);display:none"></span>
           <span id="queue-indicator" style="font-size:11px;color:var(--muted)"></span>
           <span class="system-toggle" onclick="toggleSystemPrompt()">⚙ System prompt</span>
+          <span class="agent-mode-toggle" id="agent-mode-toggle" onclick="toggleAgentMode()" title="Agent task mode — same tool loop as before, just living in Chat; can escalate to a paid model">🤖 Agent</span>
+          <span id="agent-tier-indicator" style="font-size:11px;color:var(--muted);display:none"></span>
+          <button class="btn btn-sm" id="agent-tier-btn" onclick="toggleAgentTier()" style="display:none;font-size:11px;padding:2px 10px;height:auto">⚡ free</button>
           <span style="font-size:11px;color:var(--muted);margin-left:auto">📎 Drop files or folders anywhere on chat</span>
         </div>
         <div class="activity-bar" id="chat-activity-bar"></div>
@@ -1199,40 +1210,6 @@
           <button class="btn btn-secondary" id="clear-input-btn" onclick="clearChatInput()" title="Clear what you've typed (and any attached files) — doesn't touch the conversation">🗑</button>
           <button class="btn btn-primary" id="send-btn" onclick="sendMessage()">Send</button>
           <button class="btn btn-secondary" id="stop-btn" onclick="stopStreaming()" style="display:none">■ Stop</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- Projects Tab -->
-    <div class="tab-panel" id="tab-codeprojects">
-      <div class="runner-layout">
-        <div class="runner-panel">
-          <div class="runner-toolbar">
-            <h2>🗂️ Projects</h2>
-            <span style="font-size:12px;color:var(--muted)">Code written in Chat is saved here automatically — one project per conversation. Execute it, find bugs, improve it, add features, or save it to disk.</span>
-          </div>
-
-          <div id="code-projects-list" class="runner-output" style="flex:0 0 auto;max-height:220px;overflow-y:auto">
-            <div class="runner-placeholder">No projects yet — write some code in Chat and it'll show up here.</div>
-          </div>
-
-          <div id="code-project-detail" style="display:none;flex:1;flex-direction:column;gap:10px;min-height:0">
-            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
-              <h3 id="cp-detail-name" style="font-size:14px;margin:0"></h3>
-              <div style="display:flex;gap:6px;flex-wrap:wrap">
-                <button class="btn btn-accent btn-sm" onclick="cpExecute()">▶ Execute</button>
-                <button class="btn btn-secondary btn-sm" onclick="cpAnalyze('bugs')">🐛 Find Bugs</button>
-                <button class="btn btn-secondary btn-sm" onclick="cpAnalyze('improve')">✨ Improve Code</button>
-                <button class="btn btn-secondary btn-sm" onclick="cpAddFeaturePrompt()">➕ Add Feature</button>
-                <button class="btn btn-secondary btn-sm" onclick="cpAnalyze('suggest')">💡 Suggest Features</button>
-                <button class="btn btn-secondary btn-sm" onclick="cpAgentSuggestions()">🤖 Agent Suggestions</button>
-                <button class="btn btn-secondary btn-sm" onclick="cpSaveToDisk()">💾 Save to Disk</button>
-              </div>
-            </div>
-            <div id="cp-file-tabs" style="display:flex;gap:6px;flex-wrap:wrap"></div>
-            <pre id="cp-code-view" style="flex:0 0 auto;max-height:240px;overflow:auto;background:#0d1117;border:1px solid var(--border);border-radius:6px;padding:10px;font-size:12px;white-space:pre-wrap"></pre>
-            <div id="cp-result-area" class="runner-output" style="flex:1;overflow-y:auto"></div>
-          </div>
         </div>
       </div>
     </div>
@@ -1441,32 +1418,6 @@
     </div>
 
     <!-- Agent Tab -->
-    <div class="tab-panel" id="tab-agent">
-      <div class="runner-layout">
-        <div class="runner-panel">
-          <div class="runner-toolbar">
-            <h2>🤖 Agent Mode</h2>
-            <span style="font-size:12px;color:var(--muted)">Autonomous agent with tool access: code execution, web search, file ops, image gen</span>
-            <button class="btn btn-secondary btn-sm" onclick="newAgentConversation()" style="margin-left:auto" title="Start a fresh agent task — past ones stay in the sidebar">+ New Agent Task</button>
-          </div>
-          <div id="agent-conversation" style="flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:12px;padding:12px 0">
-            <div class="analyze-placeholder" id="agent-placeholder">
-              <p>Enter a task below and the agent will use its tools to complete it autonomously.</p>
-            </div>
-          </div>
-          <div class="chat-input-area" style="border-top-color:var(--border)">
-<div class="input-row">
-               <textarea id="agent-input" placeholder="Describe what you want the agent to do... (Shift+Enter for new line)" rows="2" style="flex:1;resize:none;min-height:44px;max-height:120px;padding:10px 14px;border-radius:8px;font-size:14px;font-family:inherit;background:var(--bg);border:1px solid var(--border);color:var(--text)"></textarea>
-               <span id="agent-tier-indicator" style="font-size:11px;color:var(--muted);align-self:center;white-space:nowrap">free</span>
-               <button class="btn btn-sm" id="agent-tier-btn" onclick="toggleAgentTier()" style="height:44px;font-size:11px">⚡ free</button>
-               <button class="btn btn-accent" id="agent-run-btn" onclick="runAgent()" style="height:44px">▶ Run Agent</button>
-               <button class="btn btn-secondary" id="agent-stop-btn" onclick="stopAgent()" style="display:none">■ Stop</button>
-             </div>
-          </div>
-        </div>
-      </div>
-    </div>
-
     <!-- Files Tab (Windows Explorer style) -->
     <div class="tab-panel" id="tab-files">
       <div class="ex-body">
@@ -1738,59 +1689,55 @@
               <div class="peek-empty">Loading calendar…</div>
             </div>
           </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Calendar Tab -->
-    <div class="tab-panel" id="tab-calendar">
-      <div class="runner-layout">
-        <div class="runner-panel">
-          <div class="runner-toolbar">
-            <h2>📅 Calendar</h2>
-            <button class="btn btn-secondary btn-sm" onclick="loadPendingEvents()">↻ Refresh</button>
-            <button class="btn btn-secondary btn-sm" onclick="toggleCalendarSetup()">⚙ Accounts</button>
-          </div>
-
-          <div style="display:flex;gap:8px;align-items:center;flex-shrink:0;font-size:12px;color:var(--muted);flex-wrap:wrap">
-            <span>Subscribe-by-URL feed (add this as a "from URL" calendar in Outlook, Apple Calendar, Thunderbird, etc. on a device on this same network):</span>
-            <code id="calendar-feed-url" style="font-size:11px;background:rgba(255,255,255,.05);padding:2px 6px;border-radius:4px"></code>
-            <button class="btn btn-secondary btn-sm" onclick="copyFeedUrl()">Copy</button>
-          </div>
-          <div style="font-size:11px;color:var(--muted);flex-shrink:0">
-            ⚠ Google Calendar can't use this URL as-is — it's a private LAN address and Google's servers fetch subscribed
-            calendars from the public internet, not your local network. Only relevant if you've already exposed this
-            server publicly (e.g. a reverse proxy/port-forward, like the Nextcloud setup) — point Google at that address instead.
-          </div>
-
-          <div id="calendar-setup" style="display:none;padding:12px;border:1px solid var(--border);border-radius:8px;flex-direction:column;gap:8px;flex-shrink:0">
-            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding-bottom:8px;border-bottom:1px solid var(--border)">
-              <button class="btn btn-accent btn-sm" onclick="startGoogleSignIn()">🔵 Sign in with Google</button>
-              <span style="font-size:11px;color:var(--muted)">Real Google Calendar read/write (not just the one-way ICS feed below) — set up once in the Email tab's ⚙ Google setup.</span>
+          <!-- Calendar (merged into the Email tab — accounts, feed and pending
+          events all live alongside the inbox now) -->
+          <div id="email-calendar-section" style="border-top:1px solid var(--border);padding:10px 14px;display:flex;flex-direction:column;gap:10px;flex-shrink:0">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+              <h3 style="font-size:13px;margin:0">📅 Calendar</h3>
+              <button class="btn btn-secondary btn-sm" onclick="loadPendingEvents()">↻ Refresh</button>
+              <button class="btn btn-secondary btn-sm" onclick="toggleCalendarSetup()">⚙ Accounts</button>
             </div>
-            <div style="display:flex;gap:8px;flex-wrap:wrap">
-              <select id="calendar-provider-select" style="width:auto;min-width:180px" onchange="onCalendarProviderChange()"></select>
-              <input type="text" id="calendar-label" placeholder="Label (e.g. iCloud Calendar)" style="width:auto;flex:1;min-width:160px">
-              <input type="text" id="calendar-username" placeholder="Username / email" style="width:auto;flex:1;min-width:160px">
-              <div class="pw-wrap">
-                <input type="password" id="calendar-app-password" placeholder="App password">
-                <button type="button" class="pw-toggle-btn" tabindex="-1" onclick="togglePwVisibility('calendar-app-password', this)">👁</button>
+
+            <div style="display:flex;gap:8px;align-items:center;flex-shrink:0;font-size:12px;color:var(--muted);flex-wrap:wrap">
+              <span>Subscribe-by-URL feed (add this as a "from URL" calendar in Outlook, Apple Calendar, Thunderbird, etc. on a device on this same network):</span>
+              <code id="calendar-feed-url" style="font-size:11px;background:rgba(255,255,255,.05);padding:2px 6px;border-radius:4px"></code>
+              <button class="btn btn-secondary btn-sm" onclick="copyFeedUrl()">Copy</button>
+            </div>
+            <div style="font-size:11px;color:var(--muted);flex-shrink:0">
+              ⚠ Google Calendar can't use this URL as-is — it's a private LAN address and Google's servers fetch subscribed
+              calendars from the public internet, not your local network. Only relevant if you've already exposed this
+              server publicly (e.g. a reverse proxy/port-forward, like the Nextcloud setup) — point Google at that address instead.
+            </div>
+
+            <div id="calendar-setup" style="display:none;padding:12px;border:1px solid var(--border);border-radius:8px;flex-direction:column;gap:8px;flex-shrink:0">
+              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding-bottom:8px;border-bottom:1px solid var(--border)">
+                <button class="btn btn-accent btn-sm" onclick="startGoogleSignIn()">🔵 Sign in with Google</button>
+                <span style="font-size:11px;color:var(--muted)">Real Google Calendar read/write (not just the one-way ICS feed below) — set up once in the Email tab's ⚙ Google setup.</span>
               </div>
+              <div style="display:flex;gap:8px;flex-wrap:wrap">
+                <select id="calendar-provider-select" style="width:auto;min-width:180px" onchange="onCalendarProviderChange()"></select>
+                <input type="text" id="calendar-label" placeholder="Label (e.g. iCloud Calendar)" style="width:auto;flex:1;min-width:160px">
+                <input type="text" id="calendar-username" placeholder="Username / email" style="width:auto;flex:1;min-width:160px">
+                <div class="pw-wrap">
+                  <input type="password" id="calendar-app-password" placeholder="App password">
+                  <button type="button" class="pw-toggle-btn" tabindex="-1" onclick="togglePwVisibility('calendar-app-password', this)">👁</button>
+                </div>
+              </div>
+              <div id="calendar-custom-url" style="display:none;gap:8px">
+                <input type="text" id="calendar-caldav-url" placeholder="CalDAV base URL" style="width:auto;flex:1">
+              </div>
+              <div id="calendar-provider-note" style="font-size:11px;color:var(--muted)"></div>
+              <div style="display:flex;gap:8px;align-items:center">
+                <button class="btn btn-accent btn-sm" onclick="addCalendarAccount()">+ Add Account</button>
+                <span id="calendar-setup-status" style="font-size:12px;color:var(--muted)"></span>
+              </div>
+              <div id="calendar-accounts-list" style="display:flex;flex-direction:column;gap:4px"></div>
             </div>
-            <div id="calendar-custom-url" style="display:none;gap:8px">
-              <input type="text" id="calendar-caldav-url" placeholder="CalDAV base URL" style="width:auto;flex:1">
-            </div>
-            <div id="calendar-provider-note" style="font-size:11px;color:var(--muted)"></div>
-            <div style="display:flex;gap:8px;align-items:center">
-              <button class="btn btn-accent btn-sm" onclick="addCalendarAccount()">+ Add Account</button>
-              <span id="calendar-setup-status" style="font-size:12px;color:var(--muted)"></span>
-            </div>
-            <div id="calendar-accounts-list" style="display:flex;flex-direction:column;gap:4px"></div>
-          </div>
 
-          <h3 style="font-size:14px;flex-shrink:0">Pending events (from "Scan for events" in Email)</h3>
-          <div id="calendar-pending-list" class="runner-output" style="flex:1;overflow-y:auto">
-            <div class="runner-placeholder">No pending events. Open an email and click "Scan for events".</div>
+            <h3 style="font-size:13px;flex-shrink:0;margin:0">Pending events (from "Scan for events" in Email)</h3>
+            <div id="calendar-pending-list" class="runner-output" style="flex:1;overflow-y:auto;max-height:240px">
+              <div class="runner-placeholder">No pending events. Open an email and click "Scan for events".</div>
+            </div>
           </div>
         </div>
       </div>
@@ -2051,11 +1998,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     updateSlashPopup();
   });
 
-  const agentInput = document.getElementById('agent-input');
-  agentInput.addEventListener('keydown', e => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); runAgent(); }
-  });
-
   // Event delegation for feature tags removal
   document.getElementById('feature-tags').addEventListener('click', e => {
     if (e.target.classList.contains('remove-feature-btn')) {
@@ -2064,7 +2006,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // Event delegation for conversation list
+  // Event delegation for conversation list — agent tasks and chat
+  // conversations now share the Chat tab, so every entry loads the same way
+  // (loadConversation already switches to Chat and renders the transcript).
   document.getElementById('conv-list').addEventListener('click', e => {
     const item = e.target.closest('.conv-item');
     if (!item) return;
@@ -2073,27 +2017,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       toggleConvMenu(e.target.dataset.cid, e.target);
     } else if (e.target.classList.contains('conv-check')) {
       return; // checkbox change is handled by its own onchange
-    } else if (item.dataset.mode === 'agent') {
-      loadAgentConversation(item.dataset.cid);
+    } else if (item.closest('.code-projects')) {
+      return; // retired Projects tab — entries here are stale/hidden
     } else {
       loadConversation(item.dataset.cid);
     }
-  });
-
-  // Event delegation for the Projects list and its file tabs
-  document.getElementById('code-projects-list').addEventListener('click', e => {
-    const item = e.target.closest('.conv-item');
-    if (!item) return;
-    if (e.target.classList.contains('conv-menu-btn')) {
-      e.stopPropagation();
-      toggleCodeProjectMenu(e.target.dataset.pid, e.target);
-    } else {
-      openCodeProjectDetail(item.dataset.pid);
-    }
-  });
-  document.getElementById('cp-file-tabs').addEventListener('click', e => {
-    const btn = e.target.closest('.cp-file-tab');
-    if (btn) cpShowFile(btn.dataset.path);
   });
 });
 
@@ -2653,6 +2581,7 @@ function newConversation() {
    currentConvId = id;
    localStorage.setItem('currentConvId', id);
    switchTab('chat');
+   agentModeOn = false;
    saveConvs();
    renderConvList();
    renderMessages();
@@ -2666,14 +2595,17 @@ function newConversation() {
 
 function loadConversation(id) {
   currentConvId = id;
+  const conv = conversations.find(c => c.id === id);
+  // Agent tasks share the Chat tab and this loader — keep both active-state
+  // pointers in sync so the sidebar highlights the right entry.
+  if (conv?.mode === 'agent') currentAgentConvId = id;
   localStorage.setItem('currentConvId', id);
-  // The sidebar now lists Agent-tab conversations alongside Chat ones (both
+  // The sidebar now lists agent tasks and chat conversations together (both
   // share this list), so a click here may be arriving from a different tab —
   // switch back to Chat, matching loadAgentConversation()'s equivalent switch.
   switchTab('chat');
   renderConvList();
   renderMessages();
-  const conv = conversations.find(c => c.id === id);
   const empty = document.getElementById('empty-state');
   if (empty) empty.style.display = conv && conv.messages.length ? 'none' : 'flex';
   // Reflect whatever this conversation's own streaming state actually is —
@@ -2685,13 +2617,14 @@ function loadConversation(id) {
   document.getElementById('turn-token-count').textContent = stream ? `${stream.tokenCount} tokens Used On Question` : '';
   updateQueueIndicator(id);
   closeCodeEditor();
+  applyAgentModeUI(); // agent-mode conversations show the ⚡ tier controls
 }
 
 function deleteConversation(id) {
   const conv = conversations.find(c => c.id === id);
   if (conv && !confirm(`Delete "${conv.title}"? This can't be undone.`)) return;
-  if (conv?.mode === 'agent' && id === currentAgentConvId && agentAbortController) {
-    alert('This agent task is still running — stop it before deleting.');
+  if (activeStreams.has(id)) {
+    alert('This conversation is still streaming — stop it before deleting.');
     return;
   }
   const stream = activeStreams.get(id);
@@ -2700,7 +2633,7 @@ function deleteConversation(id) {
   conversations = conversations.filter(c => c.id !== id);
   fetch(`${API}/api/conversations/${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => {});
   if (currentConvId === id) { currentConvId = null; renderMessages(); }
-  if (currentAgentConvId === id) { currentAgentConvId = null; renderAgentMessages(); }
+  if (currentAgentConvId === id) { currentAgentConvId = null; renderMessages(); }
   saveConvs();
   renderConvList();
 }
@@ -2769,14 +2702,14 @@ function deleteAllConversations() {
 // one item can't be deleted (e.g. a still-running agent task).
 function deleteConversationQuiet(id) {
   const conv = conversations.find(c => c.id === id);
-  if (conv?.mode === 'agent' && id === currentAgentConvId && agentAbortController) return false;
+  if (activeStreams.has(id)) return false;
   const stream = activeStreams.get(id);
   if (stream && stream.abortController) stream.abortController.abort();
   turnQueues.delete(id);
   conversations = conversations.filter(c => c.id !== id);
   fetch(`${API}/api/conversations/${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => {});
   if (currentConvId === id) { currentConvId = null; renderMessages(); }
-  if (currentAgentConvId === id) { currentAgentConvId = null; renderAgentMessages(); }
+  if (currentAgentConvId === id) { currentAgentConvId = null; renderMessages(); }
   renderConvList();
   return true;
 }
@@ -3357,10 +3290,11 @@ function runSlashCommand(cmd, argText = '') {
       loadSkills?.();
       break;
     case 'agent':
-      switchTab('agent');
+      setAgentMode(true);
+      switchTab('chat');
       if (argText) {
-        document.getElementById('agent-input').value = argText;
-        document.getElementById('agent-input').focus();
+        const ai = document.getElementById('chat-input');
+        if (ai) { ai.value = argText; ai.style.height = 'auto'; ai.focus(); }
       }
       break;
     case 'model':
@@ -3641,7 +3575,7 @@ function sendMessage() {
   // displayText/attachments drive the chat-bubble preview; content (with the
   // full file text inlined) is what actually gets sent to the model.
   conv.messages.push({ role: 'user', content: messageContent, displayText: text, attachments: attachmentsMeta });
-  if (conv.title === 'New Chat') { conv.title = text.slice(0, 40); conv.titleIsDefault = true; }
+  if (conv.title === 'New Chat' || conv.title === 'New agent task') { conv.title = text.slice(0, 40); conv.titleIsDefault = true; }
   saveConvs();
   renderConvList();
 
@@ -3748,7 +3682,7 @@ async function runNextTurn(convId) {
     const res = await fetch(`${API}/api/agent`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, message: messageContent, conversation: cleanMessages, system, session_id: conv.id }),
+      body: JSON.stringify({ model, message: messageContent, conversation: cleanMessages, system, session_id: conv.id, tier: (conv.mode === 'agent' ? agentTier : 'free') }),
       signal: streamState.abortController.signal
     });
 
@@ -5172,29 +5106,31 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 function switchTab(name) {
-  document.querySelectorAll('.tab').forEach((t, i) => {
-    const names = ['chat', 'codeprojects', 'analyze', 'generate', 'runner', 'agent', 'files', 'search', 'imagegen', 'models', 'email', 'calendar', 'skills', 'lessons', 'routines'];
-    t.classList.toggle('active', names[i] === name);
+  // Tab consolidation: Agent mode has been merged into Chat (Chat runs the
+  // exact same /api/agent tool loop), Calendar now lives inside Email (which
+  // has always carried the calendar peek), and Projects was removed — legacy
+  // callers (slash commands, older code paths) still send these names, so
+  // normalize instead of erroring on a missing tab.
+  if (name === 'agent' || name === 'codeprojects') name = 'chat';
+  if (name === 'calendar') name = 'email';
+  document.querySelectorAll('.tab').forEach(t => {
+    t.classList.toggle('active', t.dataset.tab === name);
   });
   document.querySelectorAll('.tab-panel').forEach(p => {
     p.classList.toggle('active', p.id === 'tab-' + name);
   });
-  if (name === 'codeprojects') loadCodeProjects();
   if (name === 'files' && !filesLoadedOnce) { filesLoadedOnce = true; exInit(); exLoadRoots(); loadFileList(''); }
   if (name === 'email' && !emailInitedOnce) { emailInitedOnce = true; initEmailTab(); }
-  if (name === 'calendar' && !calendarInitedOnce) { calendarInitedOnce = true; initCalendarTab(); }
+  // The full Calendar UI (feed URL, accounts, pending events) now lives in the
+  // Email tab, so the first Email visit initializes it too.
+  if (name === 'email' && !calendarInitedOnce) { calendarInitedOnce = true; initCalendarTab(); }
   if (name === 'skills' && !skillsInitedOnce) { skillsInitedOnce = true; loadSkills(); }
   if (name === 'lessons' && !lessonsInitedOnce) { lessonsInitedOnce = true; loadLessons(); }
   if (name === 'routines' && !routinesInitedOnce) { routinesInitedOnce = true; loadRoutines(); }
   if (name === 'search' && !searchIndexCheckedOnce) { searchIndexCheckedOnce = true; checkSearchIndexStatus(); }
-  // Resume the most recent agent task on first visit, same as reopening any
-  // other established agent surface drops you back into your last session
-  // instead of a blank slate — only when nothing has been typed/run yet.
-  if (name === 'agent' && !agentTabInitedOnce) {
-    agentTabInitedOnce = true;
-    const mostRecent = conversations.find(c => c.mode === 'agent');
-    if (mostRecent) { currentAgentConvId = mostRecent.id; renderAgentMessages(); renderConvList(); }
-  }
+  // Reflect whatever agent-mode state the current conversation implies (an
+  // agent task opened from the sidebar shows the ⚡ tier control).
+  applyAgentModeUI();
 }
 
 // ── Code Runner ─────────────────────────────────────────────────────────────────
@@ -5591,12 +5527,14 @@ async function cpAgentSuggestions() {
   }
 }
 
-// Hands a suggestion straight to the Agent tab and starts it — the task text
-// is already self-contained (the backend prompt demands real files/functions).
+// Hands a suggestion straight to the Agent mode (now inside Chat) and starts
+// it — the task text is already self-contained (the backend prompt demands
+// real files/functions).
 function runSuggestedAgentTask(task, title) {
-  switchTab('agent');
-  document.getElementById('agent-placeholder')?.remove();
-  document.getElementById('agent-input').value = task;
+  setAgentMode(true);
+  switchTab('chat');
+  const input = document.getElementById('chat-input');
+  if (input) { input.value = task; input.style.height = 'auto'; }
   runAgent();
 }
 
@@ -6855,300 +6793,94 @@ function fileCloseEditor() {
 
 // ── Agent Mode ────────────────────────────────────────────────────────────────
 
-let agentAbortController = null;
 let currentAgentConvId = null;
 let agentTier = 'free';  // 'free' | 'paid'
+let agentModeOn = false;
 let agentTabInitedOnce = false;
 
-// Agent-tab conversations live in the SAME `conversations` array/conversations.json
-// as Chat — before this, Agent mode kept its whole history in a bare in-memory
-// array (agentMessages) that vanished on page reload and never showed up
-// anywhere, so there was no way to see or return to a past agent run. Every
-// established multi-turn agent surface (Claude Code sessions, ChatGPT/Claude.ai
-// threads, Cursor's agent chats) persists and lists its sessions the same way
-// it lists regular conversations — `mode: 'agent'` is the only thing that
-// distinguishes one of these entries from a Chat-tab conversation; everything
-// else (save/load/rename/delete/search/auto-title) is the exact same code path.
+// Agent mode is built into the Chat tab now — agent tasks live in the SAME
+// `conversations` array/conversations.json as Chat (`mode: 'agent'` is the only
+// distinguishing field), render in the same Chat transcript, and are listed in
+// the same sidebar. Everything else (save/load/rename/delete/search/auto-title)
+// is the exact same code path as a regular conversation.
 function currentAgentConv() { return conversations.find(c => c.id === currentAgentConvId); }
 
 function newAgentConversation() {
   const id = Date.now().toString() + '-a';
   conversations.unshift({ id, title: 'New agent task', mode: 'agent', messages: [], agentHistory: [], created: Date.now() });
   currentAgentConvId = id;
+  currentConvId = id; // agent tasks render inside the Chat tab
+  localStorage.setItem('currentConvId', id);
   saveConvs();
   renderConvList();
-  renderAgentMessages();
-  document.getElementById('agent-input')?.focus();
+  renderMessages();
+  switchTab('chat');
+  agentModeOn = true;
+  applyAgentModeUI();
+  document.getElementById('chat-input')?.focus();
 }
 
-// Rebuilds the whole #agent-conversation panel from a stored conversation —
-// used when switching to a past agent session (and after each turn settles).
-// Reuses renderMessageGroups()/addCopyButtons()/addBubbleActions(), the exact
-// same rendering Chat uses, so a saved agent run reads identically to a live
-// one: tool rows open, Copy/Download on every bubble.
 function renderAgentMessages() {
-  const container = document.getElementById('agent-conversation');
-  if (!container) return;
-  const conv = currentAgentConv();
-  if (!conv || !conv.messages.length) {
-    container.innerHTML = `<div class="analyze-placeholder" id="agent-placeholder"><p>Enter a task below and the agent will use its tools to complete it autonomously.</p></div>`;
-    return;
-  }
-  container.innerHTML = renderMessageGroups(conv.messages);
-  addCopyButtons(); addBubbleActions();
-  container.querySelectorAll('pre code').forEach(el => hljs.highlightElement(el));
-  container.scrollTop = container.scrollHeight;
+  // Agent conversations now render through the Chat tab — kept as a shim so
+  // any remaining legacy callers just re-render the on-screen chat.
+  renderMessages();
 }
 
 function loadAgentConversation(id) {
-  if (agentAbortController) { alert('An agent task is still running — stop it before switching tasks.'); return; }
-  currentAgentConvId = id;
-  switchTab('agent');
-  renderConvList();
-  renderAgentMessages();
+  // Sidebar mode:'agent' items route here; both agent and chat conversations
+  // share the Chat tab now, so load them through the unified loader.
+  loadConversation(id);
 }
 
-// Resolves true after `ms`, or false immediately if `signal` aborts first
-// (Stop button pressed while runAgent() is waiting out a reconnect backoff).
-function sleepUnlessAborted(ms, signal) {
-  return new Promise(resolve => {
-    if (signal.aborted) { resolve(false); return; }
-    const t = setTimeout(() => resolve(true), ms);
-    signal.addEventListener('abort', () => { clearTimeout(t); resolve(false); }, { once: true });
-  });
+// Drives the Chat composer's 🤖 Agent toggle / ⚡ tier controls from whatever
+// agent-mode state the current conversation implies. Called on tab switches,
+// when a conversation loads, and whenever the mode toggle flips.
+function applyAgentModeUI() {
+  const isAgentConv = currentConv()?.mode === 'agent';
+  const t = document.getElementById('agent-mode-toggle');
+  if (t) t.classList.toggle('active', !!agentModeOn || !!isAgentConv);
+  const tierBtn = document.getElementById('agent-tier-btn');
+  const tierInd = document.getElementById('agent-tier-indicator');
+  const showTier = !!agentModeOn && !!isAgentConv;
+  if (tierBtn) { tierBtn.style.display = showTier ? '' : 'none'; tierBtn.textContent = '⚡ ' + agentTier; }
+  if (tierInd) { tierInd.style.display = showTier ? '' : 'none'; tierInd.textContent = agentTier; }
+  const input = document.getElementById('chat-input');
+  if (input) input.placeholder = agentModeOn
+    ? 'Describe what you want the agent to do… (Shift+Enter for new line)'
+    : 'Ask the AI to build something... (Shift+Enter for new line)';
+}
+
+function setAgentMode(on) {
+  agentModeOn = !!on;
+  if (agentModeOn && (!currentConvId || currentConv()?.mode !== 'agent')) {
+    newAgentConversation(); // starts a fresh agent task in the Chat tab
+    return;
+  }
+  applyAgentModeUI();
+}
+
+function toggleAgentMode() {
+  setAgentMode(!agentModeOn);
 }
 
 async function runAgent() {
-  const input = document.getElementById('agent-input');
-  const text = input.value.trim();
-  if (!text) return;
-
-  const model = document.getElementById('model-select').value;
-  if (!model) { alert('Select a model first'); return; }
-
-  if (!currentAgentConvId) newAgentConversation();
-  const conv = currentAgentConv();
-  const container = document.getElementById('agent-conversation');
-  const placeholder = document.getElementById('agent-placeholder');
-  if (placeholder) placeholder.remove();
-
-  container.innerHTML += `
-    <div class="message user" style="max-width:900px;width:100%;margin-left:auto;flex-direction:row-reverse;display:flex;gap:12px;animation:fadeIn .2s ease">
-      <div class="avatar user-av" style="width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0;border:1px solid var(--border);background:var(--accent2)">👻</div>
-      <div class="bubble" style="max-width:calc(100% - 50px);background:rgba(31,111,235,.15);border-color:rgba(31,111,235,.3)">
-        <div class="bubble-actions">
-          <button data-action="copy-bubble" title="Copy message">📋 Copy</button>
-          <button data-action="download-bubble" title="Download as .md">⬇ Download</button>
-        </div>
-        ${escHtml(text).replace(/\n/g, '<br>')}
-      </div>
-    </div>`;
-  addBubbleActions();
-
-  input.value = '';
-  const runBtn = document.getElementById('agent-run-btn');
-  const stopBtn = document.getElementById('agent-stop-btn');
-  runBtn.style.display = 'none';
-  stopBtn.style.display = '';
-  agentAbortController = new AbortController();
-  // Append, don't reset — resetting here wiped the agent's memory of
-  // everything it had already done on every single message, which is why
-  // follow-ups like "have you done that?" got nowhere. Persisted the same
-  // way Chat tracks a turn: conv.messages is the rendered transcript,
-  // conv.agentHistory is the raw API-format context sent to the model.
-  conv.messages.push({ role: 'user', content: text });
-  if (conv.title === 'New agent task') { conv.title = text.slice(0, 40); conv.titleIsDefault = true; }
-  const turnStartIdx = conv.messages.length; // where THIS turn's own entries begin — see retry reset below
-  ensureAgentHistory(conv).push({ role: 'user', content: text });
-  saveConvs();
-  renderConvList();
-
-  let fullText = '';
-  const thinkingId = 'agent-thinking-' + Date.now();
-  // Tool rows go inside .agent-turn-text's own bubble (before it, never
-  // after) — same structure the Chat tab uses — so a tool-using turn still
-  // reads as one continuous block, with the running/typed narration always
-  // last (at the bottom) instead of ending up pinned above the tool rows it
-  // was actually based on.
-  container.innerHTML += `
-    <div class="message" style="max-width:900px;width:100%;display:flex;gap:12px;animation:fadeIn .2s ease" id="${thinkingId}">
-      <div class="avatar ai-av" style="width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0;border:1px solid var(--border);background:var(--surface)">🤖</div>
-      <div class="bubble" style="max-width:calc(100% - 50px)">
-        <div class="bubble-actions">
-          <button data-action="copy-bubble" title="Copy response">📋 Copy</button>
-          <button data-action="download-bubble" title="Download as .md">⬇ Download</button>
-        </div>
-        <div class="agent-turn-text"><div class="thinking"><span></span><span></span><span></span></div></div>
-      </div>
-    </div>`;
-  addBubbleActions();
-
-  function agentTextEl() {
-    return document.getElementById(thinkingId)?.querySelector('.agent-turn-text') || null;
-  }
-
-  let pendingToolRowId = null;
-  let receivedTerminalEvent = false;
-  let wasAborted = false;
-  let networkRetryCount = 0;
-
-  // A dropped connection (backend restart, Wi-Fi blip, Ollama hiccup) used to
-  // just dead-end the turn with a static "Error: Failed to fetch" — the agent
-  // had already done real work (tool calls, files edited) that the user had
-  // no way to resume short of retyping the whole request. Retry with capped
-  // backoff instead, indefinitely, until it reconnects or Stop is pressed —
-  // conv.agentHistory already holds everything up to the last successful
-  // event, and /api/agent dedupes a resent user message, so replaying the
-  // same request is always safe.
-  retryLoop: while (true) {
-  try {
-    // Resolve teacher model if paid tier is selected
-    let effectiveModel = model;
-    if (agentTier === 'paid') {
-      try {
-        const er = await fetch(`${API}/api/router/escalate`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ tier: 'paid' })
-        });
-        const ed = await er.json();
-        if (ed.model) effectiveModel = ed.model;
-      } catch {}
-    }
-    const res = await fetch(`${API}/api/agent`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: effectiveModel, message: text, conversation: conv.agentHistory, tier: agentTier, session_id: conv.id }),
-      signal: agentAbortController.signal
-    });
-
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      for (const line of decoder.decode(value).split('\n').filter(Boolean)) {
-        try {
-          const data = JSON.parse(line);
-          if (data.type === 'token') {
-            fullText += data.content;
-            const textEl = agentTextEl();
-            if (textEl) textEl.innerHTML = renderMarkdown(fullText);
-            container.scrollTop = container.scrollHeight;
-          } else if (data.type === 'tool_call') {
-            fullText = ''; // that much of the response was just the tool-call fence, not real narration
-            conv.messages.push({ role: 'tool_call', name: data.name, arguments: data.arguments });
-            const textEl = agentTextEl();
-            if (textEl) {
-              pendingToolRowId = 'agent-tool-row-' + Math.random().toString(36).slice(2);
-              textEl.insertAdjacentHTML('beforebegin', renderToolRow({ name: data.name, arguments: data.arguments }, null, pendingToolRowId));
-              textEl.innerHTML = '<div class="thinking"><span></span><span></span><span></span></div>';
-            }
-            container.scrollTop = container.scrollHeight;
-          } else if (data.type === 'tool_result') {
-            conv.messages.push({ role: 'tool_result', name: data.name, result: data.result });
-            const row = pendingToolRowId ? document.getElementById(pendingToolRowId) : null;
-            completeToolRow(row, data.result);
-            pendingToolRowId = null;
-            container.scrollTop = container.scrollHeight;
-          } else if (data.type === 'sudo_required') {
-            const textEl = agentTextEl();
-            if (textEl) textEl.insertAdjacentHTML('beforebegin', `
-              <div class="tool-row" style="padding:6px 10px;display:flex;align-items:center;gap:6px;font-family:'JetBrains Mono','Fira Code',monospace;color:var(--muted)">
-                🔒 Waiting for your sudo password to run: <code>${escHtml(data.command)}</code>
-              </div>`);
-            container.scrollTop = container.scrollHeight;
-            handleSudoRequired(data);
-          } else if (data.type === 'done') {
-            receivedTerminalEvent = true;
-            fullText = data.content;
-            // Adopt the server's authoritative conversation state — it
-            // includes every tool call/result from this run, so the next
-            // message actually has full context instead of starting blind.
-            if (data.conversation) conv.agentHistory = data.conversation;
-            if (data.usage) {
-              const totalTokens = data.usage.prompt_eval_count + (data.usage.eval_count || 0);
-              addToWeeklyTokenUsage(totalTokens);
-              updateTokenUsageDisplay(totalTokens, effectiveModel);
-              updateCostDisplay(data.usage, { showTurn: false });
-            }
-          } else if (data.type === 'error') {
-            receivedTerminalEvent = true;
-            const textEl = agentTextEl();
-            if (textEl) textEl.innerHTML = 'Error: ' + escHtml(data.content);
-            if (data.conversation) conv.agentHistory = data.conversation;
-          }
-        } catch {}
-      }
-      container.scrollTop = container.scrollHeight;
-    }
-
-    if (fullText) {
-      conv.messages.push({ role: 'assistant', content: fullText });
-      const textEl = agentTextEl();
-      if (textEl) {
-        textEl.innerHTML = renderMarkdown(fullText);
-        textEl.querySelectorAll('pre code').forEach(el => hljs.highlightElement(el));
-      }
-      const bubbleEl = document.getElementById(thinkingId)?.querySelector('.bubble');
-      if (bubbleEl) bubbleEl.dataset.msgIdx = conv.messages.length - 1;
-    } else if (receivedTerminalEvent) {
-      // Turn ended right after a tool call with no further narration — drop
-      // the stale dots instead of leaving them bouncing forever.
-      agentTextEl()?.remove();
-    }
-    saveConvs();
-    renderConvList();
-    maybeAutoTitle(conv.id);
-    break retryLoop; // stream completed (success or a handled backend 'error' event) — don't retry those
-  } catch (err) {
-    if (err.name === 'AbortError') {
-      wasAborted = true;
-      const textEl = agentTextEl();
-      if (textEl && !fullText) textEl.textContent = 'Stopped.';
-      break retryLoop;
-    }
-    // A real connection failure (backend restarted, network blip) rather
-    // than an application-level error — those come back as a normal
-    // 'error' stream event above and never throw. Back off and retry
-    // instead of leaving the turn dead.
-    networkRetryCount++;
-    const waitMs = Math.min(2000 * networkRetryCount, 20000);
-    const textEl = agentTextEl();
-    if (textEl) textEl.innerHTML = `<span style="color:var(--danger)">⚠ Connection lost (${escHtml(err.message)}) — reconnecting in ${Math.round(waitMs / 1000)}s… (attempt ${networkRetryCount})</span>`;
-    const keepGoing = await sleepUnlessAborted(waitMs, agentAbortController.signal);
-    if (!keepGoing) {
-      wasAborted = true;
-      const el = agentTextEl();
-      if (el) el.textContent = 'Stopped.';
-      break retryLoop;
-    }
-    // Reset this attempt's transient state — a retry replays the whole turn
-    // from scratch server-side, so anything partially rendered (tool rows,
-    // partial narration, and any tool_call/tool_result already pushed into
-    // conv.messages) from the failed attempt is stale.
-    fullText = '';
-    pendingToolRowId = null;
-    receivedTerminalEvent = false;
-    conv.messages.length = turnStartIdx;
-    // Clear stale tool rows and narration only — replacing the whole bubble
-    // would also wipe out its Copy/Download buttons.
-    const bubble = document.getElementById(thinkingId)?.querySelector('.bubble');
-    if (bubble) {
-      bubble.querySelectorAll('.tool-row').forEach(el => el.remove());
-      const ate = bubble.querySelector('.agent-turn-text');
-      if (ate) ate.innerHTML = '<div class="thinking"><span></span><span></span><span></span></div>';
-    }
-  }
-  } // retryLoop
-
-  runBtn.style.display = '';
-  stopBtn.style.display = 'none';
-  agentAbortController = null;
+  // Agent is built into the Chat tab: "Run Agent" just makes sure an agent
+  // conversation is active and dispatches whatever is in the composer through
+  // the exact same /api/agent tool loop the old Agent tab used (sendMessage →
+  // runNextTurn → /api/agent). Everything else — tool rows, retry-with-resume,
+  // sudo prompts, auto-title — is the shared Chat pipeline now.
+  if (!agentModeOn || currentConv()?.mode !== 'agent') setAgentMode(true);
+  const input = document.getElementById('chat-input');
+  if (!input) return;
+  if (!input.value.trim()) { input.focus(); return; }
+  sendMessage();
+  input.focus();
 }
 
 function stopAgent() {
-  if (agentAbortController) { agentAbortController.abort(); agentAbortController = null; }
+  // The merged pipeline streams through the Chat tab, so stopping is just
+  // stopping the current turn (the Stop button sits next to Send).
+  stopStreaming();
 }
 
 async function toggleAgentTier() {
@@ -7614,7 +7346,7 @@ async function loadEmailCalendarPeek() {
       peek.innerHTML = `
         <div class="peek-month">${escHtml(monthLabel)}</div>
         <div class="peek-empty">No upcoming events</div>
-        <span class="peek-viewall" onclick="switchTab('calendar')">Open Calendar →</span>
+        <span class="peek-viewall" onclick="switchTab('email'); scrollToEmailCalendar()">Calendar ↓</span>
       `;
       return;
     }
@@ -7644,7 +7376,7 @@ async function loadEmailCalendarPeek() {
       ${renderGroup('Today', groups.today)}
       ${renderGroup('Tomorrow', groups.tomorrow)}
       ${renderGroup('Upcoming', groups.later)}
-      <span class="peek-viewall" onclick="switchTab('calendar')">Open Calendar →</span>
+      <span class="peek-viewall" onclick="switchTab('email'); scrollToEmailCalendar()">Calendar ↓</span>
     `;
   } catch (err) {
     peek.innerHTML = `<div class="peek-month">${escHtml(monthLabel)}</div><div class="peek-empty">Couldn't load calendar</div>`;
@@ -8325,6 +8057,11 @@ async function scanEmailForEvents(i) {
 let calendarAccounts = [];
 let calendarProviders = {};
 let calendarFeedUrl = `${API}/api/calendar/feed.ics`;
+
+function scrollToEmailCalendar() {
+  const el = document.getElementById('email-calendar-section');
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
 
 async function initCalendarTab() {
   // "localhost" only ever means the fetching device itself — useless once

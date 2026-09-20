@@ -1,8 +1,9 @@
 # AI Copper Maker — dev context
 
 Local LLM coding studio (FastAPI single-file backend + single-file frontend).
-- **Run**: `systemctl --user restart coppermaker` → http://localhost:8081 (auto-starts at login)
-- **Model server**: `ollama-serve.service` (user install, ~/.local/share/ollama-user). Default model lives in gitignored `config.json`.
+- **Run (Docker-only since 2026-09-20)**: the app is a single Docker container — `ai-coppermaker` (image `ai-copper-maker:latest`), `network_mode: host`, live bind-mounting `~/AI-Copper-Maker:/app` + `~/.config/ai-copper-maker`. `restart: unless-stopped` → auto-starts at boot. Access http://localhost:8081. Restart with `docker restart ai-coppermaker`; rebuild with `docker compose build` (the image only supplies Python packages — code and state come from the bind mounts).
+- **No host systemd service**: the old `coppermaker.service` (host venv on 8081) fought the container for port 8081 and was crash-looping — it has been stopped + disabled and is NOT to be re-enabled (`docker` owns 8081 now). `docker-compose.yml` is the canonical deployment file (host network, host ollama; no compose `ollama` service to avoid a 11434 clash).
+- **Model server**: `ollama-serve.service` (user install, ~/.local/share/ollama-user; host 11434 — the container reaches it via `OLLAMA_HOST=http://localhost:11434`). llama.cpp on 8080, LM Studio on 1234. Default model lives in gitignored `config.json`.
 - **Deploy**: git push origin master.
 - **Auth**: gh CLI (account CopperArch). Never add co-author trailers or AI-assistant references to commits; local git identity in this repo is `CopperArch <143160503+CopperArch@users.noreply.github.com>` — always go through a branch → PR → `gh pr merge --squash --delete-branch`, never push raw commits straight to `master` (a direct push in `20a04e7` briefly skipped this and picked up a stale author address as a result).
 - **No secrets in git**: config.json, *_accounts.json, google_oauth.json, api_keys.json, release.keystore are gitignored on purpose.

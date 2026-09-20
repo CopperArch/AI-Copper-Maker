@@ -1,57 +1,24 @@
 version: "3.8"
 
 services:
-  ollama:
-    # CPU-only by default so this boots on any machine without extra setup.
-    # For GPU acceleration, pick ONE of the blocks below for your hardware
-    # and uncomment it (leave the other commented out):
-    #
-    # Nvidia (requires the NVIDIA Container Toolkit on the host):
-    #   deploy:
-    #     resources:
-    #       reservations:
-    #         devices:
-    #           - driver: nvidia
-    #             count: all
-    #             capabilities: [gpu]
-    #
-    # AMD/ROCm (requires /dev/kfd + /dev/dri on the host):
-    #   image: ollama/ollama:rocm
-    #   devices:
-    #     - /dev/kfd
-    #     - /dev/dri
-    #   group_add:
-    #     - video
-    #     - render
-    image: ollama/ollama:latest
-    container_name: llm-coder-ollama
-    restart: unless-stopped
-    volumes:
-      - ollama-models:/root/.ollama
-    ports:
-      - "127.0.0.1:11434:11434"
-    environment:
-      - OLLAMA_KEEP_ALIVE=0
-      - OLLAMA_NUM_PARALLEL=1
-      - OLLAMA_MAX_LOADED_MODELS=1
-
-  llm-coder:
+  ai-coppermaker:
     build: .
-    container_name: llm-coder-app
+    image: ai-copper-maker:latest
+    container_name: ai-coppermaker
     restart: unless-stopped
-    ports:
-      # Localhost-only — this app has no login of its own and exposes code
-      # execution (/api/execute) and file write (/api/files/write); binding
-      # 0.0.0.0 would put that on the whole LAN with zero authentication.
-      - "127.0.0.1:8081:8081"
-    depends_on:
-      - ollama
+    # Matches the actual one-true deployment: the container shares the host
+    # network so it reaches the host-local AI stack directly (ollama on 11434,
+    # llama.cpp on 8080, LM Studio on 1234) and holds 127.0.0.1:8081 itself,
+    # exactly like the container launched with `docker run --network host`.
+    network_mode: host
     environment:
-      - OLLAMA_HOST=http://ollama:11434
+      - OLLAMA_HOST=http://localhost:11434
+      - LLAMA_CPP_HOST=http://localhost:8080
+      - LMSTUDIO_HOST=http://localhost:1234
+      - HOME=/home/nobara-user
       - PYTHONUNBUFFERED=1
     volumes:
-      - projects:/root/Downloads/LLM-CODER
-
-volumes:
-  ollama-models:
-  projects:
+      # Live source: backend + frontend edits appear without a rebuild (the
+      # image only provides the Python packages). State stays on the host too.
+      - /home/nobara-user/AI-Copper-Maker:/app
+      - /home/nobara-user/.config/ai-copper-maker:/home/nobara-user/.config/ai-copper-maker
