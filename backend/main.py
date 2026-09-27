@@ -1701,10 +1701,38 @@ async def apply_update():
     _, status_out = await _run_git("status", "--porcelain")
     if status_out.strip():
         return {"ok": False, "error": "You have uncommitted local changes in this repo — commit or stash them first, then try updating again. Pulling over dirty local changes risks losing or conflicting with them."}
-    code, output = await _run_git("pull", "--ff-only", "origin", "master")
+    code, output = await _run_git("fetch", "origin", "master")
+    if code != 0:
+        return {"ok": False, "error": output}
+    code, _ = await _run_git("merge-base", "--is-ancestor", "origin/master", "HEAD")
+    if code == 0:
+        return {"ok": True, "output": "Already up to date.", "restart_required": False}
+    # A plain `pull --ff-only` fails whenever HEAD is a feature branch or a
+    # local master whose work was squash-merged on GitHub — the content is
+    # already in origin/master but the commit hashes differ. Moving to
+    # origin/master is safe exactly when nothing local would be lost.
+    _, branch = await _run_git("rev-parse", "--abbrev-ref", "HEAD")
+    refs = ["HEAD"] if branch == "master" else ["HEAD", "master"]
+    for ref in refs:
+        if not await _is_published(ref):
+            name = branch if ref == "HEAD" else ref
+            return {"ok": False, "error": f"'{name}' has commits that aren't on GitHub's master yet — publish or merge them first, then try updating again. Updating now would discard them."}
+    code, output = await _run_git("checkout", "-B", "master", "origin/master")
     if code != 0:
         return {"ok": False, "error": output}
     return {"ok": True, "output": output, "restart_required": True}
+
+async def _is_published(ref: str) -> bool:
+    """True if `ref` is missing, behind origin/master, or its content is
+    already identical to origin/master (the squash-merge case)."""
+    code, _ = await _run_git("rev-parse", "--verify", "--quiet", ref)
+    if code != 0:
+        return True
+    code, _ = await _run_git("merge-base", "--is-ancestor", ref, "origin/master")
+    if code == 0:
+        return True
+    code, _ = await _run_git("diff", "--quiet", ref, "origin/master")
+    return code == 0
 
 
 # ── Web Search ─────────────────────────────────────────────────────────────────
