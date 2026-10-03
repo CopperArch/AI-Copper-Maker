@@ -5,6 +5,7 @@ import glob
 import hashlib
 import imaplib
 import json
+import logging
 import os
 import platform
 import re
@@ -26,6 +27,7 @@ from email.utils import parseaddr
 from email.message import EmailMessage as StdEmailMessage
 from fnmatch import fnmatch
 from pathlib import Path
+from typing import Any
 
 import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -42,6 +44,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from db import init_db, _migrate_from_json, get_conn, create_session as _db_create_session, get_session as _db_get_session, get_messages as _db_get_messages, save_message as _db_save_message, update_session_summary as _db_update_session_summary, update_session_usage as _db_update_session_usage, create_permission as _db_create_permission, get_permission as _db_get_permission, respond_permission as _db_respond_permission, get_pending_permissions as _db_get_pending_permissions, sessions_list as _db_sessions_list, delete_session as _db_delete_session
+
+logger = logging.getLogger(__name__)
 
 # Routines (see the "Routines" section far below) need a scheduler running
 # for the lifetime of the app. `_load_and_schedule_routines` is defined later
@@ -135,6 +139,11 @@ app = FastAPI(title="AI Copper Maker", lifespan=lifespan)
 OLLAMA = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 LMSTUDIO = os.environ.get("LMSTUDIO_HOST", "http://localhost:1234")
 LLAMA_CPP = os.environ.get("LLAMA_CPP_HOST", "http://localhost:8080")
+# AirLLM (streamed-layer big-model inference, see setup/airllm-linux.sh and
+# backend/airllm_server.py): a separate OpenAI-compatible server in its own
+# venv, reached exactly like llama.cpp/LM Studio. One loaded model at a time;
+# models are referenced as "airllm/<hf repo id or local path>".
+AIRLLM = os.environ.get("AIRLLM_HOST", "http://localhost:8082")
 LMS_BIN = shutil.which("lms") or str(
     Path.home() / ".lmstudio" / "bin" / ("lms.exe" if platform.system() == "Windows" else "lms")
 )
@@ -384,6 +393,7 @@ def _save_api_keys(keys: dict):
 
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
 CONFIG_FILE = Path(__file__).parent.parent / "config.json"
+CONFIG_BACKUP_FILE = CONFIG_FILE.with_name(CONFIG_FILE.name + ".bak")
 CONVERSATIONS_FILE = Path(__file__).parent.parent / "conversations.json"
 DEFAULT_SAVE_DIR = str(Path.home() / "Downloads" / "LLM-CODER")
 
@@ -1621,6 +1631,7 @@ async def health():
     ollama_ok = False
     lmstudio_ok = False
     llama_cpp_ok = False
+    airllm_ok = False
     async with httpx.AsyncClient(timeout=3) as client:
         try:
             r = await client.get(f"{OLLAMA}/api/tags")
@@ -1637,7 +1648,13 @@ async def health():
             llama_cpp_ok = r.status_code == 200
         except Exception:
             pass
-    return {"status": "ok", "ollama": ollama_ok, "lmstudio": lmstudio_ok, "llama_cpp": llama_cpp_ok}
+        try:
+            r = await client.get(f"{AIRLLM}/health")
+            airllm_ok = r.status_code == 200
+        except Exception:
+            pass
+    return {"status": "ok", "ollama": ollama_ok, "lmstudio": lmstudio_ok,
+            "llama_cpp": llama_cpp_ok, "airllm": airllm_ok}
 
 
 REPO_DIR = Path(__file__).parent.parent
@@ -3492,13 +3509,224 @@ async def list_lmstudio_models():
 
 @app.get("/api/models/llama-cpp")
 async def list_llama_cpp_models():
+    # llama-server's /v1/models entries carry the id under "model"/"name"
+    # (OpenAI-compatible servers use "id") — fall back across all three,
+    # otherwise the Models tab's llama-cpp list is always empty.
     async with httpx.AsyncClient(timeout=5) as client:
         try:
             r = await client.get(f"{LLAMA_CPP}/v1/models")
             data = r.json()
+            return {"models": [m.get("id") or m.get("model") or m.get("name")
+                               for m in data.get("data", [])]}
+        except Exception:
+            return {"models": []}
+
+@app.get("/api/models/airllm")
+async def list_airllm_models():
+    """The one model currently loaded into the AirLLM server (empty list
+    when the server is down or idle) — the Models tab's AirLLM section and
+    the model dropdown both key off this."""
+    async with httpx.AsyncClient(timeout=5) as client:
+        try:
+            r = await client.get(f"{AIRLLM}/v1/models")
+            data = r.json()
             return {"models": [m["id"] for m in data.get("data", [])]}
         except Exception:
             return {"models": []}
+
+class AirLLMLoadRequest(BaseModel):
+    model: str
+    max_seq_len: int = 8192
+    compression: str | None = None
+
+@app.post("/api/models/airllm/load")
+async def load_airllm_model(req: AirLLMLoadRequest):
+    """Load a model into the AirLLM server. A Hugging Face repo id (or a
+    local checkpoint path) — the first load downloads and splits the
+    weights into per-layer shards, which can take a while; poll
+    /api/models/airllm/status until `loading` is null."""
+    async with httpx.AsyncClient(timeout=30) as client:
+        try:
+            r = await client.post(f"{AIRLLM}/v1/airllm/load",
+                                  json={"model": req.model, "max_seq_len": req.max_seq_len,
+                                        "compression": req.compression})
+        except Exception:
+            raise HTTPException(502, "AirLLM server not reachable — is setup/airllm-linux.sh installed and airllm.service running?")
+    if r.status_code == 200:
+        return {"loading": True, "model": req.model}
+    raise HTTPException(r.status_code, r.json().get("detail", r.text[:300]))
+
+@app.post("/api/models/airllm/unload")
+async def unload_airllm_model():
+    async with httpx.AsyncClient(timeout=30) as client:
+        try:
+            r = await client.post(f"{AIRLLM}/v1/airllm/unload")
+        except Exception:
+            raise HTTPException(502, "AirLLM server not reachable — is airllm.service running?")
+    return r.json()
+
+@app.get("/api/models/airllm/status")
+async def airllm_status():
+    async with httpx.AsyncClient(timeout=5) as client:
+        try:
+            r = await client.get(f"{AIRLLM}/health")
+            return r.json()
+        except Exception:
+            return {"ok": False, "model": None, "loading": None, "error": "AirLLM server not reachable"}
+
+# How long _ensure_airllm_model_loaded waits for a load/download to finish.
+# CPU hosts load big models slowly; a big-model split + load can take well
+# over ten minutes. Tests patch this down.
+_AIRLLM_LOAD_WAIT_SECONDS = 900
+
+async def _ensure_airllm_model_loaded(model_id: str):
+    """Guarantee the AirLLM sidecar actually has `model_id` loaded before a
+    chat request reaches it. A downloaded-but-not-loaded selection (the
+    normal dropdown state after a fresh download) would otherwise 409 with
+    'No AirLLM model loaded' on every send. Loads the requested model when
+    nothing useful is loaded and polls /health until the sidecar is done.
+    Sidecar errors surface as HTTPExceptions with the sidecar's own text."""
+    deadline = time.monotonic() + _AIRLLM_LOAD_WAIT_SECONDS
+    async with httpx.AsyncClient(timeout=30) as client:
+        while True:
+            try:
+                h = (await client.get(f"{AIRLLM}/health")).json()
+            except Exception:
+                raise HTTPException(502, "AirLLM server not reachable — run setup/airllm-linux.sh first.")
+            if h.get("loading"):
+                if time.monotonic() > deadline:
+                    raise HTTPException(504, f"AirLLM is still busy: {h['loading']}")
+                await asyncio.sleep(5)
+                continue
+            if h.get("model") == model_id:
+                return
+            if h.get("error"):
+                raise HTTPException(500, f"AirLLM load failed: {h['error']}")
+            try:
+                r = await client.post(f"{AIRLLM}/v1/airllm/load", json={"model": model_id})
+            except Exception:
+                raise HTTPException(502, "AirLLM server not reachable")
+            if r.status_code == 409:
+                # The worker has not registered its loading state yet — the
+                # next /health will show it; keep polling instead of
+                # double-POSTing.
+                await asyncio.sleep(3)
+                continue
+            if r.status_code != 200:
+                raise HTTPException(r.status_code, r.json().get("detail", r.text[:300]))
+            # Give the worker a beat to register STATE.loading, then the
+            # loop above picks up the in-progress load or its result.
+            await asyncio.sleep(3)
+
+# Curated AirLLM catalog — models with a proven track record on the vendored
+# AirLLM v4.0.0 (standard transformers architectures, no remote code) with an
+# honest bf16 footprint. `size_gb` is only the fallback estimate used when the
+# live Hugging Face size lookup is unreachable; the live value wins.
+AIRLLM_RECOMMENDED_MODELS = [
+    {"id": "meta-llama/Llama-3.1-8B-Instruct", "name": "Llama 3.1 8B Instruct",
+     "blurb": "The safe 8B-class default — the setup script's own recommendation; fits in ~17 GB.", "size_gb": 17},
+    {"id": "Qwen/Qwen3-30B-A3B", "name": "Qwen3 30B A3B",
+     "blurb": "MoE with ~3B active parameters — AirLLM's speed/quality sweet spot; ~61 GB.", "size_gb": 61},
+    {"id": "huihui_ai/meta-llama-3.1-8B-Instruct-abliterated", "name": "Llama 3.1 8B Instruct (uncensored)",
+     "blurb": "Uncensored 8B variant of the safe default; ~17 GB.", "size_gb": 17},
+    {"id": "Qwen/Qwen2.5-14B-Instruct", "name": "Qwen2.5 14B Instruct",
+     "blurb": "Strong mid-size instruct model; ~29 GB, noticeably slower on CPU-only hosts.", "size_gb": 29},
+    {"id": "meta-llama/Llama-3.3-70B-Instruct", "name": "Llama 3.3 70B Instruct",
+     "blurb": "70B-class flagship — the reason AirLLM exists; ~145 GB, for big disks only.", "size_gb": 145},
+]
+
+_AIRLLM_SIZE_CACHE: dict = {}
+
+async def _airllm_repo_size_bytes(model_id: str):
+    """Best-known repo size in bytes: the live Hugging Face value when
+    reachable (cached for the process lifetime), else the catalog's
+    estimate, else None (unknown size → the download pre-check is skipped
+    and AirLLM's own check_space still guards the split step)."""
+    cached = _AIRLLM_SIZE_CACHE.get(model_id)
+    if cached is not None:
+        return cached
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(f"https://huggingface.co/api/models/{model_id}")
+            if r.status_code == 200:
+                used = int(r.json().get("usedStorage") or 0)
+                if used > 0:
+                    _AIRLLM_SIZE_CACHE[model_id] = used
+                    return used
+    except Exception:
+        pass
+    entry = next((m for m in AIRLLM_RECOMMENDED_MODELS if m["id"] == model_id), None)
+    if entry:
+        _AIRLLM_SIZE_CACHE[model_id] = entry["size_gb"] * 1024 ** 3
+        return _AIRLLM_SIZE_CACHE[model_id]
+    _AIRLLM_SIZE_CACHE[model_id] = None
+    return None
+
+class AirLLMDownloadRequest(BaseModel):
+    model: str
+
+@app.get("/api/models/airllm/catalog")
+async def airllm_catalog():
+    """Available AirLLM models: the curated catalog merged with what the
+    sidecar has actually cached ('installed' = downloaded + split, ready to
+    load without a download) and what is loaded right now, plus the free
+    space on the model-cache volume. When the sidecar is down the catalog
+    still renders and 'server' tells the UI to show the setup hint."""
+    status = await airllm_status()
+    installed = []
+    if status.get("ok"):
+        async with httpx.AsyncClient(timeout=5) as client:
+            try:
+                r = await client.get(f"{AIRLLM}/v1/airllm/installed")
+                installed = r.json().get("installed", [])
+            except Exception:
+                installed = []
+    known = {m["id"] for m in AIRLLM_RECOMMENDED_MODELS}
+    models = []
+    for entry in AIRLLM_RECOMMENDED_MODELS:
+        size = await _airllm_repo_size_bytes(entry["id"])
+        models.append({
+            "id": entry["id"], "name": entry["name"], "blurb": entry["blurb"],
+            "size_gb": round(size / 1024 ** 3, 1) if size else None,
+            "installed": entry["id"] in installed,
+            "loaded": status.get("model") == entry["id"],
+        })
+    for extra in sorted(set(installed) - known):
+        models.append({"id": extra, "name": extra,
+                       "blurb": "Custom model (downloaded from a Hugging Face repo id)",
+                       "size_gb": None, "installed": True,
+                       "loaded": status.get("model") == extra})
+    free_bytes = status.get("disk_free")
+    return {
+        "server": {"ok": bool(status.get("ok")), "device": status.get("device"),
+                   "disk_free_gb": round(free_bytes / 1024 ** 3, 1) if free_bytes else None,
+                   "cache_dir": status.get("cache_dir"), "loading": status.get("loading")},
+        "models": models,
+    }
+
+@app.post("/api/models/airllm/download")
+async def download_airllm_model(req: AirLLMDownloadRequest):
+    """Download + split a model into the persistent AirLLM cache so a later
+    load skips the download. Pre-checks free disk against the model's known
+    size: both the original weights AND the split shards stay on disk."""
+    status = await airllm_status()
+    if not status.get("ok"):
+        raise HTTPException(502, "AirLLM server not reachable — run setup/airllm-linux.sh first (builds the venv and starts the server).")
+    size = await _airllm_repo_size_bytes(req.model)
+    free = status.get("disk_free")
+    if size and free and free < size * 1.35:
+        raise HTTPException(400, f"Not enough disk space: '{req.model}' needs about "
+                                 f"{size * 1.35 / 1024 ** 3:.0f} GB free (download + split shards) "
+                                 f"but the model cache volume has {free / 1024 ** 3:.0f} GB free. "
+                                 f"Free up space or pick a smaller model.")
+    async with httpx.AsyncClient(timeout=30) as client:
+        try:
+            r = await client.post(f"{AIRLLM}/v1/airllm/download", json={"model": req.model})
+        except Exception:
+            raise HTTPException(502, "AirLLM server not reachable — check airllm.service")
+    if r.status_code == 200:
+        return r.json()
+    raise HTTPException(r.status_code, r.json().get("detail", r.text[:300]))
 
 def _find_gguf_paths(obj) -> list:
     """Recursively hunt any JSON value for GGUF file paths, sidestepping the
@@ -4236,25 +4464,6 @@ async def _fetch_openrouter_models() -> list:
     return []
 
 
-async def _fetch_openrouter_prices() -> dict:
-    prices = {}
-    for m in await _fetch_openrouter_models():
-        mid = m.get("id")
-        pricing = m.get("pricing") or {}
-        try:
-            input_ppm = float(pricing.get("prompt", 0)) * 1_000_000
-            output_ppm = float(pricing.get("completion", 0)) * 1_000_000
-        except (TypeError, ValueError):
-            continue
-        if mid:
-            prices[mid] = {"input": round(input_ppm, 4), "output": round(output_ppm, 4),
-                            "is_free": input_ppm == 0 and output_ppm == 0}
-    return prices
-
-async def _openrouter_live_pricing() -> dict:
-    return await _cached_gateway_pricing(OPENROUTER_PRICING_CACHE_FILE, _fetch_openrouter_prices)
-
-
 NANOGPT_PRICING_CACHE_FILE = Path(__file__).parent.parent / "nanogpt_pricing_cache.json"
 
 async def _fetch_nanogpt_models_with_pricing() -> dict:
@@ -4287,9 +4496,6 @@ async def _fetch_nanogpt_models_with_pricing() -> dict:
         }
     return prices
 
-async def _nanogpt_live_pricing() -> dict:
-    return await _cached_gateway_pricing(NANOGPT_PRICING_CACHE_FILE, _fetch_nanogpt_prices)
-
 
 HAIMAKER_PRICING_CACHE_FILE = Path(__file__).parent.parent / "haimaker_pricing_cache.json"
 
@@ -4321,9 +4527,6 @@ async def _fetch_haimaker_models_with_pricing() -> dict:
                 "label": label,
             }
     return prices
-
-async def _haimaker_live_pricing() -> dict:
-    return await _cached_gateway_pricing(HAIMAKER_PRICING_CACHE_FILE, _fetch_haimaker_models_with_pricing)
 
 
 PERPLEXITY_MODEL_CHOICES = [
@@ -5253,21 +5456,163 @@ def _is_lmstudio_model(model: str) -> bool:
 def _is_llama_cpp_model(model: str) -> bool:
     return model.startswith("llama-cpp/")
 
+def _is_airllm_model(model: str) -> bool:
+    """Same namespace trick as the two above: the frontend prefixes every
+    AirLLM-loaded model with "airllm/" so it can't be mistaken for an Ollama
+    name (which _agent_turns would otherwise send straight to Ollama, and
+    Ollama would 404 on)."""
+    return model.startswith("airllm/")
+
+
+# Backend router — lazy-initialized to avoid import-order dependencies
+_backend_router: Any = None
+
+
+def _get_backend_router() -> Any:
+    """Return the global BackendRouter instance, lazily initializing it."""
+    global _backend_router
+    if _backend_router is None:
+        from backend_router import BackendRouter
+        from backend_config import get_backend_mode
+
+        _backend_router = BackendRouter(
+            mode=get_backend_mode(),  # "auto" unless config.json sets "backend"
+            ktransformers_force_install=False,
+            unattended_install=False,
+        )
+    return _backend_router
+
+def _local_openai_compatible_backend(model: str) -> tuple[str, str] | None:
+    """(base_url, model_id) for the three local OpenAI-compatible servers
+    (LM Studio, llama.cpp, AirLLM) when `model` names one of them, else
+    None. All three expose the same /v1/chat/completions SSE shape, so the
+    agent loop's streaming path for all of them is one shared generator
+    instead of three hand-kept copies — the previous two-copy arrangement
+    meant a tool-call fix had to be applied to each copy by hand (the
+    dropped-native-tool-calls bug #28 shipped in exactly that shape)."""
+    if _is_lmstudio_model(model):
+        return LMSTUDIO, model.split("/", 1)[1]
+    if _is_llama_cpp_model(model):
+        return LLAMA_CPP, model.split("/", 1)[1]
+    if _is_airllm_model(model):
+        return AIRLLM, model.split("/", 1)[1]
+    return None
+
+async def _stream_openai_compatible_chat(base_url: str, model_id: str, messages: list):
+    """One streaming /v1/chat/completions call against any local
+    OpenAI-compatible server. Yields events in the agent-loop's shape:
+      {"type": "token", "content": ...}
+      {"type": "tool_use_start"|"tool_use_delta"|"tool_use_stop", ...}
+    and finally {"type": "usage", "usage": {...}} (or nothing, when the
+    server didn't report usage). The caller accumulates response_text from
+    the token events and rebuilds the internal ```tool fence from the final
+    tool_use_stop event (name + full input are both carried on it).
+
+    .. note::
+        Streams directly against the server the caller selected — never
+        reroutes through the BackendRouter: this path is reached with an
+        explicit base_url (LM Studio / llama.cpp / AirLLM) and a router
+        re-selection could silently send the request to a different server.
+        OpenAI-style incremental delta.tool_calls are accumulated per index
+        and surfaced as tool_use_start / tool_use_delta events, with the
+        completed call emitted as tool_use_stop after the stream ends.
+    """
+    _pending_tool_calls = {}  # tool_call index -> {"id", "name", "input"}
+    async with httpx.AsyncClient(timeout=120) as client:
+        async with client.stream(
+            "POST", f"{base_url}/v1/chat/completions",
+            json={"model": model_id, "messages": messages, "stream": True,
+                  "temperature": 0.2, "stream_options": {"include_usage": True}}
+        ) as r:
+            async for chunk in r.aiter_bytes():
+                for line in chunk.decode(errors="replace").split("\n"):
+                    line = line.strip()
+                    if not line.startswith("data:"):
+                        continue
+                    payload = line[len("data:"):].strip()
+                    if payload == "[DONE]" or not payload:
+                        continue
+                    try:
+                        data = json.loads(payload)
+                    except json.JSONDecodeError:
+                        continue
+                    choices = data.get("choices")
+                    # OpenAI-compatible servers can answer HTTP 200 with
+                    # a stream whose terminal chunk carries an engine/API
+                    # error instead of choices (LM Studio's llama.cpp
+                    # engine does this when the prompt exceeds the
+                    # server's context size). Raising stops the reply
+                    # coming back silently empty.
+                    if isinstance(data, dict) and data.get("error"):
+                        raise RuntimeError(str(data["error"]))
+                    if not isinstance(choices, list):
+                        choices = [choices] if choices else []
+                    for choice in choices:
+                        if not isinstance(choice, dict):
+                            continue
+                        delta = choice.get("delta") or {}
+                        content = delta.get("content")
+                        if content:
+                            yield {"type": "token", "content": content}
+                        # OpenAI-compatible servers stream tool calls with
+                        # incremental function.arguments fragments keyed by
+                        # the tool_call's index — accumulate them per index.
+                        for tc in delta.get("tool_calls") or []:
+                            if not isinstance(tc, dict):
+                                continue
+                            tc_index = tc.get("index", 0)
+                            fn = tc.get("function") or {}
+                            state = _pending_tool_calls.setdefault(
+                                tc_index, {"id": "", "name": "", "input": ""})
+                            if tc.get("id"):
+                                state["id"] = tc["id"]
+                            # OpenAI carries the name in function.name; some
+                            # servers (and this repo's test fixtures) put it
+                            # on the tool_call object itself.
+                            tc_name = fn.get("name") or tc.get("name")
+                            if tc_name:
+                                state["name"] = tc_name
+                                yield {"type": "tool_use_start",
+                                       "name": state["name"],
+                                       "id": state["id"] or state["name"]}
+                            args_frag = fn.get("arguments")
+                            if args_frag:
+                                state["input"] += args_frag
+                                yield {"type": "tool_use_delta",
+                                       "id": state["id"] or state["name"],
+                                       "input": args_frag}
+                    usage_field = data.get("usage")
+                    if usage_field:
+                        from main import _normalize_provider_usage
+                        yield {"type": "usage", "usage": _normalize_provider_usage(usage_field)}
+    for state in _pending_tool_calls.values():
+        yield {"type": "tool_use_stop",
+               "id": state["id"] or state["name"],
+               "name": state["name"],
+               "input": state["input"]}
+
 
 async def _llm_complete(model: str, messages: list, timeout: int = 120) -> str:
     """One-shot (non-streaming) chat completion, routed to whichever provider
     `model` actually names — a cloud provider (via _call_cloud_model) when
     it's a "<provider>/<model>" ref, LM Studio when it's "lmstudio/<id>",
-    local Ollama otherwise. Several endpoints below (draft replies, calendar
-    event scanning, skill learning, routine interpretation) used to always
-    POST straight to Ollama regardless of what the caller had selected in
-    the model dropdown — which also lists configured cloud models and (once
-    LM Studio models became selectable there too) LM Studio ones — so
-    picking one of those there silently failed (Ollama 404s on the unknown
-    name, but still returns valid-looking JSON with no "message" key, so
-    content quietly became ""). Also raises on a real backend-side error
-    instead of swallowing it into an empty string, so callers' existing
-    try/except surfaces the actual problem.
+    local Ollama, llama.cpp, AirLLM, or KTransformers.
+
+    Backend selection is handled by the BackendRouter, which automatically
+    selects the best compatible backend based on model architecture, hardware,
+    and installed backends. The router respects explicit user configuration
+    (--backend airllm / --backend ktransformers) and never silently switches
+    backends without user consent.
+
+    Several endpoints below (draft replies, calendar event scanning, skill
+    learning, routine interpretation) used to always POST straight to Ollama
+    regardless of what the caller had selected in the model dropdown — which
+    also lists configured cloud models and (once LM Studio models became
+    selectable there too) LM Studio ones — so picking one of those there
+    silently failed (Ollama 404s on the unknown name, but still returns
+    valid-looking JSON with no "message" key, so content quietly became "").
+    Also raises on a real backend-side error instead of swallowing it into
+    an empty string, so callers' existing try/except surfaces the actual problem.
     """
     if _is_cloud_model(model):
         system = next((m["content"] for m in messages if m["role"] == "system"), "")
@@ -5288,10 +5633,66 @@ async def _llm_complete(model: str, messages: list, timeout: int = 120) -> str:
             r.raise_for_status()
             choices = r.json().get("choices") or [{}]
             return (choices[0].get("message") or {}).get("content", "")
+    if _is_airllm_model(model):
+        await _ensure_airllm_model_loaded(model.split("/", 1)[1])
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            r = await client.post(f"{AIRLLM}/v1/chat/completions",
+                                   json={"model": model.split("/", 1)[1], "messages": messages, "stream": False})
+            r.raise_for_status()
+            choices = r.json().get("choices") or [{}]
+            return (choices[0].get("message") or {}).get("content", "")
     async with httpx.AsyncClient(timeout=timeout) as client:
         r = await client.post(f"{OLLAMA}/api/chat", json={"model": model, "messages": messages, "stream": False})
         r.raise_for_status()
         return r.json().get("message", {}).get("content", "")
+
+
+async def _generate_with_backend(backend: Any, model_id: str, messages: list, timeout: int) -> str:
+    """Generate text using the selected inference backend.
+
+    This is a unified wrapper that calls the backend's generate method
+    and returns the completed text. The caller does not need to know
+    which backend is active — AirLLM, KTransformers, or any future
+    backend.
+
+    Parameters
+    ----------
+    backend : InferenceBackend
+        The selected backend instance.
+    model_id : str
+        The model identifier.
+    messages : list
+        The conversation messages.
+    timeout : int
+        Timeout in seconds for the generation call.
+
+    Returns
+    -------
+    str
+        The generated text completion.
+    """
+    # Try non-streaming generation first
+    try:
+        result = await backend.generate(model_id, messages, stream=False, temperature=0.2)
+        if isinstance(result, str):
+            return result
+    except Exception as e:
+        logger.warning("Non-streaming generation failed for backend %s: %s", backend.__class__.__name__, e)
+
+    # Fallback: try streaming and accumulate
+    try:
+        accumulated = ""
+        async for event in backend.generate_stream(model_id, messages, stream=True, temperature=0.2):
+            if event.get("type") == "token" and event.get("content"):
+                accumulated += event["content"]
+            # Note: usage events are handled by the caller if needed
+        if accumulated:
+            return accumulated
+    except Exception as e:
+        logger.warning("Streaming generation failed for backend %s: %s", backend.__class__.__name__, e)
+
+    # Last resort: return empty string
+    return ""
 
 
 async def _stream_chat_ndjson(model: str, messages: list, timeout: int = 600):
@@ -5309,19 +5710,15 @@ async def _stream_chat_ndjson(model: str, messages: list, timeout: int = 600):
         text, _usage = await _call_cloud_model(model, convo, system)
         yield (json.dumps({"message": {"content": text}, "done": True}) + "\n").encode()
         return
-    if _is_lmstudio_model(model):
+    if _local_openai_compatible_backend(model):
+        # LM Studio / llama.cpp / AirLLM: one non-streaming call through
+        # _llm_complete (they all share its OpenAI-compatible branch),
+        # yielded as a single chunk in Ollama's shape — the frontend's
+        # parser just accumulates message.content either way.
         try:
             text = await _llm_complete(model, messages, timeout=timeout)
         except Exception as e:
-            yield json.dumps({"error": f"LM Studio error: {str(e)}"}).encode()
-            return
-        yield (json.dumps({"message": {"content": text}, "done": True}) + "\n").encode()
-        return
-    if _is_llama_cpp_model(model):
-        try:
-            text = await _llm_complete(model, messages, timeout=timeout)
-        except Exception as e:
-            yield json.dumps({"error": f"llama.cpp error: {str(e)}"}).encode()
+            yield json.dumps({"error": f"Local model server error: {str(e)}"}).encode()
             return
         yield (json.dumps({"message": {"content": text}, "done": True}) + "\n").encode()
         return
@@ -5608,6 +6005,17 @@ Before attempting to build or run something, check whether the tools it needs ac
 {_core_lessons_text()}
 
 AUTONOMOUS SKILL & AGENT USAGE — follow these rules strictly:
+- Universal task execution standard: for ANY actionable task (not just
+  Q&A) — finding, fixing, creating, building, changing, installing,
+  downloading, uploading, searching, investigating, testing, configuring,
+  researching, explaining, organising, cleaning, diagnosing, automating —
+  call get_skill "universal_task_execution" BEFORE starting and follow it.
+  The user's requested end state is the goal; a missing tool is not a
+  blocker (investigate and try a viable alternative); verify every major
+  step before claiming it; report precise status (COMPLETE / PARTIALLY
+  COMPLETE / BLOCKED / FAILED / NOT VERIFIED / NOT RECOVERABLE); protect
+  user data; explain results in plain English a non-technical person can
+  follow.
 - The skill library above contains many entries. When a user's question
   matches any skill or agent by name or keyword, you MUST call get_skill
   with the exact name BEFORE answering. Do not answer from memory when
@@ -5723,18 +6131,29 @@ Did this session involve solving a real problem, fixing a non-obvious bug, or di
 # "extensions": [".x"]}}). One deliberate difference: opencode ships LSP off
 # by default; this app defaults it ON (set "lsp": false to disable).
 
+# LSP servers run inside THIS container, so every one of them is baked into
+# the Docker image at pinned versions (see Dockerfile): OS packages
+# (nodejs, clangd), pinned npm globals, pinned pip (python-lsp-server) and a
+# pinned standalone rust-analyzer binary. "requires" lists the FULL chain of
+# executables that must exist before the server can be called available —
+# for the npm-based servers that includes the node runtime itself. Status
+# never claims "available" on the faith that something could be fetched at
+# runtime: no npx -y, no runtime downloads.
 LSP_BUILTINS = {
-    "rust":       {"command": ["rust-analyzer"], "extensions": [".rs"]},
-    "typescript": {"command": ["npx", "-y", "typescript-language-server", "--stdio"],
+    "rust":       {"command": ["rust-analyzer"], "requires": ["rust-analyzer"],
+                    "extensions": [".rs"]},
+    "typescript": {"command": ["typescript-language-server", "--stdio"],
+                    "requires": ["node", "typescript-language-server"],
                     "extensions": [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"]},
-    "python":     {"command": ["pylsp"],
+    "python":     {"command": ["pylsp"], "requires": ["pylsp"],
                     "extensions": [".py", ".pyi"]},
-    "bash":       {"command": ["npx", "-y", "bash-language-server", "start"],
+    "bash":       {"command": ["bash-language-server", "start"],
+                    "requires": ["node", "bash-language-server", "shellcheck"],
                     "extensions": [".sh", ".bash", ".zsh"]},
     # clangd serves both C and C++ from the one binary — same as
     # typescript-language-server covering .js alongside .ts above, one
     # registry entry just lists every extension it should handle.
-    "cpp":        {"command": ["clangd"],
+    "cpp":        {"command": ["clangd"], "requires": ["clangd"],
                     "extensions": [".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx"]},
 }
 
@@ -5793,14 +6212,17 @@ class _LspClient:
             "processId": os.getpid(),
             "rootUri": root.as_uri(),
             "workspaceFolders": [{"uri": root.as_uri(), "name": root.name}],
-            "capabilities": {"textDocument": {"sync": {"dynamicRegistration": False}}},
+            "capabilities": {"textDocument": {"sync": {"dynamicRegistration": False},
+                # typescript-language-server silently drops ALL diagnostics
+                # unless the client advertises push diagnostics support —
+                # without this key the TS server reports nothing at all.
+                "publishDiagnostics": {"dynamicRegistration": False}}},
         }
         if self.initialization:
             params["initializationOptions"] = self.initialization
-        # 120s: npx-based servers (typescript-language-server, pyright,
-        # bash-language-server) download themselves on first spawn — that
-        # cold download happens before the server ever answers initialize.
-        await self._request("initialize", params, timeout=120)
+        # All LSP servers are baked into the image (no runtime downloads), so
+        # this only needs to cover a slow first spawn on a loaded machine.
+        await self._request("initialize", params, timeout=60)
         self._notify("initialized", {})
         return self
 
@@ -5884,6 +6306,19 @@ class _LspClient:
 
 _lsp_clients: dict = {}
 _lsp_last_errors: dict = {}   # server name → last start failure, for /api/lsp/status
+_lsp_verified: dict = {}      # server name → epoch of last successful real start
+
+
+def _lsp_requires(spec: dict) -> list:
+    """Every executable the LSP chain depends on. Builtins state the full
+    chain explicitly (the npm-based servers need the node runtime too);
+    config overrides without "requires" fall back to their own command[0]."""
+    return spec.get("requires") or [spec["command"][0]]
+
+
+def _lsp_missing(spec: dict) -> list:
+    return [b for b in _lsp_requires(spec) if not shutil.which(b)]
+
 
 async def _lsp_client_for(suffix: str):
     registry = _lsp_registry()
@@ -5896,14 +6331,15 @@ async def _lsp_client_for(suffix: str):
     client = _lsp_clients.get(name)
     if client and not client.dead:
         return client
-    cmd0 = spec["command"][0]
-    if cmd0 not in ("npx", "node") and not shutil.which(cmd0):
-        _lsp_last_errors[name] = f"binary not found: {cmd0}"
-        return None  # binary genuinely missing — don't try to spawn it every edit
+    missing = _lsp_missing(spec)
+    if missing:
+        _lsp_last_errors[name] = f"not installed: {', '.join(missing)}"
+        return None  # chain genuinely incomplete — don't try to spawn it every edit
     try:
         client = await _LspClient(name, spec["command"], spec.get("initialization")).start()
         _lsp_clients[name] = client
         _lsp_last_errors.pop(name, None)
+        _lsp_verified[name] = time.time()  # a live initialize handshake just happened
         return client
     except Exception as e:
         _lsp_last_errors[name] = f"{type(e).__name__}: {str(e)[:200]}"
@@ -5942,33 +6378,158 @@ async def _lsp_feedback_for_path(path_str: str) -> str:
 
 @app.get("/api/lsp/status")
 async def lsp_status():
+    """Authoritative LSP availability. "available" means every executable in
+    the server's chain (node for the npm-based ones) exists in THIS
+    container right now — the LSP servers run here, so that is the whole
+    environment. A present chain that failed to start is "error" with the
+    reason; a live client is "running". No state claims something that
+    would still have to be downloaded or installed first."""
     registry = _lsp_registry()
     if not registry:
         return {"enabled": False, "servers": []}
     servers = []
     for name, spec in registry.items():
         client = _lsp_clients.get(name)
-        cmd0 = spec["command"][0]
-        available = cmd0 in ("npx", "node") or bool(shutil.which(cmd0))
+        requires = _lsp_requires(spec)
+        missing = _lsp_missing(spec)
+        error = _lsp_last_errors.get(name, "")
         state = ("running" if (client and not client.dead)
-                 else "error" if _lsp_last_errors.get(name)
-                 else "available" if available else "missing")
+                 else "error" if (error and not missing)
+                 else "available" if not missing else "missing")
+        if state == "missing":
+            reason = f"not installed: {', '.join(missing)}"
+        elif state == "error":
+            reason = error
+        elif _lsp_verified.get(name):
+            reason = "verified by live LSP handshake"
+        else:
+            reason = "all required executables present"
         servers.append({
             "name": name, "command": spec["command"], "extensions": spec.get("extensions", []),
-            "state": state, "error": _lsp_last_errors.get(name, "") if state == "error" else "",
+            "requires": requires, "state": state, "reason": reason,
+            "verified_at": _lsp_verified.get(name),
+            "error": error if state == "error" else "",
         })
     return {"enabled": True, "servers": servers}
 
 
-# Each LSP server in LSP_BUILTINS is an externally-managed tool (rustup/cargo,
-# pip, npm) this app doesn't install or update itself — the version-source
-# each one's real upstream publishes to, used by _check_lsp_updates below.
-# typescript/bash have no version_cmd: they're always invoked through
-# `npx -y <pkg>`, which resolves npm's "latest" dist-tag itself on every
-# start, so there's no local "installed version" to compare — running one
-# just to check its version would also mean an unwanted network fetch during
-# a routine background check. Their npm registry version is still recorded,
-# just informationally rather than as an "update available" flag.
+async def _lsp_handshake(spec: dict, timeout: float = 20.0, spawn=None):
+    """Actually start the server and run the LSP lifecycle — initialize →
+    initialized → shutdown → exit — with Content-Length framing. Returns
+    (ok, detail, elapsed_ms). `spawn` is injectable so tests can feed it a
+    fake process instead of forking a real binary. (Same protocol shape the
+    live _LspClient uses, but one-shot: no state kept, no stdin writer left
+    running — this is a probe, not a session.)"""
+    spawn = spawn or asyncio.create_subprocess_exec
+    t0 = time.monotonic()
+
+    def frame(obj):
+        b = json.dumps(obj).encode()
+        return b"Content-Length: %d\r\n\r\n" % len(b) + b
+
+    async def next_message(expect_id, to):
+        while True:
+            headers = {}
+            while True:
+                line = await asyncio.wait_for(proc.stdout.readline(), to)
+                if not line:
+                    raise ConnectionError("server closed the connection")
+                text = line.decode("latin-1").strip()
+                if not text:
+                    break
+                key, _, val = text.partition(":")
+                headers[key.strip().lower()] = val.strip()
+            body = await asyncio.wait_for(proc.stdout.read(int(headers["content-length"])), to)
+            msg = json.loads(body)
+            if msg.get("id") == expect_id:
+                return msg
+
+    try:
+        proc = await spawn(*spec["command"], stdin=asyncio.subprocess.PIPE,
+                           stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+    except Exception as e:
+        return False, f"spawn failed: {type(e).__name__}: {str(e)[:150]}", int((time.monotonic() - t0) * 1000)
+    try:
+        proc.stdin.write(frame({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                                "params": {"processId": None, "rootUri": None,
+                                           "capabilities": {}}}))
+        await proc.stdin.drain()
+        resp = await next_message(1, timeout)
+        if "error" in resp:
+            return False, f"initialize error: {str(resp['error'])[:150]}", \
+                int((time.monotonic() - t0) * 1000)
+        if "capabilities" not in resp.get("result", {}):
+            return False, f"malformed initialize result: {str(resp)[:150]}", \
+                int((time.monotonic() - t0) * 1000)
+        proc.stdin.write(frame({"jsonrpc": "2.0", "method": "initialized", "params": {}}))
+        await proc.stdin.drain()
+        proc.stdin.write(frame({"jsonrpc": "2.0", "id": 2, "method": "shutdown", "params": None}))
+        await proc.stdin.drain()
+        await next_message(2, 10)
+        proc.stdin.write(frame({"jsonrpc": "2.0", "method": "exit"}))
+        await proc.stdin.drain()
+        try:
+            rc = await asyncio.wait_for(proc.wait(), 10)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return False, "server did not exit after 'exit'", \
+                int((time.monotonic() - t0) * 1000)
+        if rc not in (0, 1):
+            return False, f"server exited with code {rc}", int((time.monotonic() - t0) * 1000)
+        return True, "initialize/initialized/shutdown/exit OK", \
+            int((time.monotonic() - t0) * 1000)
+    except (asyncio.TimeoutError, TimeoutError):
+        return False, "no LSP response within the timeout", int((time.monotonic() - t0) * 1000)
+    except Exception as e:
+        return False, f"{type(e).__name__}: {str(e)[:150]}", int((time.monotonic() - t0) * 1000)
+    finally:
+        if proc.returncode is None:
+            proc.kill()
+            try:
+                await proc.wait()
+            except Exception:
+                pass
+
+
+class LspCheckRequest(BaseModel):
+    servers: list | None = None   # omit/empty = check every configured server
+
+
+@app.post("/api/lsp/check")
+async def lsp_check(req: LspCheckRequest):
+    """On-demand PROOF that a server really starts: spawns it, runs the full
+    initialize→shutdown→exit handshake, reports per-server ok/error. This is
+    deliberately not part of the status poll (spawning five LSP servers on
+    every page load would be wasteful) — the UI offers it as an explicit
+    'test' action."""
+    registry = _lsp_registry()
+    if not registry:
+        return {"ok": False, "servers": [],
+                "error": "LSP is disabled — set \"lsp\": true in config.json"}
+    names = req.servers or list(registry)
+    results = []
+    for name in names:
+        spec = registry.get(name)
+        if not spec:
+            results.append({"name": name, "ok": False, "error": "unknown server"})
+            continue
+        missing = _lsp_missing(spec)
+        if missing:
+            results.append({"name": name, "ok": False,
+                            "error": f"not installed: {', '.join(missing)}"})
+            continue
+        ok, detail, ms = await _lsp_handshake(spec)
+        results.append({"name": name, "ok": ok, "detail": detail, "ms": ms,
+                        "error": "" if ok else detail})
+    return {"ok": all(r["ok"] for r in results), "servers": results}
+
+
+# Every LSP server ships inside the Docker image at a pinned version (see
+# Dockerfile), installed at build time — this app never installs or updates
+# them at runtime. _check_lsp_updates compares the installed version against
+# each upstream's published latest, so the UI can flag "a newer version
+# exists; rebuild the image to pick it up". The version-source per server:
 LSP_UPDATE_SOURCES = {
     # rust-analyzer's own releases are date-tagged on GitHub (e.g. "2026-09-14"),
     # not semver — `rust-analyzer --version` prints
@@ -5980,8 +6541,12 @@ LSP_UPDATE_SOURCES = {
              "version_re": r'\((?:\S+\s+)?(\d{4}-\d{2}-\d{2})\)'},
     "python": {"kind": "pypi", "package": "python-lsp-server", "version_cmd": ["pylsp", "--version"],
                "version_re": r'(\d+\.\d+\.\d+[\w.\-]*)'},
-    "typescript": {"kind": "npm", "package": "typescript-language-server", "version_cmd": None, "version_re": None},
-    "bash": {"kind": "npm", "package": "bash-language-server", "version_cmd": None, "version_re": None},
+    "typescript": {"kind": "npm", "package": "typescript-language-server",
+                   "version_cmd": ["typescript-language-server", "--version"],
+                   "version_re": r'(\d+\.\d+\.\d+[\w.\-]*)'},
+    "bash": {"kind": "npm", "package": "bash-language-server",
+             "version_cmd": ["bash-language-server", "--version"],
+             "version_re": r'(\d+\.\d+\.\d+[\w.\-]*)'},
 }
 LSP_STALENESS_FILE = REPO_DIR / "lsp_staleness_cache.json"
 
@@ -6304,6 +6869,13 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
         response_text = ""
         usage = None
         cloud_provider = model.split("/", 1)[0] if "/" in model else ""
+        # One of LM Studio / llama.cpp / AirLLM (all three are the same
+        # OpenAI-compatible /v1/chat/completions SSE shape), else None.
+        local_backend = _local_openai_compatible_backend(model)
+        if local_backend and _is_airllm_model(model):
+            # Load the selected model first — a downloaded-but-not-loaded
+            # pick would otherwise 409 on the very first agent turn.
+            await _ensure_airllm_model_loaded(model.split("/", 1)[1])
 
         try:
             if cloud_provider in CLOUD_PROVIDERS:
@@ -6326,110 +6898,26 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
                 if cloud_usage:
                     usage = _normalize_provider_usage(cloud_usage)
                 yield {"type": "token", "content": response_text}
-            elif _is_lmstudio_model(model):
-                # The homegrown tool protocol above (```tool fence parsed out
-                # of the plain-text reply by _extract_tool_call) doesn't care
-                # which backend produced the text, so LM Studio needs nothing
-                # tool-format-specific here — just its OpenAI-compatible
-                # streaming endpoint instead of Ollama's, and the "lmstudio/"
-                # prefix stripped back off before it's sent (LM Studio's own
-                # /v1/models ids never have that prefix).
-                lmstudio_model_id = model.split("/", 1)[1]
-                async with httpx.AsyncClient(timeout=120) as client:
-                    async with client.stream(
-                        "POST", f"{LMSTUDIO}/v1/chat/completions",
-                        json={"model": lmstudio_model_id, "messages": messages, "stream": True,
-                               "temperature": 0.2, "stream_options": {"include_usage": True}}
-                    ) as r:
-                        _pending_tool_call = None
-                        async for chunk in r.aiter_bytes():
-                            for line in chunk.decode(errors="replace").split("\n"):
-                                line = line.strip()
-                                if not line.startswith("data:"):
-                                    continue
-                                payload = line[len("data:"):].strip()
-                                if payload == "[DONE]" or not payload:
-                                    continue
-                                try:
-                                    data = json.loads(payload)
-                                except json.JSONDecodeError:
-                                    continue
-                                choices = data.get("choices") or [{}]
-                                delta = choices[0].get("delta") or {}
-                                content = delta.get("content")
-                                if content:
-                                    response_text += content
-                                    yield {"type": "token", "content": content}
-                                # Tool calls via OpenAI-compatible streaming
-                                tool_calls_delta = delta.get("tool_calls")
-                                if tool_calls_delta:
-                                    for tc in tool_calls_delta:
-                                        tc_name = tc.get("name", "")
-                                        tc_id = tc.get("id", "")
-                                        tc_func = tc.get("function", {})
-                                        tc_args = tc_func.get("arguments", "")
-                                        if tc_name and not _pending_tool_call:
-                                            _pending_tool_call = {"name": tc_name, "id": tc_id, "input": ""}
-                                            yield {"type": "tool_use_start", "name": tc_name, "id": tc_id}
-                                        if _pending_tool_call and tc_args:
-                                            _pending_tool_call["input"] += tc_args
-                                            yield {"type": "tool_use_delta", "id": tc_id, "input": tc_args}
-                                usage_field = data.get("usage")
-                                if usage_field:
-                                    usage = _normalize_provider_usage(usage_field)
-                        if _pending_tool_call:
-                            yield {"type": "tool_use_stop", "id": _pending_tool_call["id"],
-                                   "name": _pending_tool_call["name"],
-                                   "input": _pending_tool_call["input"]}
-                            response_text += _native_tool_call_to_fence(_pending_tool_call)
-            elif _is_llama_cpp_model(model):
-                llama_model_id = model.split("/", 1)[1]
-                async with httpx.AsyncClient(timeout=120) as client:
-                    async with client.stream(
-                        "POST", f"{LLAMA_CPP}/v1/chat/completions",
-                        json={"model": llama_model_id, "messages": messages, "stream": True,
-                               "temperature": 0.2, "stream_options": {"include_usage": True}}
-                    ) as r:
-                        _pending_tool_call = None
-                        async for chunk in r.aiter_bytes():
-                            for line in chunk.decode(errors="replace").split("\n"):
-                                line = line.strip()
-                                if not line.startswith("data:"):
-                                    continue
-                                payload = line[len("data:"):].strip()
-                                if payload == "[DONE]" or not payload:
-                                    continue
-                                try:
-                                    data = json.loads(payload)
-                                except json.JSONDecodeError:
-                                    continue
-                                choices = data.get("choices") or [{}]
-                                delta = choices[0].get("delta") or {}
-                                content = delta.get("content")
-                                if content:
-                                    response_text += content
-                                    yield {"type": "token", "content": content}
-                                tool_calls_delta = delta.get("tool_calls")
-                                if tool_calls_delta:
-                                    for tc in tool_calls_delta:
-                                        tc_name = tc.get("name", "")
-                                        tc_id = tc.get("id", "")
-                                        tc_func = tc.get("function", {})
-                                        tc_args = tc_func.get("arguments", "")
-                                        if tc_name and not _pending_tool_call:
-                                            _pending_tool_call = {"name": tc_name, "id": tc_id, "input": ""}
-                                            yield {"type": "tool_use_start", "name": tc_name, "id": tc_id}
-                                        if _pending_tool_call and tc_args:
-                                            _pending_tool_call["input"] += tc_args
-                                            yield {"type": "tool_use_delta", "id": tc_id, "input": tc_args}
-                                usage_field = data.get("usage")
-                                if usage_field:
-                                    usage = _normalize_provider_usage(usage_field)
-                        if _pending_tool_call:
-                            yield {"type": "tool_use_stop", "id": _pending_tool_call["id"],
-                                   "name": _pending_tool_call["name"],
-                                   "input": _pending_tool_call["input"]}
-                            response_text += _native_tool_call_to_fence(_pending_tool_call)
+            elif local_backend:
+                # LM Studio / llama.cpp / AirLLM all share one
+                # OpenAI-compatible /v1/chat/completions SSE shape — the homegrown
+                # ```tool fence protocol (_extract_tool_call) doesn't care which
+                # backend produced the text, so none of the three needs anything
+                # tool-format-specific here; the namespace prefix ("lmstudio/",
+                # "llama-cpp/", "airllm/") is stripped back off before it's sent
+                # (their /v1/models ids never carry it).
+                base_url, backend_model_id = local_backend
+                async for event in _stream_openai_compatible_chat(base_url, backend_model_id, messages):
+                    if event["type"] == "token":
+                        response_text += event["content"]
+                        yield {"type": "token", "content": event["content"]}
+                    elif event["type"] == "usage":
+                        usage = event["usage"]
+                    else:
+                        yield event
+                        if event["type"] == "tool_use_stop":
+                            response_text += _native_tool_call_to_fence(
+                                {"name": event["name"], "id": event["id"], "input": event["input"]})
             else:
                 # Tool-format reliability needs determinism: at Ollama's
                 # default temperature (~0.8) the same prompt flip-flops
@@ -7231,12 +7719,40 @@ async def set_summary(session_id: str, request: Request):
 
 def load_config() -> dict:
     if CONFIG_FILE.exists():
-        return json.loads(CONFIG_FILE.read_text())
+        try:
+            return json.loads(CONFIG_FILE.read_text())
+        except (json.JSONDecodeError, ValueError) as e:
+            # A half-written or corrupted file would 500 every endpoint that
+            # reads config. Repair from the last known-good backup instead of
+            # taking the app down.
+            logger.error("config.json is unreadable (%s); trying %s", e, CONFIG_BACKUP_FILE.name)
+            if CONFIG_BACKUP_FILE.exists():
+                try:
+                    backup = json.loads(CONFIG_BACKUP_FILE.read_text())
+                    CONFIG_FILE.write_text(json.dumps(backup, indent=2))
+                    logger.warning("Restored config.json from backup")
+                    return backup
+                except (json.JSONDecodeError, ValueError, OSError):
+                    pass
+            logger.error("No valid config backup; falling back to defaults")
     return {"save_dir": DEFAULT_SAVE_DIR, "teacher_model": "", "teacher_tiers": {"free": "", "paid": ""}}
 
 def write_config(cfg: dict):
     try:
-        CONFIG_FILE.write_text(json.dumps(cfg, indent=2))
+        payload = json.dumps(cfg, indent=2)
+        # Roll back up the last known-good file before replacing it — but
+        # only if it's valid JSON, so a corrupt file can't poison the backup.
+        if CONFIG_FILE.exists():
+            try:
+                current = CONFIG_FILE.read_text()
+                json.loads(current)
+                CONFIG_BACKUP_FILE.write_text(current)
+            except (json.JSONDecodeError, ValueError, OSError):
+                pass
+        # Atomic replace: a crash mid-write leaves the old file intact.
+        tmp = CONFIG_FILE.with_name(CONFIG_FILE.name + ".tmp")
+        tmp.write_text(payload)
+        os.replace(tmp, CONFIG_FILE)
     except (OSError, IOError) as e:
         raise HTTPException(status_code=500, detail=f"Failed to write config: {e}")
 
@@ -9005,13 +9521,13 @@ LESSONS_FILE = Path(__file__).parent.parent / "core_lessons.json"
 # ── humanizer_academic (vendored skill, MIT, github.com/matsuikentaro1/
 # humanizer_academic) ──────────────────────────────────────────────────────────
 # The full SKILL.md ships in skills/humanizer_academic/SKILL.md and is
-# registered into the user's skill library at startup below — that's what
-# get_skill serves for on-demand "humanize this text" requests. The automatic
-# pre-save pass (write_file/edit_file on prose) uses _HUMANIZER_CORE instead:
-# the full skill is ~13k tokens and would crowd out the text being edited on
-# local models, so the distilled core carries the operational rules.
-
-HUMANIZER_SKILL_FILE = Path(__file__).parent.parent / "skills" / "humanizer_academic" / "SKILL.md"
+# registered into the user's skill library at startup by
+# _register_builtin_skills() (which picks up every skills/<name>/SKILL.md) —
+# that's what get_skill serves for on-demand "humanize this text" requests.
+# The automatic pre-save pass (write_file/edit_file on prose) uses
+# _HUMANIZER_CORE instead: the full skill is ~13k tokens and would crowd out
+# the text being edited on local models, so the distilled core carries the
+# operational rules.
 
 PROSE_EXTS = {".md", ".txt", ".rst", ".tex"}
 
@@ -9058,24 +9574,31 @@ async def _humanize_text(model: str, text: str) -> str:
         return text
 
 async def _register_builtin_skills():
-    """Registers the vendored humanizer_academic skill, then bulk-imports
-    every Claude-format SKILL.md found under skills/vendor/ (cloned
-    third-party collections; the dir is gitignored). Idempotent by name —
-    restart after dropping a new repo in, and its skills appear. Called from
-    the lifespan (this app's @app.on_event handlers never fire)."""
+    """Registers every in-tree skill (skills/<name>/SKILL.md) as a builtin,
+    then bulk-imports every Claude-format SKILL.md found under skills/vendor/
+    (cloned third-party collections; the dir is gitignored). Idempotent by
+    name — drop a new skill dir in skills/ (or a new vendor repo in) and
+    restart, and it appears. Called from the lifespan (this app's
+    @app.on_event handlers never fire)."""
     try:
-        if HUMANIZER_SKILL_FILE.is_file():
-            body = HUMANIZER_SKILL_FILE.read_text(encoding="utf-8")
-            skills = _load_json_list(SKILLS_FILE)
-            if not any(s.get("name") == "humanizer_academic" for s in skills):
-                skills.append({
-                    "id": uuid.uuid4().hex[:12],
-                    "name": "humanizer_academic",
-                    "description": "Remove signs of AI-generated writing from prose (34-pattern skill, auto-applied to prose saves). Use when editing or reviewing any text that must not read as AI-written.",
-                    "instructions": body,
-                    "source": "builtin",
-                })
-                _save_json_list(SKILLS_FILE, skills)
+        skills_root = Path(__file__).parent.parent / "skills"
+        skills = _load_json_list(SKILLS_FILE)
+        for d in sorted(skills_root.iterdir()):
+            skill_file = d / "SKILL.md"
+            if not d.is_dir() or d.name == "vendor" or not skill_file.is_file():
+                continue
+            name, desc, body = _parse_skill_md(skill_file)
+            if not name or any(s.get("name") == name for s in skills):
+                continue
+            skills.append({
+                "id": uuid.uuid4().hex[:12],
+                "name": name,
+                "description": desc or f"Builtin skill ({name})",
+                "instructions": body,
+                "source": "builtin",
+            })
+        if len(skills) > len(_load_json_list(SKILLS_FILE)):
+            _save_json_list(SKILLS_FILE, skills)
     except Exception:
         pass
     _import_vendor_skills()
@@ -9333,6 +9856,7 @@ Conversation:
     return [summary_msg] + tail, summary[:400]
 
 _MODEL_CTX_CACHE: dict = {}
+_AIRLLM_CTX_WINDOW_CACHE: dict = {"window": None}  # the AirLLM server's prompt cap, cached per process
 
 async def _model_context_window(model: str) -> int:
     """Effective context window for auto-compaction. Local models: the agent
@@ -9343,6 +9867,18 @@ async def _model_context_window(model: str) -> int:
     if "/" in model and model.split("/", 1)[0] in CLOUD_PROVIDERS:
         return {"anthropic": 200_000, "openai": 128_000, "google": 1_000_000}.get(
             model.split("/", 1)[0], 128_000)
+    if _is_airllm_model(model):
+        # AirLLM truncates the prompt to the server's max_seq_len (default
+        # 8192 — set at load time), so the prompt window is the compaction
+        # budget whether or not the underlying model advertises more.
+        if _AIRLLM_CTX_WINDOW_CACHE["window"] is None:
+            try:
+                async with httpx.AsyncClient(timeout=5) as client:
+                    r = await client.get(f"{AIRLLM}/health")
+                    _AIRLLM_CTX_WINDOW_CACHE["window"] = min(int(r.json().get("max_seq_len") or 8192), 16384)
+            except Exception:
+                _AIRLLM_CTX_WINDOW_CACHE["window"] = 8192
+        return _AIRLLM_CTX_WINDOW_CACHE["window"]
     if model in _MODEL_CTX_CACHE:
         return _MODEL_CTX_CACHE[model]
     try:

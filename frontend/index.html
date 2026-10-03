@@ -64,13 +64,20 @@
   header h1 span { color: var(--copper); }
   header h1 .byline { display: block; font-size: 10px; font-weight: 400; color: var(--muted); letter-spacing: .3px; }
   .header-right { margin-left: auto; display: flex; align-items: center; gap: 18px; }
-  .status-group { display: flex; align-items: center; gap: 8px; }
-  .status-dot {
-    width: 8px; height: 8px; border-radius: 50%;
-    background: var(--muted); transition: background .3s;
+  .status-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); transition: background-color .3s; }
+  .status-dot.active { background: var(--accent); }
+  .status-dot.inactive { background: var(--danger); }
+  .status-item { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--muted); white-space: nowrap; }
+
+  #status-area {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 12px;
+    padding: 4px 8px;
+    background: var(--panel);
+    border-radius: 6px;
   }
-  .status-dot.ok { background: var(--accent); }
-  .status-text { font-size: 12px; color: var(--muted); }
   .update-models-group { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
   #update-models-btn {
     background: var(--accent); color: #fff; border: none; border-radius: 6px;
@@ -942,8 +949,16 @@
   }
   .lsp-running { border-color: var(--accent); color: var(--accent); }
   .lsp-available { border-color: var(--accent2); color: var(--accent2); }
-  .lsp-missing { border-color: var(--danger); color: var(--danger); }
+  .lsp-missing, .lsp-error { border-color: var(--danger); color: var(--danger); }
   .lsp-off { border-color: var(--warn); color: var(--warn); }
+  .lsp-group { display: inline-flex; align-items: center; gap: 4px; }
+  .lsp-test {
+    font-size: 10px; padding: 2px 7px; border-radius: 999px; cursor: pointer;
+    border: 1px solid var(--border); background: var(--surface); color: var(--muted);
+  }
+  .lsp-test:hover { border-color: var(--accent2); color: var(--accent2); }
+  .lsp-test-ok { border-color: var(--accent); color: var(--accent); }
+  .lsp-test-fail { border-color: var(--danger); color: var(--danger); }
   .model-card {
     background: var(--surface); border: 1px solid var(--border);
     border-radius: 8px; padding: 14px 16px; margin-bottom: 10px;
@@ -1068,18 +1083,24 @@
       <button id="update-models-btn" onclick="updateModelsAndTiers()">Update Models</button>
       <span class="update-models-desc">Refreshes the model catalog, coding-ability tiers, and language server versions</span>
     </div>
-    <div class="status-group">
+    <div id="status-area">
+    <div class="status-item">
       <div id="status-dot" class="status-dot"></div>
-      <span id="status-text" class="status-text">Connecting...</span>
+      <span>Ollama</span>
     </div>
-    <div class="status-group">
+    <div class="status-item">
       <div id="lmstudio-status-dot" class="status-dot"></div>
-      <span id="lmstudio-status-text" class="status-text">LM Studio</span>
+      <span>LM Studio</span>
     </div>
-    <div class="status-group">
+    <div class="status-item">
       <div id="llama-cpp-status-dot" class="status-dot"></div>
-      <span id="llama-cpp-status-text" class="status-text">llama.cpp</span>
+      <span>llama.cpp</span>
     </div>
+    <div class="status-item">
+      <div id="airllm-status-dot" class="status-dot"></div>
+      <span>AirLLM</span>
+    </div>
+  </div>
   </div>
 </header>
 
@@ -1890,6 +1911,7 @@ let currentConvId = null;
 let installedModels = [];
 let installedModelsLmstudio = [];
 let installedModelsLlamaCpp = [];
+let installedModelsAirllm = [];
 // Keyed by conversation id, not a single global bool/controller — this is
 // what lets the user switch to (or start) a different chat while another is
 // still streaming. Each entry: { abortController, fullText, tokenCount }.
@@ -1965,6 +1987,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     localStorage.setItem('selectedModel', e.target.value);
     checkModelFit(e.target.value);
     checkModelUpdates(e.target.value);
+    const v = e.target.value;
+    if (v.startsWith('airllm/')) {
+      const id = v.slice('airllm/'.length);
+      // Downloaded but not loaded: start the load now, so the selection is
+      // usable instead of 409-ing on the first send.
+      if (!installedModelsAirllm.includes(id)) loadAirllmModel(id);
+    }
   });
 
   const input = document.getElementById('chat-input');
@@ -2064,36 +2093,34 @@ async function applyUpdate() {
 }
 
 async function checkStatus() {
-  const lmDot = document.getElementById('lmstudio-status-dot');
-  const lmTxt = document.getElementById('lmstudio-status-text');
-  const llDot = document.getElementById('llama-cpp-status-dot');
-  const llTxt = document.getElementById('llama-cpp-status-text');
   try {
     const r = await fetch(`${API}/api/health`);
     const d = await r.json();
-    const dot = document.getElementById('status-dot');
-    const txt = document.getElementById('status-text');
-    dot.className = d.ollama ? 'status-dot ok' : 'status-dot';
-    txt.textContent = d.ollama ? 'Ollama connected' : 'Ollama disconnected';
-    // Always reload — this repopulates Local, LM Studio, llama.cpp, AND
-    // Cloud optgroups, not just Ollama's own models, so it must not be
-    // gated on Ollama's connection status specifically (was previously
-    // `if (d.ollama) await loadModels()`, which left the whole selector
-    // empty on Ollama-less / not-yet-started setups).
+    // Update each status item's dot color based on health
+    const statusItems = document.querySelectorAll('#status-area .status-item');
+    const backends = ['ollama', 'lmstudio', 'llama_cpp', 'airllm'];
+    
+    statusItems.forEach((item, index) => {
+      const dot = item.querySelector('.status-dot');
+      if (dot && backends[index]) {
+        if (d[backends[index]]) {
+          dot.className = 'status-dot active';
+        } else {
+          dot.className = 'status-dot inactive';
+        }
+      }
+    });
+    
+    // Always reload models
     await loadModels();
-    lmDot.className = d.lmstudio ? 'status-dot ok' : 'status-dot';
-    lmTxt.textContent = d.lmstudio ? 'LM Studio connected' : 'LM Studio disconnected';
-    if (llDot) { llDot.className = d.llama_cpp ? 'status-dot ok' : 'status-dot'; }
-    if (llTxt) { llTxt.textContent = d.llama_cpp ? 'llama.cpp connected' : 'llama.cpp disconnected'; }
-  } catch {
-    document.getElementById('status-dot').className = 'status-dot';
-    document.getElementById('status-text').textContent = 'Backend offline';
-    lmDot.className = 'status-dot'; lmTxt.textContent = 'LM Studio disconnected';
-    if (llDot) llDot.className = 'status-dot';
-    if (llTxt) llTxt.textContent = 'llama.cpp disconnected';
+    refreshAirllmStatus();
+  } catch (err) {
+    // On error, set all dots to inactive
+    document.querySelectorAll('#status-area .status-dot').forEach(dot => {
+      dot.className = 'status-dot inactive';
+    });
   }
 }
-
 function togglePwVisibility(inputId, btnEl) {
   const input = document.getElementById(inputId);
   if (!input) return;
@@ -2212,24 +2239,44 @@ async function checkForUpdateFromAbout() {
 
 async function loadModels() {
   try {
-    const [r, rLmstudio, rLlamaCpp, rCloud] = await Promise.all([
+    const [r, rLmstudio, rLlamaCpp, rAirllm, rAirllmCatalog, rCloud] = await Promise.all([
       fetch(`${API}/api/models`),
       fetch(`${API}/api/models/lmstudio`).catch(() => null),
       fetch(`${API}/api/models/llama-cpp`).catch(() => null),
+      fetch(`${API}/api/models/airllm`).catch(() => null),
+      fetch(`${API}/api/models/airllm/catalog`).catch(() => null),
       fetch(`${API}/api/models/cloud`).catch(() => null),
     ]);
     const d = await r.json();
     installedModels = d.models || [];
     if (rLmstudio) { try { installedModelsLmstudio = (await rLmstudio.json()).models || []; } catch {} }
     if (rLlamaCpp) { try { installedModelsLlamaCpp = (await rLlamaCpp.json()).models || []; } catch {} }
+    if (rAirllm) { try { installedModelsAirllm = (await rAirllm.json()).models || []; } catch {} }
+    if (rAirllmCatalog) { try { airllmCatalog = (await rAirllmCatalog.json()); } catch { airllmCatalog = null; } }
     let cloudModels = [];
     if (rCloud) { try { cloudModels = (await rCloud.json()).models || []; } catch {} }
-    // "lmstudio/" prefixed, same "<namespace>/<rest>" shape cloud model refs
-    // already use — _is_lmstudio_model() on the backend strips it back off
-    // before talking to LM Studio's own API. Without this prefix an LM
-    // Studio model selected here was indistinguishable from an Ollama name
-    // and _agent_turns() sent it straight to Ollama, which 404'd on it.
+    // "lmstudio/" / "llama-cpp/" / "airllm/" prefixed, same "<namespace>/
+    // <rest>" shape cloud model refs already use — _is_lmstudio_model() and
+    // friends on the backend strip the prefix back off before talking to the
+    // server's own API. Without the prefix a model selected here is
+    // indistinguishable from an Ollama name and _agent_turns() sends it
+    // straight to Ollama, which 404s on it. (The LM Studio optgroup below
+    // used to emit the RAW id — a llama-cpp-era refactor kept the prefix
+    // for llama-cpp but dropped it for LM Studio, so selecting one from the
+    // dropdown silently hit Ollama; useModel()'s own lmstudio/ construction
+    // was the only prefixed path, which is why this stayed hidden.)
+    const lmstudioModels = installedModelsLmstudio.map(m => `lmstudio/${m}`);
     const llamaCppModels = installedModelsLlamaCpp.map(m => `llama-cpp/${m}`);
+    // AirLLM dropdown = loaded models + downloaded-but-not-loaded ones (from
+    // the catalog), so a fresh download is selectable immediately; picking
+    // one triggers the load (see the change handler below).
+    const airllmModels = [
+      ...installedModelsAirllm,
+      ...((airllmCatalog && airllmCatalog.models) || [])
+        .filter(m => m.installed && !m.loaded)
+        .map(m => m.id)
+        .filter(id => !installedModelsAirllm.includes(id)),
+    ].map(m => `airllm/${m}`);
     const sel = document.getElementById('model-select');
     const prev = sel.value;
     const saved = localStorage.getItem('selectedModel');
@@ -2243,16 +2290,21 @@ async function loadModels() {
     // was already selected) in its correct group even if this cycle's fetch
     // didn't confirm it, instead of letting it silently vanish.
     const keep = saved || prev || '';
-    if (keep && !installedModels.includes(keep) && !installedModelsLmstudio.includes(keep)
-        && !llamaCppModels.includes(keep) && !cloudModels.includes(keep)) {
+    if (keep && !installedModels.includes(keep) && !lmstudioModels.includes(keep)
+        && !llamaCppModels.includes(keep) && !airllmModels.includes(keep)
+        && !cloudModels.includes(keep)) {
       cloudModels = [keep, ...cloudModels];
     }
-    const allModels = [...installedModels, ...installedModelsLmstudio, ...llamaCppModels, ...cloudModels];
+    const allModels = [...installedModels, ...lmstudioModels, ...llamaCppModels, ...airllmModels, ...cloudModels];
     sel.innerHTML = allModels.length
       ? [
           installedModels.length ? `<optgroup label="Local">${installedModels.map(m => `<option value="${m}">${m}</option>`).join('')}</optgroup>` : '',
-          installedModelsLmstudio.length ? `<optgroup label="Local (LM Studio)">${installedModelsLmstudio.map((m, i) => `<option value="${m}">${escHtml(installedModelsLmstudio[i])}</option>`).join('')}</optgroup>` : '',
-          llamaCppModels.length ? `<optgroup label="Local (llama.cpp)">${llamaCppModels.map((m, i) => `<option value="${m}">${escHtml(installedModelsLlamaCpp[i])}</option>`).join('')}</optgroup>` : '',
+          lmstudioModels.length ? `<optgroup label="Local (LM Studio)">${lmstudioModels.map(m => `<option value="${m}">${escHtml(m)}</option>`).join('')}</optgroup>` : '',
+          llamaCppModels.length ? `<optgroup label="Local (llama.cpp)">${llamaCppModels.map(m => `<option value="${m}">${escHtml(m)}</option>`).join('')}</optgroup>` : '',
+          airllmModels.length ? `<optgroup label="Local (AirLLM)">${airllmModels.map(m => {
+            const loaded = installedModelsAirllm.includes(m.replace(/^airllm\//, ''));
+            return `<option value="${m}">${escHtml(airllmDisplayLabel(m))}${loaded ? '' : ' — not loaded yet'}</option>`;
+          }).join('')}</optgroup>` : '',
           cloudModels.length ? `<optgroup label="Cloud">${cloudModels.map(m => `<option value="${m}">${m}</option>`).join('')}</optgroup>` : '',
         ].join('')
       : '<option value="">No models installed</option>';
@@ -4538,6 +4590,7 @@ function renderModelsTab() {
   const isInstalled = (name, provider = 'ollama') => {
     const list = provider === 'lmstudio' ? installedModelsLmstudio
                  : provider === 'llama-cpp' ? installedModelsLlamaCpp
+                 : provider === 'airllm' ? installedModelsAirllm
                  : installedModels;
     return list.some(im => im === name || im.startsWith(name.split(':')[0] + ':'));
   };
@@ -4555,7 +4608,7 @@ function renderModelsTab() {
     const installed = !isCloudOnly && isInstalled(m.name, provider);
     const id = m.name.replace(/[:.\/]/g, '_');
     const sizeLabel = m.size_gb == null ? '' : m.size_gb >= 20 ? `${m.size_gb} GB — needs CPU offload` : `${m.size_gb} GB`;
-    const providerBadge = `<span class="model-badge">${provider === 'lmstudio' ? 'LM Studio' : provider === 'llama-cpp' ? 'llama.cpp' : provider === 'openrouter' ? 'OpenRouter' : 'Ollama'}</span>`;
+    const providerBadge = `<span class="model-badge">${provider === 'lmstudio' ? 'LM Studio' : provider === 'llama-cpp' ? 'llama.cpp' : provider === 'airllm' ? 'AirLLM' : provider === 'openrouter' ? 'OpenRouter' : 'Ollama'}</span>`;
     const rankBadge = rank !== 0 ? `<span class="model-badge" style="background:var(--accent);color:#fff;padding:2px 6px;border-radius:4px;font-size:10px;margin-left:4px">#${rank}</span>` : '';
     const updatable = provider === 'ollama' && modelUpdates[m.name];
     const ctx = provider === 'ollama' && modelContextLengths[m.name]
@@ -4581,6 +4634,9 @@ function renderModelsTab() {
              <button class="btn btn-secondary btn-sm" onclick="dismissModelUpdate('${escHtml(m.name)}')" title="Skip this build">✕</button>` : ''}
              <button class="btn ${updatable ? 'btn-secondary' : 'btn-accent'} btn-sm" onclick="useModel('${escHtml(m.name)}')">Use</button>
              <button class="btn btn-secondary btn-sm" onclick="deleteModel('${escHtml(m.name)}')">Remove</button>`
+          : provider === 'airllm'
+          ? `<button class="btn btn-accent btn-sm" onclick="useModel('${escHtml(m.name)}', 'airllm')">Use</button>
+             <button class="btn btn-secondary btn-sm" onclick="unloadAirllmModel()" title="Frees the model from the AirLLM server (VRAM/RAM)">Unload</button>`
           : `<button class="btn btn-accent btn-sm" onclick="useModel('${escHtml(m.name)}', 'lmstudio')">Use</button>
              <button class="btn btn-secondary btn-sm" onclick="deleteModel('${escHtml(m.name)}', 'lmstudio')">Remove</button>`}`;
     } else {
@@ -4625,8 +4681,12 @@ function renderModelsTab() {
     for (const n of installedModelsLlamaCpp) {
       rows.push({ name: n, desc: 'llama.cpp model (local, on this machine)', size_gb: null, category: 'general', provider: 'llama-cpp' });
     }
+    for (const n of installedModelsAirllm) {
+      rows.push({ name: n, desc: 'AirLLM model (big models streamed layer-by-layer onto the GPU — small VRAM, long context, slow)', size_gb: null, category: 'general', provider: 'airllm' });
+    }
     const filtered = rows.filter(r => matchesSearch(r.name, r.desc)).sort(byRank);
     html += sectionTitle('💾', 'Local', 'installed on this machine — private, no per-token cost');
+    html += airllmPanelHtml();
     html += filtered.length
       ? filtered.map(card).join('')
       : emptyNote('No local models installed yet — pull one from Free or Uncensored.');
@@ -4647,6 +4707,9 @@ function renderModelsTab() {
     }
     for (const n of installedModelsLlamaCpp) {
       if (UNCENSORED_RE.test(n)) rows.push({ name: n, desc: 'llama.cpp model (local, on this machine)', size_gb: null, category: 'uncensored', provider: 'llama-cpp' });
+    }
+    for (const n of installedModelsAirllm) {
+      if (UNCENSORED_RE.test(n)) rows.push({ name: n, desc: 'AirLLM model (local, streamed layer-by-layer)', size_gb: null, category: 'uncensored', provider: 'airllm' });
     }
     for (const c of catalog) {
       if (c.category === 'uncensored' && !rows.some(r => r.name === c.name))
@@ -4780,9 +4843,53 @@ async function setGatewayModel(provider, model) {
   await loadModels(); // refreshes #model-select's Cloud optgroup to the new choice
 }
 
+// The chip must say what the backend actually verified, never a theory:
+// "available" = every executable in the server's chain exists in the
+// container; "not installed" = part of the chain is missing; "fails to
+// start" = present but the last start errored. The "test" button runs a
+// live initialize→shutdown handshake so a normal user can see proof.
+const LSP_STATE_LABELS = {
+  running: "Running", available: "Available",
+  missing: "Not installed", error: "Fails to start",
+};
+
+async function lspTest(name, btn) {
+  btn.disabled = true;
+  const old = btn.textContent;
+  btn.textContent = "…";
+  try {
+    const r = await fetch(`${API}/api/lsp/check`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ servers: [name] }),
+    });
+    const res = ((await r.json()).servers || [])[0] || {};
+    btn.textContent = res.ok ? "✓" : "✗";
+    btn.title = res.ok
+      ? `${name} started and finished an LSP handshake in ${res.ms}ms`
+      : `${name}: ${res.error}`;
+    btn.classList.toggle("lsp-test-ok", !!res.ok);
+    btn.classList.toggle("lsp-test-fail", !!res.error);
+  } catch (e) {
+    btn.textContent = "✗";
+    btn.title = String(e);
+    btn.classList.add("lsp-test-fail");
+  }
+  setTimeout(() => {
+    btn.textContent = old; btn.disabled = false; btn.title = "";
+    btn.classList.remove("lsp-test-ok", "lsp-test-fail");
+  }, 6000);
+}
+
 async function loadLspStatus() {
   const el = document.getElementById('lsp-status-list');
   if (!el) return;
+  if (!el.dataset.lspBound) {
+    el.dataset.lspBound = "1";
+    el.addEventListener("click", e => {
+      const btn = e.target.closest(".lsp-test");
+      if (btn) lspTest(btn.dataset.lsp, btn);
+    });
+  }
   try {
     const [r, rStale] = await Promise.all([
       fetch(`${API}/api/lsp/status`),
@@ -4799,7 +4906,10 @@ async function loadLspStatus() {
       const v = staleByName[s.name];
       const versionNote = v?.installed ? ` (${escHtml(v.installed)})` : '';
       const updateBadge = v?.update_available ? ` <span title="Latest: ${escHtml(v.latest)}">⬆</span>` : '';
-      return `<span class="lsp-chip lsp-${s.state}" title="${escHtml(s.command.join(' '))} — ${escHtml(s.extensions.join(' '))}${v?.latest ? ` — latest available: ${escHtml(v.latest)}` : ''}">${escHtml(s.name)} · ${s.state}${versionNote}${updateBadge}</span>`;
+      const label = LSP_STATE_LABELS[s.state] || s.state;
+      const tip = `${escHtml(s.reason)} — runs \`${escHtml(s.command.join(' '))}\`${v?.latest ? ` — latest available: ${escHtml(v.latest)}` : ''}`;
+      return `<span class="lsp-group"><span class="lsp-chip lsp-${s.state}" title="${tip}">${escHtml(s.name)} · ${label}${versionNote}${updateBadge}</span>` +
+        `<button class="lsp-test" data-lsp="${escHtml(s.name)}" title="Run a live LSP start-up test">test</button></span>`;
     }).join('') || '<span class="lsp-chip">no servers configured</span>';
   } catch {
     el.innerHTML = '<span class="lsp-chip">status unavailable</span>';
@@ -4973,6 +5083,8 @@ function useModel(name, provider = 'ollama') {
   const sel = document.getElementById('model-select');
   const match = provider === 'lmstudio'
     ? (installedModelsLmstudio.includes(name) ? `lmstudio/${name}` : null)
+    : provider === 'airllm'
+    ? (installedModelsAirllm.includes(name) ? `airllm/${name}` : null)
     : installedModels.find(im => im === name || im.startsWith(name.split(':')[0] + ':'));
   if (match) {
     sel.value = match;
@@ -4992,6 +5104,169 @@ async function deleteModel(name, provider = 'ollama') {
   }
   await loadModels();
   await loadModelRankings();
+}
+
+// ── AirLLM (streamed-layer big-model inference, local) ─────────────────────────
+
+let airllmStatus = null;   // last /api/models/airllm/status response
+let airllmCatalog = null;  // last /api/models/airllm/catalog response
+let airllmPollTimer = null;
+
+// Human label for a dropdown "airllm/<id>" ref — the catalog's display name
+// when known, the raw ref otherwise (the optgroup already tags the provider,
+// and the value stays the routable ref).
+function airllmDisplayLabel(ref) {
+  const id = String(ref).replace(/^airllm\//, '');
+  const hit = ((airllmCatalog && airllmCatalog.models) || []).find(e => e.id === id);
+  return hit ? hit.name : ref;
+}
+
+async function loadAirllmCatalog() {
+  try {
+    const r = await fetch(`${API}/api/models/airllm/catalog`);
+    airllmCatalog = await r.json();
+  } catch { airllmCatalog = null; }
+}
+
+function airllmPanelHtml() {
+  const s = airllmStatus || {};
+  const state = s.loading
+    ? `<span style="color:var(--warn)">${escHtml(s.loading)}…</span>`
+    : s.model
+    ? `<span style="color:var(--accent)">Loaded: ${escHtml(s.model)}${s.max_seq_len ? ` (prompt ≤ ${s.max_seq_len})` : ''} on ${escHtml(s.device || '?')}</span>`
+    : s.ok
+    ? `<span style="color:var(--muted)">Running — no model loaded${s.error ? ` (last error: ${escHtml(s.error)})` : ''}</span>`
+    : `<span style="color:var(--muted)">Server not running — run <code>setup/airllm-linux.sh</code> (builds the venv and starts the server)</span>`;
+  const models = ((airllmCatalog && airllmCatalog.models) || []);
+  const rows = models.map(m => {
+    const badge = m.loaded
+      ? '<span class="model-badge" style="color:var(--accent)">Loaded</span>'
+      : m.installed
+      ? '<span class="model-badge" style="color:var(--accent2)">Ready</span>'
+      : '<span class="model-badge">Not downloaded</span>';
+    const size = m.size_gb ? ` · ~${m.size_gb} GB` : '';
+    const busy = s.loading && s.loading.includes(m.id);
+    const action = m.loaded
+      ? '<button class="btn btn-secondary btn-sm" onclick="unloadAirllmModel()">Unload</button>'
+      : m.installed
+      ? `<button class="btn btn-accent btn-sm" onclick="loadAirllmModel('${escHtml(m.id)}')">Load</button>`
+      : busy
+      ? `<span style="font-size:11px;color:var(--warn)" title="${escHtml(s.loading || '')}">working…</span>`
+      : `<button class="btn btn-secondary btn-sm" ${s.ok ? '' : 'disabled title="AirLLM server not running"'} onclick="downloadAirllmModel('${escHtml(m.id)}')">Download</button>`;
+    return `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">
+      <div style="flex:1;min-width:0">
+        <div style="font-size:12px;font-weight:600">${escHtml(m.name)} ${badge}</div>
+        <div style="font-size:11px;color:var(--muted)">${escHtml(m.blurb)}${size}</div>
+      </div>
+      ${action}
+    </div>`;
+  }).join('');
+  return `
+    <div class="model-card" id="card-airllm-panel" style="border-color:rgba(210,153,34,.35)">
+      <div class="model-info">
+        <div class="model-name">AirLLM <span class="model-badge">AirLLM</span></div>
+        <div class="model-desc">Run 70B-class models on a small GPU: weights stream layer-by-layer disk → GPU, so VRAM holds one layer, not the model. Trade-off: tokens are slow (every token re-reads the layers).</div>
+        <div style="font-size:12px;margin-top:4px">${state}</div>
+        ${s.cache_dir ? `<div style="font-size:11px;color:var(--muted);margin-top:2px">Model cache: <code>${escHtml(s.cache_dir)}</code>${airllmCatalog && airllmCatalog.server && airllmCatalog.server.disk_free_gb != null ? ` · ${airllmCatalog.server.disk_free_gb} GB free` : ''}</div>` : ''}
+        ${models.length ? `<div style="margin-top:8px">${rows}</div>` : ''}
+        <details style="margin-top:8px">
+          <summary style="font-size:11px;color:var(--muted);cursor:pointer">Custom Hugging Face model (repo id)</summary>
+          <div style="display:flex;gap:6px;margin-top:6px;align-items:center;flex-wrap:wrap">
+            <input id="airllm-custom-input" placeholder="org/model — e.g. Qwen/Qwen2.5-7B-Instruct" style="flex:1;min-width:220px;padding:6px 8px;border-radius:6px;border:1px solid var(--border);background:var(--panel);color:var(--text);font-size:12px">
+            <button class="btn btn-secondary btn-sm" ${s.ok ? '' : 'disabled'} onclick="downloadAirllmModel(document.getElementById('airllm-custom-input').value)">Download</button>
+            <button class="btn btn-accent btn-sm" ${s.ok ? '' : 'disabled'} onclick="loadAirllmModel(document.getElementById('airllm-custom-input').value)">Load</button>
+          </div>
+        </details>
+      </div>
+    </div>`;
+}
+
+async function refreshAirllmStatus() {
+  try {
+    const r = await fetch(`${API}/api/models/airllm/status`);
+    airllmStatus = await r.json();
+  } catch {
+    airllmStatus = null;
+  }
+  // Only repaint the panel itself (renderModelsTab() rebuilds the whole
+  // tab, which would also rebuild any focused search input mid-keystroke).
+  const panel = document.getElementById('card-airllm-panel');
+  if (panel) panel.outerHTML = airllmPanelHtml();
+}
+
+// Poll helper shared by download/load: refresh the panel every 5 s while the
+// sidecar reports a load/download in flight, then refresh the catalog (so
+// the Ready/Loaded badges flip the moment it finishes) and the dropdown.
+function startAirllmPoll(onDone) {
+  if (airllmPollTimer) clearInterval(airllmPollTimer);
+  airllmPollTimer = setInterval(async () => {
+    await refreshAirllmStatus();
+    if (!airllmStatus || !airllmStatus.loading) {
+      clearInterval(airllmPollTimer);
+      airllmPollTimer = null;
+      await loadAirllmCatalog();
+      await loadModels();
+      onDone(airllmStatus);
+    }
+  }, 5000);
+}
+
+async function downloadAirllmModel(model) {
+  model = String(model || '').trim();
+  if (!model) return;
+  if (!confirm(`Download ${model} into the AirLLM cache?\n\nThis fetches the full model from Hugging Face and splits it into per-layer shards. Both stay on disk (roughly 1.35x the model size).`)) return;
+  try {
+    const r = await fetch(`${API}/api/models/airllm/download`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model }),
+    });
+    const d = await r.json();
+    if (!r.ok) { alert(`AirLLM download failed: ${d.detail || JSON.stringify(d)}`); return; }
+    if (d.already_installed) {
+      showToast(`${model} is already in the AirLLM cache — no download needed.`, 6000);
+      await loadAirllmCatalog(); await loadModels();
+      return;
+    }
+    showToast(`Downloading ${model} — first time takes a while.`, 10000);
+    await refreshAirllmStatus();
+    startAirllmPoll(status => {
+      if (status && status.error) alert(`AirLLM download failed: ${status.error}`);
+      else if (status) showToast(`${model} is ready — press Load to run it.`, 10000);
+    });
+  } catch (err) {
+    alert(`AirLLM download failed: ${err.message}`);
+  }
+}
+
+async function loadAirllmModel(model) {
+  model = String(model || '').trim();
+  if (!model) return;
+  try {
+    const r = await fetch(`${API}/api/models/airllm/load`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model }),
+    });
+    const d = await r.json();
+    if (!r.ok) { alert(`AirLLM load failed: ${d.detail || JSON.stringify(d)}`); return; }
+    showToast(`Loading ${model} into AirLLM…`, 8000);
+    await refreshAirllmStatus();
+    startAirllmPoll(status => {
+      if (status && status.model && !status.error) showToast(`AirLLM model ${status.model} is loaded.`, 8000);
+      else if (status && status.error) alert(`AirLLM load failed: ${status.error}`);
+    });
+  } catch (err) {
+    alert(`AirLLM load failed: ${err.message}`);
+  }
+}
+
+async function unloadAirllmModel() {
+  try {
+    await fetch(`${API}/api/models/airllm/unload`, { method: 'POST' });
+    await refreshAirllmStatus();
+    await loadModels();
+  } catch (err) {
+    alert(`AirLLM unload failed: ${err.message}`);
+  }
 }
 
 async function pullCustomModel() {

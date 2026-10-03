@@ -2,6 +2,8 @@ backend/venv/
 backend/__pycache__/
 conversations.json
 config.json
+config.json.bak
+config.json.tmp
 email_accounts.json
 calendar_accounts.json
 calendar_events.json
@@ -44,3 +46,4 @@ backend/trainer.db-*
 
 # Downloaded weights live under here (never committed to git / GitHub)
 models/weights/
+.lsp-live-check/

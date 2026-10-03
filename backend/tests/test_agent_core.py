@@ -215,5 +215,180 @@ class AgentCoreTests(unittest.TestCase):
                 self.assertEqual(providers, before)
 
 
+# ── AirLLM integration (local OpenAI-compatible backend, like LM Studio /
+# ── llama.cpp) ───────────────────────────────────────────────────────────────
+
+def _sse_bytes(events):
+    out = b"".join(f"data: {json.dumps(ev)}\n\n".encode() for ev in events)
+    return out + b"data: [DONE]\n\n"
+
+
+class _FakeSSEStream:
+    def __init__(self, sse: bytes):
+        self._sse = sse
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    def aiter_bytes(self):
+        async def gen():
+            yield self._sse
+        return gen()
+
+
+class _FakeAsyncClient:
+    """Stands in for httpx.AsyncClient in the local-server tests: records
+    every stream()/post() call and returns canned SSE / JSON bodies from
+    the per-test sse_by_url / json_by_url tables."""
+
+    sse_by_url = {}
+    json_by_url = {}
+    calls = []
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    def stream(self, method, url, json=None, **kwargs):
+        type(self).calls.append((method, url, json))
+        return _FakeSSEStream(self.sse_by_url[url])
+
+    async def get(self, url, **kwargs):
+        type(self).calls.append(("get", url, None))
+
+        class _Resp:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self.json_body
+
+        resp = _Resp()
+        resp.json_body = self.json_by_url[url]
+        return resp
+
+    async def post(self, url, json=None, **kwargs):
+        type(self).calls.append(("post", url, json))
+
+        class _Resp:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self.json_body
+
+        resp = _Resp()
+        resp.json_body = self.json_by_url[url]
+        return resp
+
+
+class AirllmIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        self.sse = {}
+        self.jsonb = {}
+        # The fake client's response tables are class-level so the
+        # main.app-created instances pick up this test's fixtures.
+        _FakeAsyncClient.sse_by_url = self.sse
+        _FakeAsyncClient.json_by_url = self.jsonb
+
+    def _patch_client(self, fake_cls):
+        return patch.object(main.httpx, "AsyncClient", fake_cls)
+
+    def test_airllm_namespace_detection(self):
+        self.assertTrue(main._is_airllm_model("airllm/meta-llama/Llama-3.1-8B-Instruct"))
+        self.assertFalse(main._is_airllm_model("llama-cpp/model.gguf"))
+        self.assertFalse(main._is_airllm_model("ollama-qwen"))
+
+    def test_local_backend_resolution_covers_all_three_servers(self):
+        self.assertEqual(
+            main._local_openai_compatible_backend("lmstudio/some-model"),
+            (main.LMSTUDIO, "some-model"))
+        self.assertEqual(
+            main._local_openai_compatible_backend("llama-cpp/m.gguf"),
+            (main.LLAMA_CPP, "m.gguf"))
+        self.assertEqual(
+            main._local_openai_compatible_backend("airllm/Qwen/Qwen3-30B-A3B"),
+            (main.AIRLLM, "Qwen/Qwen3-30B-A3B"))
+        self.assertIsNone(main._local_openai_compatible_backend("qwen2.5-coder:32b"))
+
+    def test_llm_complete_sends_airllm_to_airllm_server_with_stripped_id(self):
+        url = f"{main.AIRLLM}/v1/chat/completions"
+        self.jsonb[url] = {"choices": [{"message": {"content": "air answer"}}]}
+        # _llm_complete verifies the sidecar has the model loaded first.
+        self.jsonb[f"{main.AIRLLM}/health"] = {
+            "ok": True, "model": "Qwen/Qwen3-30B-A3B", "loading": None, "error": None}
+        with self._patch_client(_FakeAsyncClient):
+            answer = asyncio.run(main._llm_complete("airllm/Qwen/Qwen3-30B-A3B",
+                                                    [{"role": "user", "content": "hi"}]))
+        self.assertEqual(answer, "air answer")
+
+    def test_stream_openai_compatible_chat_yields_token_tool_and_usage_events(self):
+        url = f"{main.AIRLLM}/v1/chat/completions"
+        self.sse[url] = _sse_bytes([
+            {"choices": [{"delta": {"content": "Hel"}}]},
+            {"choices": [{"delta": {"content": "lo!"}}]},
+            {"choices": [{"delta": {"tool_calls": [
+                {"name": "read_file", "id": "call-1", "function": {"arguments": '{"path":'}}]}}]},
+            {"choices": [{"delta": {"tool_calls": [
+                {"name": "", "id": "call-1", "function": {"arguments": '"a.txt"}'}}]}}]},
+            {"choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 3}},
+        ])
+        async def collect():
+            return [
+                ev async for ev in main._stream_openai_compatible_chat(
+                    main.AIRLLM, "some-model", [{"role": "user", "content": "x"}])
+            ]
+
+        with self._patch_client(_FakeAsyncClient):
+            events = asyncio.run(collect())
+        self.assertEqual([e["type"] for e in events],
+                         ["token", "token", "tool_use_start", "tool_use_delta", "tool_use_delta",
+                          "usage", "tool_use_stop"])
+        self.assertEqual(events[0]["content"] + events[1]["content"], "Hello!")
+        self.assertEqual(events[5]["usage"]["prompt_eval_count"], 10)
+        self.assertEqual(events[5]["usage"]["eval_count"], 3)
+
+    def test_agent_turns_routes_airllm_models_through_openai_compatible_stream(self):
+        url = f"{main.AIRLLM}/v1/chat/completions"
+        self.sse[url] = _sse_bytes([
+            {"choices": [{"delta": {"content": "Done: 2+2=4."}}]},
+            {"choices": [], "usage": {"prompt_tokens": 20, "completion_tokens": 6}},
+        ])
+        # The agent loop verifies the sidecar has the model loaded first.
+        self.jsonb[f"{main.AIRLLM}/health"] = {
+            "ok": True, "model": "some-model", "loading": None, "error": None}
+
+        conv = [{"role": "user", "content": "what is 2+2?"}]
+
+        async def drive():
+            seen = []
+            async for ev in main._agent_turns("airllm/some-model", conv, max_turns=3, tier="free",
+                                              continuous=False):
+                seen.append(ev)
+            return seen
+
+        with self._patch_client(_FakeAsyncClient):
+            seen = asyncio.run(drive())
+
+        types = [e["type"] for e in seen]
+        self.assertIn("token", types)
+        self.assertIn("done", types)
+        done = next(e for e in seen if e["type"] == "done")
+        self.assertIn("2+2=4", done["content"])
+        self.assertEqual(done["usage"]["prompt_eval_count"], 20)
+        self.assertEqual(done["usage"]["eval_count"], 6)
+        # the assistant's reply was folded back into the conversation for the
+        # next turn / persistence
+        self.assertEqual(conv[-1], {"role": "assistant", "content": "Done: 2+2=4."})
+
+
 if __name__ == "__main__":
     unittest.main()

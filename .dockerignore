@@ -3,7 +3,15 @@
 __pycache__/
 *.pyc
 *.pyo
-venv/
+# NOTE: this BuildKit version anchors .dockerignore patterns at the context
+# root — bare names (e.g. "venv-airllm/") do NOT match nested dirs; use the
+# full path. (Verified: nested pattern matched only with the full path.)
+backend/venv/
+# Host-side tool venvs: never run inside the container (airllm = host systemd
+# sidecar; imagegen = created at runtime under the bind-mounted /app/backend).
+# Baking them in adds ~21GB of dead weight the bind mount would shadow anyway.
+backend/venv-airllm/
+backend/venv-imagegen/
 .env
 *.md
 install.sh

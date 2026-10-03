@@ -15,6 +15,9 @@ services:
       - OLLAMA_HOST=http://localhost:11434
       - LLAMA_CPP_HOST=http://localhost:8080
       - LMSTUDIO_HOST=http://localhost:1234
+      # AirLLM streamed-layer inference server (setup/airllm-linux.sh) — the
+      # container only reaches it; it never starts one itself.
+      - AIRLLM_HOST=http://localhost:8082
       - HOME=/home/nobara-user
       - PYTHONUNBUFFERED=1
     volumes:
