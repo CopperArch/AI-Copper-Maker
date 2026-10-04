@@ -1,4 +1,4 @@
-# AI Copper Maker (formerly LLM Coder) REV 1.3 (v1.3)
+# AI Copper Maker REV 1.3.4
 
 <p align="center"><img src="brand/logo.png" alt="AI Copper Maker" width="640"></p>
 
