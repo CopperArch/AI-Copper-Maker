@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import glob
 import json
 import logging
 import os
-import re
+import shutil
 from typing import Any
 
 from inference_backend import ModelCapabilities
@@ -63,6 +64,46 @@ class HardwareInfo:
     @property
     def has_rocm(self) -> bool:
         return self.rocm_available
+
+
+def _sysfs_display_gpus() -> list[dict[str, Any]]:
+    """Display adapters from /sys/class/drm: vendor, PCI id, VRAM in MiB.
+
+    Works without lspci (which the app's container does not ship) and skips
+    iGPUs by reporting every card so callers can pick the largest.
+    """
+    gpus: list[dict[str, Any]] = []
+    for path in sorted(glob.glob("/sys/class/drm/card*/device")):
+        try:
+            with open(os.path.join(path, "vendor")) as f:
+                vendor = int(f.read().strip(), 16)
+            vram_mb = 0
+            try:
+                with open(os.path.join(path, "mem_info_vram_total")) as f:
+                    vram_mb = int(f.read().strip()) // (1024 * 1024)
+            except (OSError, ValueError):
+                pass
+            pci_id = ""
+            try:
+                with open(os.path.join(path, "uevent")) as f:
+                    for line in f:
+                        if line.startswith("PCI_ID="):
+                            pci_id = line.split("=", 1)[1].strip()
+            except OSError:
+                pass
+            gpus.append({"vendor": vendor, "vram_mb": vram_mb, "pci_id": pci_id})
+        except (OSError, ValueError):
+            continue
+    return gpus
+
+
+def _rocm_toolkit_present() -> bool:
+    """True when a ROCm/HIP toolchain is installed, with or without rocm-smi."""
+    if shutil.which("rocminfo") or shutil.which("rocm-smi"):
+        return True
+    if shutil.which("hipcc") or os.path.exists("/opt/rocm"):
+        return True
+    return any(glob.glob("/usr/lib*/libamdhip64.so*"))
 
 
 def detect_hardware() -> HardwareInfo:
@@ -126,8 +167,14 @@ def detect_hardware() -> HardwareInfo:
         if torch.cuda.is_available():
             cuda_available = True
             cuda_version = torch.cuda.version()
-            gpu_vendor = "NVIDIA"
             gpu_model = torch.cuda.get_device_name(0)
+            # A ROCm torch build also exposes devices through torch.cuda, so
+            # derive the vendor from the device name instead of assuming NVIDIA.
+            gpu_vendor = (
+                "AMD"
+                if any(t in gpu_model for t in ("AMD", "Radeon", "Instinct"))
+                else "NVIDIA"
+            )
             gpu_vram_mb = torch.cuda.get_device_properties(0).total_memory // 1024 // 1024
         elif hasattr(torch, "rocm") and torch.cuda.is_available() is False:
             # ROCm path - check if ROCm is available
@@ -139,32 +186,27 @@ def detect_hardware() -> HardwareInfo:
     except ImportError:
         pass
 
-    # --- Fallback: lspci for GPU info (if PyTorch not available or no GPU found) ---
+    # --- Fallback: display adapters from sysfs (works without lspci, e.g. in the container) ---
     if gpu_vendor is None or gpu_model is None:
-        try:
-            lspci_output = subprocess_check(["lspci", "-nn"]).strip()
-            # Look for NVIDIA GPUs
-            nvidia_match = re.search(
-                r"(\d+:\d+\.\d+).+?NVIDIA [^\n]+",
-                lspci_output,
-                re.IGNORECASE,
-            )
-            if nvidia_match:
-                gpu_vendor = "NVIDIA"
-                gpu_model = nvidia_match.group(0).split("NVIDIA")[1].strip()
-            # Look for AMD/ATI GPUs
-            amd_match = re.search(
-                r"(\d+:\d+\.\d+).+?Radeon [^\n]+",
-                lspci_output,
-                re.IGNORECASE,
-            )
-            if amd_match:
+        gpus = _sysfs_display_gpus()
+        if gpus:
+            biggest = max(gpus, key=lambda g: g["vram_mb"])
+            if biggest["vendor"] == 0x1002:
                 gpu_vendor = "AMD"
-                gpu_model = amd_match.group(0).split("Radeon")[1].strip()
-            # Look for VRAM in lspci output (requires smbios or other methods)
-            # For now, leave gpu_vram_mb as None if detected only via lspci
-        except Exception:
-            pass  # lspci may not be available; we fall back to conservative defaults
+            elif biggest["vendor"] == 0x10de:
+                gpu_vendor = "NVIDIA"
+            if gpu_model is None:
+                if biggest["pci_id"]:
+                    gpu_model = f"{gpu_vendor} GPU (PCI {biggest['pci_id']})"
+                else:
+                    gpu_model = f"{gpu_vendor} GPU"
+            if gpu_vram_mb is None and biggest["vram_mb"] > 0:
+                gpu_vram_mb = biggest["vram_mb"]
+
+    # The ROCm toolkit can be installed without rocm-smi/rocminfo (hipcc-only
+    # or bare HIP runtime); report it so routing/fitness checks can rely on it.
+    if not rocm_available and _rocm_toolkit_present():
+        rocm_available = True
 
     # If we still have no GPU info but torch found something, use that
     if gpu_vendor is None and cuda_available:
@@ -206,18 +248,6 @@ def detect_hardware() -> HardwareInfo:
         json.dumps(info.to_dict(), default=str),
     )
     return info
-
-
-def subprocess_check(cmd: list[str]) -> str:
-    """Run a subprocess command and return stdout.
-
-    A small helper to avoid a top-level import of subprocess in this module
-    when not needed, but still support lspci fallback.
-    """
-    import subprocess
-
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    return result.stdout
 
 
 def check_gpu_memory_fitness(

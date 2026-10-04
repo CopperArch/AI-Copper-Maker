@@ -178,5 +178,57 @@ class StreamToolCallTests(unittest.TestCase):
         self.assertIn("exceeds the available context size", str(ctx.exception))
 
 
+class StreamChatNdjsonLocalTests(unittest.TestCase):
+    """_stream_chat_ndjson must stream token-by-token for local
+    OpenAI-compatible backends (llama-cpp/…) instead of waiting for the
+    whole response — the old non-streaming branch froze the UI for the
+    entire prefill+generation on long system prompts."""
+
+    def _collect(self, events):
+        _FakeClient.sse = _sse(events)
+
+        async def run():
+            return [line async for line in
+                    main._stream_chat_ndjson("llama-cpp/model",
+                                             [{"role": "user", "content": "hi"}],
+                                             timeout=60)]
+
+        with patch.object(main.httpx, "AsyncClient", _FakeClient):
+            return [json.loads(l) for l in asyncio.run(run())]
+
+    def test_streams_token_chunks_then_empty_done(self):
+        lines = self._collect([
+            {"choices": [{"delta": {"content": "He"}}]},
+            {"choices": [{"delta": {"content": "llo"}}]},
+            {"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 2}},
+        ])
+        # Per-token lines first, terminal done line with EMPTY content (the
+        # frontend accumulates message.content, so the done line must not
+        # repeat the whole reply — matches Ollama's native stream shape).
+        self.assertEqual([l.get("done") for l in lines], [None, None, True])
+        self.assertEqual([l["message"]["content"] for l in lines[:2]], ["He", "llo"])
+        self.assertEqual(lines[2]["message"]["content"], "")
+
+    def test_tool_call_surfaces_as_fence_not_executed(self):
+        lines = self._collect([
+            {"choices": [{"delta": {"content": "Let me check."}}]},
+            {"choices": [
+                {"delta": {
+                    "tool_calls": [
+                        {"index": 0, "id": "c1",
+                         "function": {"name": "run_command",
+                                      "arguments": "{\"cmd\": \"ls\"}"}}
+                    ]
+                }}
+            ]},
+        ])
+        contents = [l["message"]["content"] for l in lines]
+        self.assertEqual(len(lines), 3)  # text, fence, done
+        self.assertEqual(contents[0], "Let me check.")
+        self.assertIn("```tool", contents[1])
+        self.assertIn("run_command", contents[1])
+        self.assertEqual(lines[2].get("done"), True)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
