@@ -20,7 +20,9 @@ import atexit
 import os
 import shutil
 import tempfile
+import threading
 import unittest
+from queue import Empty
 from pathlib import Path
 from unittest.mock import patch
 
@@ -745,83 +747,93 @@ class TestPumpStreamer(unittest.TestCase):
         """Empty from the streamer's idle watchdog must NOT break the pump
         while the generation thread is still alive. The pump keeps waiting
         for the next token, which eventually arrives."""
-        gen_done = threading.Event()
 
-        class _FakeStreamer:
-            def __init__(self):
-                self._first = True
-                self._tokens = ["a", "b"]
+        async def _run():
+            import airllm_server  # env var is already set by setUp
+            gen_done = threading.Event()
 
-            def __iter__(self):
-                return self
+            class _FakeStreamer:
+                def __init__(self):
+                    self._first = True
+                    self._tokens = ["a", "b"]
 
-            def __next__(self):
-                if self._first:
-                    self._first = False
-                    raise Empty()
-                if self._tokens:
-                    return self._tokens.pop(0)
-                gen_done.set()
-                raise StopIteration
+                def __iter__(self):
+                    return self
 
-        streamer = _FakeStreamer()
-        loop = asyncio.get_running_loop()
-        queue = asyncio.Queue()
+                def __next__(self):
+                    if self._first:
+                        self._first = False
+                        raise Empty()
+                    if self._tokens:
+                        return self._tokens.pop(0)
+                    gen_done.set()
+                    raise StopIteration
 
-        t = threading.Thread(
-            target=airllm_server._pump_streamer,
-            args=(streamer, loop, queue, gen_done),
-            daemon=True)
-        t.start()
+            streamer = _FakeStreamer()
+            loop = asyncio.get_running_loop()
+            queue = asyncio.Queue()
 
-        items = []
-        while True:
-            item = await queue.get()
-            items.append(item)
-            if item is None:
-                break
+            t = threading.Thread(
+                target=airllm_server._pump_streamer,
+                args=(streamer, loop, queue, gen_done),
+                daemon=True)
+            t.start()
 
-        t.join(timeout=5)
-        self.assertEqual(items, ["a", "b", None])
+            items = []
+            while True:
+                item = await queue.get()
+                items.append(item)
+                if item is None:
+                    break
+
+            t.join(timeout=5)
+            self.assertEqual(items, ["a", "b", None])
+
+        asyncio.run(_run())
 
     def test_pump_streamer_stops_on_idle_timeout_when_generation_ended(self):
         """Empty when gen_done IS set must be treated as terminal: the pump
         stops and only the None sentinel is delivered (no tokens, no error)."""
-        gen_done = threading.Event()
 
-        class _FakeStreamer2:
-            def __init__(self):
-                self._first = True
+        async def _run():
+            import airllm_server  # env var is already set by setUp
+            gen_done = threading.Event()
 
-            def __iter__(self):
-                return self
+            class _FakeStreamer2:
+                def __init__(self):
+                    self._first = True
 
-            def __next__(self):
-                if self._first:
-                    self._first = False
-                    gen_done.set()
-                    raise Empty()
-                raise StopIteration
+                def __iter__(self):
+                    return self
 
-        streamer2 = _FakeStreamer2()
-        loop = asyncio.get_running_loop()
-        queue = asyncio.Queue()
+                def __next__(self):
+                    if self._first:
+                        self._first = False
+                        gen_done.set()
+                        raise Empty()
+                    raise StopIteration
 
-        t = threading.Thread(
-            target=airllm_server._pump_streamer,
-            args=(streamer2, loop, queue, gen_done),
-            daemon=True)
-        t.start()
+            streamer2 = _FakeStreamer2()
+            loop = asyncio.get_running_loop()
+            queue = asyncio.Queue()
 
-        items = []
-        while True:
-            item = await queue.get()
-            items.append(item)
-            if item is None:
-                break
+            t = threading.Thread(
+                target=airllm_server._pump_streamer,
+                args=(streamer2, loop, queue, gen_done),
+                daemon=True)
+            t.start()
 
-        t.join(timeout=5)
-        self.assertEqual(items, [None])
+            items = []
+            while True:
+                item = await queue.get()
+                items.append(item)
+                if item is None:
+                    break
+
+            t.join(timeout=5)
+            self.assertEqual(items, [None])
+
+        asyncio.run(_run())
 
 
 if __name__ == "__main__":

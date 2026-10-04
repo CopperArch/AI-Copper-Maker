@@ -5698,12 +5698,13 @@ async def _generate_with_backend(backend: Any, model_id: str, messages: list, ti
 async def _stream_chat_ndjson(model: str, messages: list, timeout: int = 600):
     """Shared streaming body for the token-by-token drafting endpoints below
     (App Analyzer, Project Generator, etc). For local Ollama this proxies
-    its own /api/chat stream through unchanged. Cloud providers and LM
-    Studio here are only ever called non-streaming (see _call_cloud_model /
-    _llm_complete's LM Studio branch), so instead this makes one call and
-    yields the whole result as a single chunk in the same
-    {"message": {"content": ...}} shape Ollama's stream uses line-by-line —
-    the frontend's parser already just accumulates that field either way."""
+    its own /api/chat stream through unchanged. Local OpenAI-compatible
+    servers (LM Studio / llama.cpp / AirLLM) stream token-by-token through
+    the shared OpenAI-compatible generator. Cloud providers are still
+    called non-streaming via _call_cloud_model and yield the whole result
+    as a single chunk. All cases use the {"message": {"content": ...}}
+    shape Ollama's stream uses line-by-line — the frontend's parser just
+    accumulates that field either way."""
     if _is_cloud_model(model):
         system = next((m["content"] for m in messages if m["role"] == "system"), "")
         convo = [m for m in messages if m["role"] != "system"]
@@ -5711,16 +5712,28 @@ async def _stream_chat_ndjson(model: str, messages: list, timeout: int = 600):
         yield (json.dumps({"message": {"content": text}, "done": True}) + "\n").encode()
         return
     if _local_openai_compatible_backend(model):
-        # LM Studio / llama.cpp / AirLLM: one non-streaming call through
-        # _llm_complete (they all share its OpenAI-compatible branch),
-        # yielded as a single chunk in Ollama's shape — the frontend's
-        # parser just accumulates message.content either way.
+        # LM Studio / llama.cpp / AirLLM: stream token-by-token through the
+        # shared OpenAI-compatible generator, translated into Ollama's NDJSON
+        # shape line-by-line so the frontend renders incrementally instead of
+        # waiting for the whole generation (the old single-chunk behaviour
+        # made these look hung during long prefills).
+        base_url, backend_model_id = _local_openai_compatible_backend(model)
         try:
-            text = await _llm_complete(model, messages, timeout=timeout)
+            async for event in _stream_openai_compatible_chat(base_url, backend_model_id, messages):
+                if event["type"] == "token":
+                    yield (json.dumps({"message": {"content": event["content"]}}) + "\n").encode()
+                elif event["type"] == "tool_use_stop":
+                    # This endpoint never executes tools — surface the call as
+                    # the same fence text the non-streaming path would have carried.
+                    fence = _native_tool_call_to_fence(
+                        {"name": event["name"], "id": event["id"], "input": event["input"]})
+                    yield (json.dumps({"message": {"content": fence}}) + "\n").encode()
+            # Ollama's native stream ends with a done:true chunk whose
+            # message.content is empty; match that so the frontend's
+            # content-accumulation adds nothing on the final line.
+            yield (json.dumps({"message": {"role": "assistant", "content": ""}, "done": True}) + "\n").encode()
         except Exception as e:
-            yield json.dumps({"error": f"Local model server error: {str(e)}"}).encode()
-            return
-        yield (json.dumps({"message": {"content": text}, "done": True}) + "\n").encode()
+            yield json.dumps({"error": "Local model server error: " + str(e)}).encode()
         return
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -9940,8 +9953,13 @@ def build_system_prompt(base: str) -> str:
     # guess from their training data (confirmed live: asked for today's date
     # with nothing injected, the model guessed a date from 2023) — so always
     # tell it the real current date/time regardless of which skills exist.
-    now = datetime.now().strftime("%A, %Y-%m-%d %H:%M")
-    base = f"{base}\n\nThe current date and time is {now}. Use this as ground truth for any question about today's date, time, or relative dates — do not guess from your training data."
+    # Hour precision, deliberately: a minute-precision timestamp here changes
+    # the system prompt every minute, which kills the llama.cpp KV prefix
+    # cache reuse for the ~8.5k tokens that follow it (every agent turn then
+    # pays the full prefill again). Direct "what time is it" queries never
+    # reach the model — _deterministic_date_answer answers them from the clock.
+    now = datetime.now().strftime("%A, %Y-%m-%d %H:00")
+    base = f"{base}\n\nThe current date and time is approximately {now} (hour precision). Use this as ground truth for any question about today's date, time, or relative dates — do not guess from your training data."
 
     skills = _load_json_list(SKILLS_FILE)
     if not skills:

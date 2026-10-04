@@ -13,6 +13,8 @@ SERVICE_DIR="$HOME/.config/systemd/user"
 SERVICE_FILE="$SERVICE_DIR/llama-cpp.service"
 LLAMA_CPP_BACKEND_FLAGS=""
 LLAMA_SPLIT_MODE=""
+ROCM_ENV=""
+LLAMA_FA_FLAGS=""
 CONTEXT_SIZE=4096
 N_THREADS=$(nproc 2>/dev/null || echo 4)
 BACKEND_LABEL="CPU"
@@ -28,9 +30,31 @@ detect_hardware() {
     echo "  RAM: ${TOTAL_RAM_GB}GB"
 
     # GPU detection
-    if command -v rocm-smi &>/dev/null 2>/dev/null; then
+    # ROCm: the toolkit may be present without rocm-smi (hipcc/rocminfo only,
+    # or just the HIP runtime libs), so check for any of them AND for an
+    # actual AMD display adapter — toolkit alone does not mean a usable GPU.
+    ROCM_TOOLKIT=0
+    if command -v rocm-smi &>/dev/null 2>/dev/null \
+       || command -v hipcc &>/dev/null 2>/dev/null \
+       || command -v rocminfo &>/dev/null 2>/dev/null \
+       || [ -d /opt/rocm ] \
+       || ls /usr/lib64/libamdhip64.so* >/dev/null 2>&1; then
+        ROCM_TOOLKIT=1
+    fi
+    if [ "$ROCM_TOOLKIT" -eq 1 ] && lspci 2>/dev/null | grep -qE 'AMD/ATI|Advanced Micro Devices.*Radeon|Radeon'; then
         BACKEND_LABEL="ROCm"
+        # VRAM: prefer rocm-smi, fall back to the largest sysfs vram total
+        # (skips small iGpus when a discrete card is present).
         VRAM_GB=$(rocm-smi --showmeminfo vram 2>/dev/null | grep -oP 'Total:\s*\K[0-9]+' | head -1 || echo "0")
+        if [ "$VRAM_GB" -le 0 ] 2>/dev/null; then
+            VRAM_BYTES=0
+            for f in /sys/class/drm/card*/device/mem_info_vram_total; do
+                [ -r "$f" ] || continue
+                v=$(cat "$f" 2>/dev/null || echo 0)
+                [ "$v" -gt "$VRAM_BYTES" ] 2>/dev/null && VRAM_BYTES=$v
+            done
+            VRAM_GB=$((VRAM_BYTES / 1024 / 1024))
+        fi
         if [ "$VRAM_GB" -gt 0 ] 2>/dev/null; then
             echo "  GPU: ROCm (${VRAM_GB}MB VRAM)"
         else
@@ -39,6 +63,13 @@ detect_hardware() {
         # llama.cpp builds with HIP/ROCm support when installed from Fedora repos
         N_GPU_LAYERS=999
         LLAMA_SPLIT_MODE="--split-mode layer"
+        # This HSA runtime enumerates the CPU as a second "ROCm" device;
+        # without masking it, llama.cpp splits the KV cache onto the CPU
+        # and decode collapses to CPU speed.
+        ROCM_ENV="HIP_VISIBLE_DEVICES=0"
+        # q8_0 KV cache requires flash attention on current builds; both
+        # together halve 16k-context KV VRAM vs f16.
+        LLAMA_FA_FLAGS="-fa -ctk q8_0 -ctv q8_0"
     elif command -v nvidia-smi &>/dev/null 2>/dev/null; then
         BACKEND_LABEL="CUDA"
         VRAM_GB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 || echo "0")
@@ -88,10 +119,13 @@ select_model() {
         MODEL_FILE="qwen2.5-0.5b-instruct-q4_k_m.gguf"
         MODEL_NAME="qwen2.5-0.5b-instruct-q4_k_m.gguf"
     else
-        # Use a 7B model capable of leveraging GPU/ROCm
-        MODEL_REPO="QuantFactory/qwen2.5-7b-instruct-GGUF"
-        MODEL_FILE="qwen2.5-7b-instruct-Q4_K_M.gguf"
-        MODEL_NAME="qwen2.5-7b-instruct-Q4_K_M.gguf"
+        # Use a 7B model capable of leveraging GPU/ROCm.
+        # The official Qwen repo ships Q4_K_M as two shards; llama-server
+        # loads the whole model from the first shard.
+        MODEL_REPO="Qwen/Qwen2.5-7B-Instruct-GGUF"
+        MODEL_FILE="qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf"
+        MODEL_NAME="qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf"
+        MODEL_SHARD2="qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf"
     fi
     MODEL_URL="https://huggingface.co/${MODEL_REPO}/resolve/main/${MODEL_FILE}"
     echo "Selected model: ${MODEL_NAME} (${BACKEND_LABEL})"
@@ -135,11 +169,27 @@ download_model() {
     fi
 
     echo "Model downloaded to $MODELS_DIR/$MODEL_NAME"
+
+    if [ -n "${MODEL_SHARD2:-}" ]; then
+        echo "Downloading second shard ${MODEL_SHARD2}..."
+        curl -L --progress-bar -o "$MODELS_DIR/$MODEL_SHARD2" \
+            "https://huggingface.co/${MODEL_REPO}/resolve/main/${MODEL_SHARD2}" || {
+            echo "Second shard download failed. Re-run to retry."
+            exit 1
+        }
+        echo "Second shard downloaded."
+    fi
 }
 
 # ── Find model path ─────────────────────────────────────────────────
 find_model() {
-    MODEL_PATH="$(ls -A "$MODELS_DIR"/*.gguf 2>/dev/null | head -1)"
+    # Prefer the exact model this script selected (with multi-shard GGUFs,
+    # "first *.gguf in the dir" would pick an unrelated stale model).
+    if [ -n "${MODEL_NAME:-}" ] && [ -f "$MODELS_DIR/$MODEL_NAME" ]; then
+        MODEL_PATH="$MODELS_DIR/$MODEL_NAME"
+    else
+        MODEL_PATH="$(ls -A "$MODELS_DIR"/*.gguf 2>/dev/null | head -1)"
+    fi
     if [ -z "$MODEL_PATH" ]; then
         echo "ERROR: No .gguf model found in $MODELS_DIR."
         exit 1
@@ -150,12 +200,22 @@ find_model() {
 # ── Build llama-server flags ────────────────────────────────────
 build_flags() {
     local flags=""
+    # Explicit full offload: some builds default to 0 GPU layers.
     if [ "$N_GPU_LAYERS" -gt 0 ]; then
         flags="--gpu-layers ${N_GPU_LAYERS}"
     fi
     if [ -n "$LLAMA_SPLIT_MODE" ]; then
         flags="${flags} ${LLAMA_SPLIT_MODE}"
     fi
+    # q8_0 KV requires flash attention on current builds; only use it when
+    # the context is large enough for it to matter (f16 KV is fine at 4k).
+    if [ -n "$LLAMA_FA_FLAGS" ] && [ "$CONTEXT_SIZE" -ge 8192 ]; then
+        flags="${flags} ${LLAMA_FA_FLAGS}"
+    fi
+    # Reuse the KV cache across requests sharing a prompt prefix (the app's
+    # agent loop re-sends the same ~9k-token system prompt every turn —
+    # without this, every turn pays the full prefill again).
+    flags="${flags} --cache-reuse 512"
     echo "$flags"
 }
 
@@ -182,8 +242,9 @@ test_server() {
 # ── Create systemd service ──────────────────────────────────
 create_service() {
     mkdir -p "$SERVICE_DIR"
-    local flags
+    local flags rocm_env_line=""
     flags=$(build_flags)
+    [ -n "$ROCM_ENV" ] && rocm_env_line="Environment=${ROCM_ENV}"
 
     cat > "$SERVICE_FILE" <<EOF
 [Unit]
@@ -193,10 +254,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=$LLAMA_SERVER --model $MODEL_PATH --host 0.0.0.0 --port 8080 --ctx-size $CONTEXT_SIZE --threads $N_THREADS ${flags}
+ExecStart=$LLAMA_SERVER --model $MODEL_PATH --host 127.0.0.1 --port 8080 --ctx-size $CONTEXT_SIZE --threads $N_THREADS ${flags}
 Restart=on-failure
 RestartSec=5
 Environment=PATH=/usr/bin:/usr/local/bin:/bin
+${rocm_env_line}
 
 [Install]
 WantedBy=default.target
