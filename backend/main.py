@@ -631,8 +631,13 @@ class ExecuteRequest(BaseModel):
     code: str
 
 class SearchRequest(BaseModel):
+    # 10, not 5: factual answers to compound questions frequently sit past
+    # rank 5 in a relevance list (confirmed live: "Saturn has the most
+    # moons" was rank 10 for the sentence query while ranks 1-5 were generic
+    # pages that actively misdirected a 14B model). One extra result in the
+    # same API call costs ~200 tokens of tool result, no extra latency.
     query: str
-    max_results: int = 5
+    max_results: int = 10
 
 class ImageGenRequest(BaseModel):
     prompt: str
@@ -1815,7 +1820,11 @@ async def _ddg_instant_answer_search(query: str, max_results: int) -> list[dict]
 
 async def _wikipedia_search(query: str, max_results: int) -> list[dict]:
     """Wikipedia's own public search API — second independent fallback,
-    particularly useful for factual/encyclopedic queries."""
+    particularly useful for factual/encyclopedic queries. Uses `list=search`
+    (full-text relevance search), NOT `opensearch`: opensearch is a
+    title-prefix matcher that returns zero rows for sentence-shaped queries
+    ("current count of moons for each planet…"), which silently disabled this
+    fallback precisely when a factual question needed it — confirmed live."""
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             # Wikipedia's API rejects requests with no identifying User-Agent
@@ -1823,15 +1832,23 @@ async def _wikipedia_search(query: str, max_results: int) -> list[dict]:
             # robot policy" against httpx's default UA) — required by their
             # API etiquette, not optional.
             r = await client.get("https://en.wikipedia.org/w/api.php", params={
-                "action": "opensearch", "search": query, "limit": max_results, "format": "json",
+                "action": "query", "list": "search", "srsearch": query,
+                "srlimit": max_results, "format": "json",
             }, headers={"User-Agent": "AI-Copper-Maker/1.3 (local personal-use coding assistant; "
                                        "https://github.com/CopperArch/AI-Copper-Maker)"})
             if r.status_code != 200:
                 return []
-            _, titles, descs, urls = r.json()
+            hits = (r.json().get("query") or {}).get("search") or []
     except Exception:
         return []
-    return [{"title": t, "url": u, "snippet": d} for t, d, u in zip(titles, descs, urls)]
+    results = []
+    for hit in hits:
+        title = hit.get("title", "")
+        snippet = re.sub(r"<[^>]+>", "", hit.get("snippet", "")).replace("&#039;", "'")
+        results.append({"title": title,
+                        "url": "https://en.wikipedia.org/wiki/" + title.replace(" ", "_"),
+                        "snippet": snippet})
+    return results
 
 async def _web_search_with_fallback(query: str, max_results: int) -> tuple[list[dict], str]:
     """Tries DuckDuckGo's full web results first; on its shared rate-limit
@@ -2654,8 +2671,8 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "web_search",
-            "description": "Search the web for documentation, tutorials, APIs, or any information",
+        "name": "web_search",
+        "description": "Search the web for current facts, documentation, tutorials, or APIs. Results are snippets, not whole pages: if they don't directly contain the exact fact you need (a count, date, version, name), re-search with a more targeted query built around the question's key entity instead of answering from memory. When fresh search results conflict with what you remember, trust the retrieved source and say where it came from.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -3028,7 +3045,16 @@ async def execute_tool(name: str, args: dict, model: str = "", allow_subagents: 
                         "results found'.")
             lines = [f"- [{r['title']}]({r['url']}): {r['snippet']}" for r in results]
             body = "\n".join(lines) if lines else "No results found."
-            return f"{body}\n\n[Note: {note}]" if note else body
+            # Right here, not in the system prompt: at the moment the model
+            # is about to answer, a 14B-scale model reliably follows a
+            # same-context nudge far better than a buried instruction —
+            # confirmed live, it answered stale facts from memory after a
+            # single broad query even with re-search guidance up top.
+            hint = ("[If the exact current fact you need (a count, date, or "
+                    "version) is not stated in these snippets, run one more "
+                    "web_search focused on the specific entity in the user's "
+                    "question before answering from memory.]")
+            return f"{body}\n\n[Note: {note}]\n\n{hint}" if note else f"{body}\n\n{hint}"
 
         elif name == "read_file":
             req = FileReadRequest(**args)
@@ -5498,9 +5524,14 @@ def _local_openai_compatible_backend(model: str) -> tuple[str, str] | None:
         return AIRLLM, model.split("/", 1)[1]
     return None
 
-async def _stream_openai_compatible_chat(base_url: str, model_id: str, messages: list):
+async def _stream_openai_compatible_chat(base_url: str, model_id: str, messages: list, timeout: int = 600):
     """One streaming /v1/chat/completions call against any local
-    OpenAI-compatible server. Yields events in the agent-loop's shape:
+    OpenAI-compatible server. `timeout` is httpx's per-read (inter-byte)
+    timeout: the first streamed byte only arrives after the server finishes
+    prefilling the whole prompt, so the value must cover the slowest
+    prefill we expect to survive — a 120 s default used to kill turns on
+    long system prompts (and on CPU backends reliably). Yields events in
+    the agent-loop's shape:
       {"type": "token", "content": ...}
       {"type": "tool_use_start"|"tool_use_delta"|"tool_use_stop", ...}
     and finally {"type": "usage", "usage": {...}} (or nothing, when the
@@ -5518,7 +5549,7 @@ async def _stream_openai_compatible_chat(base_url: str, model_id: str, messages:
         completed call emitted as tool_use_stop after the stream ends.
     """
     _pending_tool_calls = {}  # tool_call index -> {"id", "name", "input"}
-    async with httpx.AsyncClient(timeout=120) as client:
+    async with httpx.AsyncClient(timeout=timeout) as client:
         async with client.stream(
             "POST", f"{base_url}/v1/chat/completions",
             json={"model": model_id, "messages": messages, "stream": True,
@@ -5719,7 +5750,8 @@ async def _stream_chat_ndjson(model: str, messages: list, timeout: int = 600):
         # made these look hung during long prefills).
         base_url, backend_model_id = _local_openai_compatible_backend(model)
         try:
-            async for event in _stream_openai_compatible_chat(base_url, backend_model_id, messages):
+            async for event in _stream_openai_compatible_chat(
+                    base_url, backend_model_id, messages, timeout=timeout):
                 if event["type"] == "token":
                     yield (json.dumps({"message": {"content": event["content"]}}) + "\n").encode()
                 elif event["type"] == "tool_use_stop":
@@ -6943,7 +6975,10 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
                 # tools" (also confirmed live: a direct call that DID fit
                 # emitted the fence perfectly while loop calls clipped).
                 _pending_tool_call = None
-                async with httpx.AsyncClient(timeout=120) as client:
+                # Per-read timeout, not a total: the first byte only arrives
+                # after Ollama's prefill, so this must cover slow prefill the
+                # same way the OpenAI-compatible branch does.
+                async with httpx.AsyncClient(timeout=600) as client:
                     async with client.stream(
                         "POST", f"{OLLAMA}/api/chat",
                         json={"model": model, "messages": messages, "stream": True,
@@ -7002,6 +7037,23 @@ async def _agent_turns(model: str, conv: list, max_turns: int = 50, system: str 
                 return
             continue
 
+        if not response_text.strip():
+            # A zero-token final answer is a failure, not an answer — a dead
+            # or overloaded local model used to end the turn here with an
+            # empty bubble the frontend renders as "nothing happened" (and an
+            # empty row persisted to the session). Counts toward the same
+            # 3-attempt budget as stream errors, so a backend that alternates
+            # timeouts and empty replies can't bank 3+3 tries.
+            consecutive_errors += 1
+            yield {"type": "error",
+                   "content": (f"The model returned an empty response "
+                               f"(attempt {consecutive_errors} of 3) — the "
+                               f"selected backend may be stuck or overloaded. "
+                               f"Retrying, or pick another model."),
+                   "conversation": conv}
+            if consecutive_errors >= 3:
+                return
+            continue
         consecutive_errors = 0
         tool_spec, cut_at = _extract_tool_call(response_text)
         if not tool_spec:

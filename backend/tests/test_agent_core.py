@@ -265,6 +265,8 @@ class _FakeAsyncClient:
         type(self).calls.append(("get", url, None))
 
         class _Resp:
+            status_code = 200
+
             def raise_for_status(self):
                 return None
 
@@ -388,6 +390,82 @@ class AirllmIntegrationTests(unittest.TestCase):
         # the assistant's reply was folded back into the conversation for the
         # next turn / persistence
         self.assertEqual(conv[-1], {"role": "assistant", "content": "Done: 2+2=4."})
+
+    def test_agent_turns_empty_response_is_error_not_silent_done(self):
+        # A zero-token stream used to end the turn with `done` carrying
+        # empty content: the frontend rendered "nothing happened", and an
+        # empty assistant row was persisted to the session. It must count
+        # as a failed attempt instead — reported, retried within the same
+        # 3-attempt budget as stream errors, with no empty reply folded in.
+        url = f"{main.LLAMA_CPP}/v1/chat/completions"
+        self.sse[url] = _sse_bytes([
+            {"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 0}},
+        ])
+        self.jsonb[f"{main.OLLAMA}/api/show"] = {"details": {"context_length": 16384}}
+
+        conv = [{"role": "user", "content": "what is 2+2?"}]
+
+        async def drive():
+            seen = []
+            async for ev in main._agent_turns("llama-cpp/model.gguf", conv, max_turns=3,
+                                              tier="free", continuous=False):
+                seen.append(ev)
+            return seen
+
+        with self._patch_client(_FakeAsyncClient):
+            seen = asyncio.run(drive())
+
+        types = [e["type"] for e in seen]
+        self.assertNotIn("done", types)
+        errors = [e for e in seen if e["type"] == "error"]
+        self.assertEqual(len(errors), 3)
+        self.assertIn("empty response", errors[0]["content"])
+        self.assertEqual(conv, [{"role": "user", "content": "what is 2+2?"}])
+
+
+class WebSearchFallbackTests(unittest.TestCase):
+    def setUp(self):
+        self.jsonb = {}
+        _FakeAsyncClient.sse_by_url = {}
+        _FakeAsyncClient.json_by_url = self.jsonb
+        _FakeAsyncClient.calls = []
+
+    def _patch_client(self):
+        return patch.object(main.httpx, "AsyncClient", _FakeAsyncClient)
+
+    def test_wikipedia_fallback_parses_full_text_search_shape(self):
+        # The fallback must use `list=search` (full-text relevance): opensearch
+        # is a title-prefix matcher that returned zero rows for
+        # sentence-shaped queries, silently disabling the fallback exactly
+        # when a factual question needed it (confirmed live).
+        url = "https://en.wikipedia.org/w/api.php"
+        self.jsonb[url] = {"query": {"search": [
+            {"title": "Moons of Saturn",
+             "snippet": "<span class=\"searchmatch\">Saturn</span> has 293 moons "
+                        "with confirmed orbits&#039;"}]}}
+
+        async def run():
+            return await main._wikipedia_search(
+                "current count of moons for each planet in the solar system", 5)
+
+        with self._patch_client():
+            results = asyncio.run(run())
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["title"], "Moons of Saturn")
+        self.assertIn("293 moons", results[0]["snippet"])
+        self.assertEqual(results[0]["url"], "https://en.wikipedia.org/wiki/Moons_of_Saturn")
+
+    def test_wikipedia_fallback_returns_empty_on_legacy_opensearch_shape(self):
+        # The old opensearch wire shape is a bare 4-list — the parser must
+        # degrade to [] instead of crashing.
+        url = "https://en.wikipedia.org/w/api.php"
+        self.jsonb[url] = ["query", ["Some page"], ["desc"], ["https://x"]]
+
+        async def run():
+            return await main._wikipedia_search("anything", 5)
+
+        with self._patch_client():
+            self.assertEqual(asyncio.run(run()), [])
 
 
 if __name__ == "__main__":

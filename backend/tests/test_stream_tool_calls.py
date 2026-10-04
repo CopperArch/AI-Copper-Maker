@@ -158,6 +158,32 @@ class StreamToolCallTests(unittest.TestCase):
         ])
         self.assertNotIn("tool_use_stop", [e["type"] for e in ev])
 
+    def test_timeout_parameter_defaults_to_six_hundred(self):
+        import inspect
+        sig = inspect.signature(main._stream_openai_compatible_chat)
+        # The old hardcoded 120 s httpx read timeout killed local-model
+        # turns whose prefill took longer than 120 s (the first streamed
+        # byte only arrives after the whole prompt is prefilled).
+        self.assertEqual(sig.parameters["timeout"].default, 600)
+
+    def test_timeout_is_forwarded_to_httpx_client(self):
+        captured = {}
+
+        class _Capture(_FakeClient):
+            def __init__(self, *args, **kwargs):
+                captured.update(kwargs)
+
+        _FakeClient.sse = _sse([{"choices": [{"delta": {"content": "ok"}}]}])
+
+        async def collect():
+            return [e async for e in main._stream_openai_compatible_chat(
+                "http://x", "m", [{"role": "user", "content": "hi"}], timeout=777)]
+
+        with patch.object(main.httpx, "AsyncClient", _Capture):
+            events = asyncio.run(collect())
+        self.assertEqual(captured.get("timeout"), 777)
+        self.assertEqual([e["content"] for e in events if e["type"] == "token"], ["ok"])
+
     def test_error_chunk_raises_instead_of_silent_empty(self):
         # LM Studio's llama.cpp engine answers HTTP 200 but carries the
         # engine error in the terminal chunk when the prompt exceeds the
@@ -208,6 +234,27 @@ class StreamChatNdjsonLocalTests(unittest.TestCase):
         self.assertEqual([l.get("done") for l in lines], [None, None, True])
         self.assertEqual([l["message"]["content"] for l in lines[:2]], ["He", "llo"])
         self.assertEqual(lines[2]["message"]["content"], "")
+
+    def test_chat_ndjson_forwards_its_own_timeout(self):
+        # The wrapper accepts a `timeout` but used to drop it for local
+        # backends — the generator's hardcoded 120 s read timeout was in
+        # force no matter what the caller passed.
+        captured = {}
+
+        async def fake_chat(base_url, model_id, messages, **kwargs):
+            captured.update(kwargs)
+            yield {"type": "token", "content": "ok"}
+
+        async def run():
+            return [line async for line in
+                    main._stream_chat_ndjson("llama-cpp/model",
+                                             [{"role": "user", "content": "hi"}],
+                                             timeout=555)]
+
+        with patch.object(main, "_stream_openai_compatible_chat", fake_chat):
+            lines = [json.loads(l) for l in asyncio.run(run())]
+        self.assertEqual(captured.get("timeout"), 555)
+        self.assertEqual(lines[0]["message"]["content"], "ok")
 
     def test_tool_call_surfaces_as_fence_not_executed(self):
         lines = self._collect([
